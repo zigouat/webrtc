@@ -270,8 +270,9 @@ pub const RtpTransceiver = struct {
     addedByAddTrack: bool = false,
     transport: *DtlsTransport,
 
-    pub fn initFromTrack(track: MediaStreamTrack, transport: *DtlsTransport) RtpTransceiver {
-        return .{
+    pub fn initFromTrack(allocator: std.mem.Allocator, track: MediaStreamTrack, transport: *DtlsTransport) !*RtpTransceiver {
+        const tr = try allocator.create(RtpTransceiver);
+        tr.* = .{
             .kind = track.kind,
             .direction = .sendrecv,
             .sender = .{ .track = track },
@@ -279,10 +280,13 @@ pub const RtpTransceiver = struct {
             .addedByAddTrack = true,
             .transport = transport,
         };
+
+        return tr;
     }
 
-    pub fn initFromSdpMedia(sdp_media: *const SDPSession.SDPMedia, index: u8) RtpTransceiver {
-        return .{
+    pub fn initFromSdpMedia(allocator: std.mem.Allocator, sdp_media: *const SDPSession.SDPMedia, index: u8) !*RtpTransceiver {
+        const tr = try allocator.create(RtpTransceiver);
+        tr.* = .{
             .direction = .recvonly,
             .kind = sdp_media.kind,
             .receiver = .init(sdp_media.kind),
@@ -291,11 +295,12 @@ pub const RtpTransceiver = struct {
             .sdp_mline_index = index,
             .transport = undefined,
         };
+
+        return tr;
     }
 
     pub fn deinit(tr: *RtpTransceiver, allocator: std.mem.Allocator) void {
-        _ = tr;
-        _ = allocator;
+        allocator.destroy(tr);
     }
 
     pub fn toSdpMedia(tr: *RtpTransceiver, allocator: std.mem.Allocator) !SDPSession.SDPMedia {
@@ -363,6 +368,29 @@ pub const RtpTransceiver = struct {
         std.mem.writeInt(u96, buffer[0..12], @bitCast(header), .big);
         @memcpy(buffer[12 .. packet.payload.len + 12], packet.payload);
         try tr.transport.sendRtp(buffer[0 .. packet.payload.len + 12]);
+    }
+
+    test "canAssocaiteTrack" {
+        var tr: RtpTransceiver = .{
+            .sender = .{},
+            .receiver = .{ .track = .{ .id = "track", .kind = .video } },
+            .direction = .recvonly,
+            .kind = .video,
+            .transport = undefined,
+        };
+
+        try std.testing.expect(tr.canAssociateTrack(.video));
+
+        tr.kind = .audio;
+        try std.testing.expect(!tr.canAssociateTrack(.video));
+
+        tr.kind = .video;
+        tr.sender.track = .{ .id = "track-1", .kind = .video };
+        try std.testing.expect(!tr.canAssociateTrack(.video));
+
+        tr.sender.track = null;
+        tr.stopping = true;
+        try std.testing.expect(!tr.canAssociateTrack(.video));
     }
 };
 

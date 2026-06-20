@@ -1,5 +1,6 @@
 const std = @import("std");
 const PeerConnection = @import("../peer_connection.zig");
+const webrtc = @import("../webrtc.zig");
 
 const testing = std.testing;
 const io = testing.io;
@@ -25,11 +26,31 @@ test "setLocalDescription: set offer multiple times" {
     var offer = try pc.createOffer();
     try pc.setLocalDescription(offer);
 
-    try pc.addTrack(.{ .id = "video-track", .kind = .video });
-    try pc.addTrack(.{ .id = "audio-track", .kind = .audio });
+    _ = try pc.addTrack(.{ .id = "video-track", .kind = .video });
+    _ = try pc.addTrack(.{ .id = "audio-track", .kind = .audio });
 
     offer = try pc.createOffer();
     try pc.setLocalDescription(offer);
+}
+
+test "addTrack" {
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    defer pc.deinit();
+
+    var track: webrtc.MediaStreamTrack = .{ .id = "track1", .kind = .video };
+
+    _ = try pc.addTrack(track);
+    try std.testing.expectEqual(1, pc.transceivers.items.len);
+
+    track.id = "track2";
+    try pc.transceivers.append(pc.allocator, try .initFromTrack(pc.allocator, track, &pc.dtls_transport));
+    pc.transceivers.items[1].direction = .recvonly;
+    pc.transceivers.items[1].sender.track = null;
+
+    _ = try pc.addTrack(track);
+    try std.testing.expectEqual(2, pc.transceivers.items.len);
+    try std.testing.expect(pc.transceivers.items[1].sender.track != null);
+    try std.testing.expectEqualStrings("track2", pc.transceivers.items[1].sender.track.?.id);
 }
 
 test "Negotiate between peers" {
@@ -39,8 +60,8 @@ test "Negotiate between peers" {
     var pc2: PeerConnection = try .init(io, allocator, .{});
     defer pc2.deinit();
 
-    try pc1.addTrack(.{ .id = "video1", .kind = .video });
-    try pc1.addTrack(.{ .id = "video2", .kind = .video });
+    _ = try pc1.addTrack(.{ .id = "video1", .kind = .video });
+    _ = try pc1.addTrack(.{ .id = "video2", .kind = .video });
 
     try negotiate(&pc1, &pc2);
 

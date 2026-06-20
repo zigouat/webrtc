@@ -35,7 +35,7 @@ pending_remote_description: ?ParsedSesssionDescription = null,
 last_offer: ParsedSesssionDescription = .empty(.offer),
 last_answer: ParsedSesssionDescription = .empty(.answer),
 
-transceivers: std.ArrayList(webrtc.RtpTransceiver) = .empty,
+transceivers: std.ArrayList(*webrtc.RtpTransceiver) = .empty,
 dtls_transport: DtlsTransport,
 demuxer: Demuxer,
 
@@ -102,7 +102,7 @@ pub fn deinit(pc: *PeerConnection) void {
     pc.queue.close(io);
     pc.allocator.free(pc.queue_buffer);
 
-    for (pc.transceivers.items) |*tr| tr.deinit(pc.allocator);
+    for (pc.transceivers.items) |tr| tr.deinit(pc.allocator);
     pc.transceivers.deinit(pc.allocator);
 
     if (pc.local_description) |*local_desc| local_desc.deinit(pc.allocator);
@@ -117,11 +117,11 @@ pub fn deinit(pc: *PeerConnection) void {
     pc.demuxer.deinit();
 }
 
-pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack) Error!void {
+pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack) Error!*webrtc.RtpSender {
     try pc.checkNotClosed();
 
-    const transceiver = blk: {
-        for (pc.transceivers.items) |*tr| if (tr.canAssociateTrack(track.kind)) {
+    const maybe_transceiver = blk: {
+        for (pc.transceivers.items) |tr| if (tr.canAssociateTrack(track.kind)) {
             tr.setSenderTrack(track);
             break :blk tr;
         };
@@ -129,7 +129,15 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack) Error!void 
         break :blk null;
     };
 
-    if (transceiver == null) try pc.transceivers.append(pc.allocator, .initFromTrack(track, &pc.dtls_transport));
+    const tr = maybe_transceiver orelse blk: {
+        const tr = try webrtc.RtpTransceiver.initFromTrack(pc.allocator, track, &pc.dtls_transport);
+        errdefer pc.allocator.destroy(tr);
+        try pc.transceivers.append(pc.allocator, tr);
+        break :blk tr;
+    };
+
+    //TODO: update negotiation needed flag
+    return &tr.sender;
 }
 
 pub fn addTransceiverFromTrack(track: webrtc.MediaStreamTrack) Error!void {
@@ -153,7 +161,7 @@ pub fn createOffer(pc: *PeerConnection) !webrtc.SessionDescription {
 
     const count_medias = blk: {
         var count: usize = 0;
-        for (transceivers) |*tr| if (tr.current_direction != .stopped or tr.mid != null) {
+        for (transceivers) |tr| if (tr.current_direction != .stopped or tr.mid != null) {
             count += 1;
         };
         break :blk count;
@@ -166,7 +174,7 @@ pub fn createOffer(pc: *PeerConnection) !webrtc.SessionDescription {
         pc.allocator.free(medias);
     }
 
-    for (transceivers) |*tr| {
+    for (transceivers) |tr| {
         if (tr.current_direction == .stopped and tr.mid == null) continue;
         medias[mline_idx] = try tr.toSdpMedia(pc.allocator);
         if (tr.mid == null) _ = try std.fmt.bufPrint(&medias[mline_idx].mid, "{}", .{pc.mid});
@@ -461,11 +469,12 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescr
                     break :blk tr;
                 },
                 .offer => {
-                    for (pc.transceivers.items) |*tr| if (tr.canAssociateMedia(media)) break :blk tr;
-                    const entry = try pc.transceivers.addOne(pc.allocator);
-                    entry.* = .initFromSdpMedia(media, @intCast(idx));
-                    entry.transport = &pc.dtls_transport;
-                    break :blk entry;
+                    for (pc.transceivers.items) |tr| if (tr.canAssociateMedia(media)) break :blk tr;
+                    const tr = try webrtc.RtpTransceiver.initFromSdpMedia(pc.allocator, media, @intCast(idx));
+                    errdefer tr.deinit(pc.allocator);
+                    tr.transport = &pc.dtls_transport;
+                    try pc.transceivers.append(pc.allocator, tr);
+                    break :blk tr;
                 },
                 else => unreachable,
             }
@@ -544,14 +553,14 @@ fn updateSignalingStateToStable(pc: *PeerConnection) void {
 }
 
 fn findTransceiverByMediaIndex(pc: *PeerConnection, index: usize) ?*webrtc.RtpTransceiver {
-    for (pc.transceivers.items) |*transceiver| if (transceiver.sdp_mline_index) |tr_index| if (tr_index == index)
+    for (pc.transceivers.items) |transceiver| if (transceiver.sdp_mline_index) |tr_index| if (tr_index == index)
         return transceiver;
 
     return null;
 }
 
 fn findTransceiverByMid(pc: *PeerConnection, mid: []const u8) ?*webrtc.RtpTransceiver {
-    for (pc.transceivers.items) |*transceiver| if (transceiver.mid) |tr_mid| if (std.mem.eql(u8, tr_mid, mid))
+    for (pc.transceivers.items) |transceiver| if (transceiver.mid) |tr_mid| if (std.mem.eql(u8, tr_mid, mid))
         return transceiver;
 
     return null;
@@ -629,7 +638,7 @@ fn deleteTransceivers(pc: *PeerConnection) void {
 
     var idx: usize = 0;
     while (idx < pc.transceivers.items.len) {
-        const tr = &pc.transceivers.items[idx];
+        const tr = pc.transceivers.items[idx];
         if (tr.direction == .stopped and tr.mid != null and (local.medias[tr.sdp_mline_index.?].port == 0 or
             remote.medias[tr.sdp_mline_index.?].port == 0))
         {
