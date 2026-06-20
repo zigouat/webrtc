@@ -43,14 +43,41 @@ test "addTrack" {
     try std.testing.expectEqual(1, pc.transceivers.items.len);
 
     track.id = "track2";
-    try pc.transceivers.append(pc.allocator, try .initFromTrack(pc.allocator, track, &pc.dtls_transport));
-    pc.transceivers.items[1].direction = .recvonly;
-    pc.transceivers.items[1].sender.track = null;
+    const tr = try pc.addTransceiverFromKind(.video, .{ .direction = .recvonly });
+    try std.testing.expect(tr.sender.track == null);
 
-    _ = try pc.addTrack(track);
+    const sender = try pc.addTrack(track);
+    try std.testing.expectEqual(sender, &tr.sender);
     try std.testing.expectEqual(2, pc.transceivers.items.len);
-    try std.testing.expect(pc.transceivers.items[1].sender.track != null);
-    try std.testing.expectEqualStrings("track2", pc.transceivers.items[1].sender.track.?.id);
+    try std.testing.expect(tr.sender.track != null);
+    try std.testing.expectEqualStrings("track2", tr.sender.track.?.id);
+}
+
+test "addTransceiver" {
+    {
+        var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+        defer pc.deinit();
+
+        const track: webrtc.MediaStreamTrack = .{ .id = "track1", .kind = .video };
+
+        const tr = try pc.addTransceiverFromTrack(track, .{ .direction = .sendrecv });
+        try std.testing.expectEqual(1, pc.transceivers.items.len);
+        try std.testing.expectEqual(.sendrecv, tr.direction);
+        try std.testing.expectEqualStrings(track.id, tr.sender.track.?.id);
+
+        const tr2 = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
+        try std.testing.expectEqual(2, pc.transceivers.items.len);
+        try std.testing.expectEqual(.recvonly, tr2.direction);
+        try std.testing.expect(tr2.sender.track == null);
+    }
+
+    {
+        var failing_alloc = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 5 });
+        var pc = try PeerConnection.init(testing.io, failing_alloc.allocator(), .{});
+        defer pc.deinit();
+
+        try std.testing.expectError(error.OutOfMemory, pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly }));
+    }
 }
 
 test "Negotiate between peers" {
