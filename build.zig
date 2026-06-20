@@ -27,6 +27,10 @@ pub fn build(b: *std.Build) void {
     mod.linkLibrary(mbedtls_artifact);
     mod.addIncludePath(b.path("src/dtls"));
 
+    if (target.result.os.tag == .windows) {
+        mod.linkSystemLibrary("ws2_32", .{});
+    }
+
     {
         const mod_tests = b.addTest(.{ .root_module = mod });
         const run_mod_tests = b.addRunArtifact(mod_tests);
