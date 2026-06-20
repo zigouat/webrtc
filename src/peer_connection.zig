@@ -140,9 +140,34 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack) Error!*webr
     return &tr.sender;
 }
 
-pub fn addTransceiverFromTrack(track: webrtc.MediaStreamTrack) Error!void {
-    _ = track;
-    @compileError("Not implemented");
+pub const AddTransceiverInit = struct {
+    direction: webrtc.Direction,
+};
+
+pub fn addTransceiverFromTrack(
+    pc: *PeerConnection,
+    track: webrtc.MediaStreamTrack,
+    init_config: AddTransceiverInit,
+) Error!*webrtc.RtpTransceiver {
+    const tr = try webrtc.RtpTransceiver.initFromTrack(pc.allocator, track, &pc.dtls_transport);
+    errdefer tr.deinit(pc.allocator);
+    try pc.transceivers.append(pc.allocator, tr);
+    tr.direction = init_config.direction;
+    //TODO: Update negotiation needed flag
+    return tr;
+}
+
+pub fn addTransceiverFromKind(
+    pc: *PeerConnection,
+    kind: webrtc.TrackKind,
+    init_config: AddTransceiverInit,
+) Error!*webrtc.RtpTransceiver {
+    const tr = try webrtc.RtpTransceiver.initFromKind(pc.allocator, kind, &pc.dtls_transport);
+    errdefer tr.deinit(pc.allocator);
+    try pc.transceivers.append(pc.allocator, tr);
+    tr.direction = init_config.direction;
+    //TODO: Update negotiation needed flag
+    return tr;
 }
 
 /// Creates a new offer.

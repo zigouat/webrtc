@@ -43,9 +43,12 @@ pub const Config = struct {
 };
 
 pub fn init(io: std.Io, allocator: std.mem.Allocator, config: Config) !DtlsTransport {
+    var ice_agent: ice.Agent = try .init(io, allocator, .{});
+    errdefer ice_agent.deinit();
+
     return .{
         .allocator = allocator,
-        .ice_agent = try .init(io, allocator, .{}),
+        .ice_agent = ice_agent,
         .session = try .init(.{
             .certificate = config.certificate,
             .private_key = config.private_key,

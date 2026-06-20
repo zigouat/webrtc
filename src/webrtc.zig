@@ -304,6 +304,20 @@ pub const RtpTransceiver = struct {
         return tr;
     }
 
+    pub fn initFromKind(allocator: std.mem.Allocator, kind: TrackKind, transport: *DtlsTransport) !*RtpTransceiver {
+        const tr = try allocator.create(RtpTransceiver);
+        tr.* = .{
+            .kind = kind,
+            .direction = .sendrecv,
+            .sender = .{ .track = null },
+            .receiver = .init(kind),
+            .addedByAddTrack = true,
+            .transport = transport,
+        };
+
+        return tr;
+    }
+
     pub fn initFromSdpMedia(allocator: std.mem.Allocator, sdp_media: *const SDPSession.SDPMedia, index: u8) !*RtpTransceiver {
         const tr = try allocator.create(RtpTransceiver);
         tr.* = .{
