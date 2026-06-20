@@ -37,7 +37,7 @@ pub fn main(init: std.process.Init) !void {
     pc = try .init(io, allocator, .{});
     defer pc.deinit();
 
-    try pc.addTrack(.{ .id = "video-track", .kind = .video });
+    const sender = try pc.addTrack(.{ .id = "video-track", .kind = .video });
 
     try grp.concurrent(io, startHttpServer, .{ io, allocator });
 
@@ -45,7 +45,7 @@ pub fn main(init: std.process.Init) !void {
         .connection_state => |state| switch (state) {
             .connected => {
                 std.log.info("Peer connected", .{});
-                try grp.concurrent(io, sendMediaData, .{ io, allocator, &file_reader });
+                try grp.concurrent(io, sendMediaData, .{ io, allocator, &file_reader, sender });
             },
             .disconnected => {
                 std.log.warn("Peer disconnected, exiting...", .{});
@@ -124,14 +124,14 @@ fn doHandleClientConnection(io: Io, allocator: std.mem.Allocator, stream: Io.net
     }
 }
 
-fn sendMediaData(io: Io, allocator: std.mem.Allocator, reader: *mp4.Reader) !void {
-    doSendMediaData(io, allocator, reader) catch |err| switch (err) {
+fn sendMediaData(io: Io, allocator: std.mem.Allocator, reader: *mp4.Reader, sender: *webrtc.RtpSender) !void {
+    doSendMediaData(io, allocator, reader, sender) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => |e| std.log.err("Error occurred while sending file: {}", .{e}),
     };
 }
 
-fn doSendMediaData(io: Io, allocator: std.mem.Allocator, reader: *mp4.Reader) !void {
+fn doSendMediaData(io: Io, allocator: std.mem.Allocator, reader: *mp4.Reader, sender: *webrtc.RtpSender) !void {
     const video_stream = blk: {
         var it = reader.streamIterator();
         while (it.next()) |stream| if (stream.codec == .h264) break :blk stream;
@@ -146,7 +146,6 @@ fn doSendMediaData(io: Io, allocator: std.mem.Allocator, reader: *mp4.Reader) !v
     var rtp_buffer: [1300]u8 = @splat(0);
 
     const sps, const pps = try getParameterSets(&video_stream);
-    const tr = &pc.transceivers.items[0];
     const start_timestamp = Io.Clock.now(.awake, io).toMilliseconds();
     var curr_packet = try frame_iterator.next(allocator);
 
@@ -175,7 +174,7 @@ fn doSendMediaData(io: Io, allocator: std.mem.Allocator, reader: *mp4.Reader) !v
             p.dts = @intCast(@divTrunc(@as(i128, p.dts) * video_stream.time_base.num * 90_000, @as(i128, video_stream.time_base.den)));
 
             var it = h264_pack.packetize(&p);
-            while (try it.next(&rtp_buffer)) |rtp_packet| try tr.sendRtp(&rtp_packet);
+            while (try it.next(&rtp_buffer)) |rtp_packet| try sender.sendRtp(&rtp_packet);
 
             curr_packet = try frame_iterator.next(allocator);
         }

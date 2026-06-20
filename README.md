@@ -1,6 +1,6 @@
 # WebRTC
 
-Zig implementations of WebRTC API.
+Zig implementation of WebRTC API.
 
 ## Status
 

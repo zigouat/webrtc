@@ -237,6 +237,26 @@ pub const RtpSender = struct {
         _ = new_track;
         @panic("Not Implemented");
     }
+
+    pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) !void {
+        const tr: *RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
+        var buffer = try tr.transport.ice_agent.createPacket();
+        defer tr.transport.ice_agent.destroyPacket(buffer);
+
+        const header: rtp.Packet.Header = .{
+            .extension = false,
+            .marker = packet.header.marker,
+            .padding = false,
+            .payload_type = @intCast(tr.sender.codecs[0].payload_type),
+            .sequence_number = packet.header.sequence_number,
+            .ssrc = 0x18192021,
+            .timestamp = packet.header.timestamp,
+        };
+
+        std.mem.writeInt(u96, buffer[0..12], @bitCast(header), .big);
+        @memcpy(buffer[12 .. packet.payload.len + 12], packet.payload);
+        try tr.transport.sendRtp(buffer[0 .. packet.payload.len + 12]);
+    }
 };
 
 pub const RtpReceiver = struct {
@@ -349,25 +369,6 @@ pub const RtpTransceiver = struct {
         tr.direction = .stopped;
         tr.current_direction = null;
         // TODO: stop sender and receiver
-    }
-
-    pub fn sendRtp(tr: *RtpTransceiver, packet: *const rtp.Packet) !void {
-        var buffer = try tr.transport.ice_agent.createPacket();
-        defer tr.transport.ice_agent.destroyPacket(buffer);
-
-        const header: rtp.Packet.Header = .{
-            .extension = false,
-            .marker = packet.header.marker,
-            .padding = false,
-            .payload_type = @intCast(tr.sender.codecs[0].payload_type),
-            .sequence_number = packet.header.sequence_number,
-            .ssrc = 0x18192021,
-            .timestamp = packet.header.timestamp,
-        };
-
-        std.mem.writeInt(u96, buffer[0..12], @bitCast(header), .big);
-        @memcpy(buffer[12 .. packet.payload.len + 12], packet.payload);
-        try tr.transport.sendRtp(buffer[0 .. packet.payload.len + 12]);
     }
 
     test "canAssocaiteTrack" {
