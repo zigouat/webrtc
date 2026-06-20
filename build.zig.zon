@@ -1,0 +1,24 @@
+.{
+    .name = .webrtc,
+    .version = "0.0.0",
+    .fingerprint = 0xaf856b418fb19f23,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .protocols = .{
+            .url = "git+https://github.com/zigouat/media-protocols.git#e91c24a580ff0120a22e2d9ff1985fd825696119",
+            .hash = "protocols-0.0.0-nNJdj5AmBAAVjyTV3PUEAHJVTZP8UV5GZTZR9x7F8YE6",
+        },
+        .mbedtls = .{
+            .url = "git+https://github.com/zigouat/mbedtls#edd084b3e19e107c1079e66d9db19019f640cb7d",
+            .hash = "mbedtls-3.6.6-E4NUR4cWAACCHFSwZ5urTBPK4A6EZlm3pSUjfg4c3QAw",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "examples",
+        "LICENSE",
+        "README.md",
+    },
+}

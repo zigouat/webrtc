@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebRTC Player</title>
+  <style>
+    body { font-family: sans-serif; margin: 2rem; }
+    video { width: 480px; background: #000; border-radius: 4px; }
+    #log { white-space: pre-wrap; background: #111; color: #0f0;
+           padding: 1rem; border-radius: 4px; margin-top: 1rem;
+           font-family: monospace; min-height: 4rem; }
+  </style>
+</head>
+<body>
+  <h1>WebRTC Player</h1>
+  <button id="startBtn">Start</button>
+  <div>
+    <video id="video" autoplay playsinline muted></video>
+  </div>
+  <pre id="log"></pre>
+  <script src="pc.js"></script>
+</body>
+</html>

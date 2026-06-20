@@ -1,0 +1,28 @@
+.{
+    .name = .play_from_disk,
+    .version = "0.0.0",
+    .fingerprint = 0x4ef12cbc87ee0f79,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .webrtc = .{
+            .path = "../..",
+        },
+        .media = .{
+            .url = "git+https://github.com/zigouat/media.git#010b7d8e1a10282758c8a6cd54f4bd8fcec046c7",
+            .hash = "media-0.1.0-qc-dCJzsAACfvL7pUfAyRw0O16yn3G_NPSbL8NIAWSKV",
+        },
+        .media_formats = .{
+            .url = "git+https://github.com/zigouat/media-formats.git#fd4bf7c3f569613929f5a032e4bcdb6ba338fa04",
+            .hash = "media_formats-0.0.0-7eZgYYeBDwDeNVHbFEhwFptCqY3w0sN89iGoCI7y5thX",
+        },
+        .protocols = .{
+            .url = "git+https://github.com/zigouat/media-protocols.git#e91c24a580ff0120a22e2d9ff1985fd825696119",
+            .hash = "protocols-0.0.0-nNJdj5AmBAAVjyTV3PUEAHJVTZP8UV5GZTZR9x7F8YE6",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
