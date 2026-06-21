@@ -53,6 +53,20 @@ test "addTrack" {
     try std.testing.expectEqualStrings("track2", tr.sender.track.?.id);
 }
 
+test "removeTrack" {
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    defer pc.deinit();
+
+    const sender = try pc.addTrack(.{ .id = "track1", .kind = .video });
+    try pc.removeTrack(sender);
+
+    const tr = pc.getTransceivers()[0];
+
+    try testing.expect(sender.track == null);
+    try testing.expect(tr.sender.track == null);
+    try testing.expectEqual(.recvonly, tr.direction);
+}
+
 test "addTransceiver" {
     {
         var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
@@ -108,6 +122,19 @@ test "Negotiate between peers" {
         try testing.expectEqual(.video, tr.kind);
         try testing.expectEqual(.recvonly, tr.direction);
         try testing.expectEqual(.recvonly, tr.current_direction);
+    }
+
+    for (0..10) |_| {
+        const screen1 = try pc1.addTrack(.{ .id = "screenshare", .kind = .video });
+        const screen2 = try pc2.addTrack(.{ .id = "screenshare", .kind = .video });
+        try negotiate(&pc1, &pc2);
+
+        try testing.expectEqual(3, pc1.getTransceivers().len);
+        try testing.expectEqual(3, pc2.getTransceivers().len);
+
+        try pc1.removeTrack(screen1);
+        try pc2.removeTrack(screen2);
+        try negotiate(&pc1, &pc2);
     }
 }
 

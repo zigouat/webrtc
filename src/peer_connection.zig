@@ -140,9 +140,26 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack) Error!*webr
     return &tr.sender;
 }
 
+pub fn removeTrack(pc: *PeerConnection, sender: *webrtc.RtpSender) !void {
+    try pc.checkNotClosed();
+    const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
+    if (tr.stopping or sender.track == null) return;
+    tr.sender.track = null;
+    switch (tr.direction) {
+        .sendrecv => tr.direction = .recvonly,
+        .sendonly => tr.direction = .inactive,
+        else => {},
+    }
+    // TODO: update negotiation flag
+}
+
 pub const AddTransceiverInit = struct {
     direction: webrtc.Direction,
 };
+
+pub inline fn getTransceivers(pc: *const PeerConnection) []*webrtc.RtpTransceiver {
+    return pc.transceivers.items;
+}
 
 pub fn addTransceiverFromTrack(
     pc: *PeerConnection,
@@ -494,7 +511,9 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescr
                     break :blk tr;
                 },
                 .offer => {
+                    if (pc.findTransceiverByMediaIndex(idx)) |tr| break :blk tr;
                     for (pc.transceivers.items) |tr| if (tr.canAssociateMedia(media)) break :blk tr;
+
                     const tr = try webrtc.RtpTransceiver.initFromSdpMedia(pc.allocator, media, @intCast(idx));
                     errdefer tr.deinit(pc.allocator);
                     tr.transport = &pc.dtls_transport;
