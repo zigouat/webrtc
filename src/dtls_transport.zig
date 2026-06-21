@@ -82,7 +82,11 @@ pub fn setPeerFingerprint(transport: *DtlsTransport, fingerprint: *const [32]u8)
 
 pub fn applyIceAttributes(transport: *DtlsTransport, media: *SDPSession.SDPMedia) !void {
     Logger.debug("Apply remote credentials and candidates...", .{});
-    try transport.ice_agent.setRemoteCredentials(.{ .username = media.ice_ufrag, .password = media.ice_pwd });
+    const remote_credens = transport.ice_agent.remote_credentials;
+    if (remote_credens) |credens| {
+        if (!std.mem.eql(u8, media.ice_ufrag, credens.username) or !std.mem.eql(u8, media.ice_pwd, credens.password))
+            return error.MismatchedIceCredentials;
+    } else try transport.ice_agent.setRemoteCredentials(.{ .username = media.ice_ufrag, .password = media.ice_pwd });
 
     for (media.candidates) |candidate| {
         if (candidate.component != 1 or candidate.transport == .tcp or std.meta.activeTag(candidate.address) == .ip6) continue;
