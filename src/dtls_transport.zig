@@ -73,7 +73,7 @@ pub fn deinit(transport: *DtlsTransport) void {
 }
 
 pub fn getIo(transport: *const DtlsTransport) std.Io {
-    return transport.ice_agent.select.io;
+    return transport.ice_agent.io;
 }
 
 pub fn setPeerFingerprint(transport: *DtlsTransport, fingerprint: *const [32]u8) void {

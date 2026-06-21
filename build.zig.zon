@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .protocols = .{
-            .url = "git+https://github.com/zigouat/media-protocols.git#f644e93d40f14d53af3f2f1f1507b608d263b67a",
-            .hash = "protocols-0.0.0-nNJdj8onBACz3RBSPVRj_nEZjbvCKjyzfcfEybasU54C",
+            .url = "git+https://github.com/zigouat/media-protocols.git#c6835afbd9a22bd97e2b3c552fce1e876abc6f3e",
+            .hash = "protocols-0.0.0-nNJdj9I1BAAFbNpDAys0biBFtSNQItJUqhnxUuB-z1O7",
         },
         .mbedtls = .{
             .url = "git+https://github.com/zigouat/mbedtls#edd084b3e19e107c1079e66d9db19019f640cb7d",

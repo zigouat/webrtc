@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const media = @import("media");
 const mp4 = @import("formats").mp4;
 const rtp = @import("rtp");
@@ -14,15 +15,10 @@ var grp: Io.Group = .init;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
-    var threaded = Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-        .concurrent_limit = .unlimited,
-    });
-    defer threaded.deinit();
+    const io = init.io;
 
-    const io = threaded.io();
-
-    var arg_iterator = init.minimal.args.iterate();
+    var arg_iterator = try init.minimal.args.iterateAllocator(init.gpa);
+    defer arg_iterator.deinit();
     _ = arg_iterator.next();
     const file_path = arg_iterator.next().?;
 
