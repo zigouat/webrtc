@@ -43,8 +43,10 @@ pub fn main(init: std.process.Init) !void {
                 std.log.info("Peer connected", .{});
                 try grp.concurrent(io, sendMediaData, .{ io, allocator, &file_reader, sender });
             },
-            .disconnected => {
-                std.log.warn("Peer disconnected, exiting...", .{});
+            .disconnected => pc.close(),
+            .closed => {
+                std.log.warn("Peer closed, exiting...", .{});
+                grp.cancel(io);
                 return;
             },
             else => {},
@@ -144,6 +146,7 @@ fn doSendMediaData(io: Io, allocator: std.mem.Allocator, reader: *mp4.Reader, se
     const sps, const pps = try getParameterSets(&video_stream);
     const start_timestamp = Io.Clock.now(.awake, io).toMilliseconds();
     var curr_packet = try frame_iterator.next(allocator);
+    defer if (curr_packet) |*p| p.deinit(allocator);
 
     outer: while (true) {
         const elapsed: u64 = @intCast(std.Io.Clock.now(.awake, io).toMilliseconds() - start_timestamp);

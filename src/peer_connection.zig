@@ -2,7 +2,6 @@ const std = @import("std");
 const ice = @import("ice");
 const rtp = @import("rtp");
 const rtcp = @import("rtcp");
-const srtp = @import("srtp");
 const utils = @import("utils.zig");
 const SDPAttribute = @import("sdp").Attribute.ParsedAttribute;
 
@@ -71,6 +70,11 @@ const ParsedSesssionDescription = struct {
             .desc_type = sess_desc.desc_type,
             .sdp = sess_desc.sdp,
         };
+    }
+
+    fn getIceRole(sess_desc: *const ParsedSesssionDescription) ice.Role {
+        if (sess_desc.desc_type == .offer or sess_desc.session.ice_lite) return .controlling;
+        return .controlled;
     }
 };
 
@@ -444,7 +448,7 @@ fn applyLocalOffer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescript
 
     if (pc.dtls_transport.ice_agent.gathering_state == .new) {
         try pc.group.concurrent(pc.dtls_transport.getIo(), pollTransportWrapper, .{pc});
-        try pc.dtls_transport.gatherCandidates(getIceRole(.offer, false));
+        try pc.dtls_transport.gatherCandidates(pc.last_offer.getIceRole());
     }
 
     if (pc.pending_local_description) |*desc| desc.deinit(pc.allocator);
@@ -477,7 +481,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
     // if there's no negotiated media, don't start connectivity checks
     if (media_exists and pc.dtls_transport.ice_agent.gathering_state == .new) {
         try pc.group.concurrent(pc.dtls_transport.getIo(), pollTransportWrapper, .{pc});
-        try pc.dtls_transport.gatherCandidates(getIceRole(.answer, sdp_session.ice_lite));
+        try pc.dtls_transport.gatherCandidates(pc.last_answer.getIceRole());
     }
     try pc.demuxer.updateMaps(&sdp_session);
 
@@ -668,11 +672,6 @@ fn writeIceCandidates(pc: *PeerConnection, w: *Io.Writer) !void {
         const attr: SDPAttribute = .end_of_candidates;
         try attr.write(w);
     }
-}
-
-fn getIceRole(sess_type: webrtc.SessionDescriptionType, remote_ice_lite: bool) ice.Role {
-    if (sess_type == .offer or remote_ice_lite) return .controlling;
-    return .controlled;
 }
 
 fn deleteTransceivers(pc: *PeerConnection) void {

@@ -25,8 +25,8 @@ const Timer = struct {
 allocator: std.mem.Allocator,
 ice_agent: ice.Agent,
 session: dtls.Session,
-in_srtp_session: srtp.Session = undefined,
-out_srtp_session: srtp.Session = undefined,
+in_srtp_session: ?srtp.Session = null,
+out_srtp_session: ?srtp.Session = null,
 timer: Timer = .empty,
 
 pub const Event = union(enum) {
@@ -63,13 +63,8 @@ pub fn deinit(transport: *DtlsTransport) void {
     transport.ice_agent.deinit();
     transport.session.deinit();
 
-    switch (transport.session.connection_state) {
-        .new, .connecting => {},
-        else => {
-            transport.in_srtp_session.deinit();
-            transport.out_srtp_session.deinit();
-        },
-    }
+    if (transport.in_srtp_session) |*srtp_sess| srtp_sess.deinit();
+    if (transport.out_srtp_session) |*srtp_sess| srtp_sess.deinit();
 }
 
 pub fn getIo(transport: *const DtlsTransport) std.Io {
@@ -108,7 +103,7 @@ pub fn getConnectionState(transport: *const DtlsTransport) struct { ice.Connecti
 pub inline fn sendRtp(transport: *DtlsTransport, data: []const u8) !void {
     const buffer = try transport.ice_agent.createPacket();
     defer transport.ice_agent.destroyPacket(buffer);
-    const encrypted = try transport.out_srtp_session.encryptRtp(data, buffer);
+    const encrypted = try transport.out_srtp_session.?.encryptRtp(data, buffer);
     try transport.ice_agent.sendData(encrypted);
 }
 
@@ -138,7 +133,7 @@ pub fn poll(transport: *DtlsTransport) !Event {
                 .rtp => {
                     switch (transport.session.connection_state) {
                         .connected => return .{
-                            .rtp = try transport.in_srtp_session.decryptRtp(
+                            .rtp = try transport.in_srtp_session.?.decryptRtp(
                                 ice_data,
                                 try transport.ice_agent.createPacket(),
                             ),
@@ -148,7 +143,7 @@ pub fn poll(transport: *DtlsTransport) !Event {
                 },
                 .rtcp => switch (transport.session.connection_state) {
                     .connected => return .{
-                        .rtcp = try transport.in_srtp_session.decryptRtcp(
+                        .rtcp = try transport.in_srtp_session.?.decryptRtcp(
                             ice_data,
                             try transport.ice_agent.createPacket(),
                         ),
@@ -211,15 +206,17 @@ fn handleFinTimeout(transport: *DtlsTransport, time_ms: u32) !void {
 
 fn handleDtlsData(transport: *DtlsTransport, data: []const u8) !void {
     try transport.session.handleData(data);
-    const srtp_profile = try transport.session.exportSrtpKeyingMaterial();
-    const profile = switch (srtp_profile.profile) {
-        1 => srtp.Profile.AesCm128HmacSha1_80,
-        2 => srtp.Profile.AesCm128HmacSha1_32,
-        else => unreachable,
-    };
+    if (transport.in_srtp_session == null) {
+        const srtp_profile = try transport.session.exportSrtpKeyingMaterial();
+        const profile = switch (srtp_profile.profile) {
+            1 => srtp.Profile.AesCm128HmacSha1_80,
+            2 => srtp.Profile.AesCm128HmacSha1_32,
+            else => unreachable,
+        };
 
-    transport.in_srtp_session = try srtp.Session.init(transport.allocator, &srtp_profile.remote_keying_material, profile);
-    transport.out_srtp_session = try srtp.Session.init(transport.allocator, &srtp_profile.local_keying_material, profile);
+        transport.in_srtp_session = try srtp.Session.init(transport.allocator, &srtp_profile.remote_keying_material, profile);
+        transport.out_srtp_session = try srtp.Session.init(transport.allocator, &srtp_profile.local_keying_material, profile);
+    }
 }
 
 fn getPacketType(data: []const u8) PacketType {
