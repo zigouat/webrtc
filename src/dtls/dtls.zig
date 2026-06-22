@@ -24,14 +24,14 @@ pub const P256KeyPair = struct {
         return .{ .priv_key = priv_key, .pub_key = pub_key };
     }
 
-    pub fn toDer(key_pair: P256KeyPair, allocator: std.mem.Allocator) ![]u8 {
-        var w = std.Io.Writer.Allocating.init(allocator);
-        try w.writer.writeAll(&[_]u8{ 0x30, 0x77, 0x02, 0x01, 0x01, 0x04, 0x20 });
-        try w.writer.writeAll(&key_pair.priv_key);
-        try w.writer.writeAll(&[_]u8{ 0xA0, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07 });
-        try w.writer.writeAll(&[_]u8{ 0xA1, 0x44, 0x03, 0x42, 0x00 });
-        try w.writer.writeAll(&key_pair.pub_key.toUncompressedSec1());
-        return w.toOwnedSlice();
+    pub fn toDer(key_pair: *const P256KeyPair, buffer: []u8) ![]const u8 {
+        var w = std.Io.Writer.fixed(buffer);
+        try w.writeAll(&[_]u8{ 0x30, 0x77, 0x02, 0x01, 0x01, 0x04, 0x20 });
+        try w.writeAll(&key_pair.priv_key);
+        try w.writeAll(&[_]u8{ 0xA0, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07 });
+        try w.writeAll(&[_]u8{ 0xA1, 0x44, 0x03, 0x42, 0x00 });
+        try w.writeAll(&key_pair.pub_key.toUncompressedSec1());
+        return w.buffered();
     }
 };
 
@@ -70,15 +70,14 @@ pub const Session = struct {
     };
 
     pub const Config = struct {
-        certificate: []const u8,
-        private_key: []const u8,
+        key_pair: []const u8,
         on_send_data: *const fn (*Session, []const u8) i32,
         on_set_timer: *const fn (*Session, u32, u32) void,
         on_get_timer_state: *const fn (*Session) i32,
         debug_level: u8 = 0,
     };
 
-    pub fn init(config: Config) !Session {
+    pub fn init(io: std.Io, config: Config) !Session {
         var session: Session = undefined;
 
         session.connection_state = .new;
@@ -98,22 +97,61 @@ pub const Session = struct {
         m.mbedtls_ctr_drbg_init(&session.ctr_drbg);
         errdefer session.deinit();
 
-        m.mbedtls_debug_set_threshold(config.debug_level);
-
-        if (m.mbedtls_x509_crt_parse(&session.crt, config.certificate.ptr, config.certificate.len + 1) < 0)
-            return error.CrtParseFailed;
-
         if (m.mbedtls_pk_parse_key(
             &session.key,
-            config.private_key.ptr,
-            config.private_key.len + 1,
+            config.key_pair.ptr,
+            config.key_pair.len + 1,
             null,
             0,
             m.mbedtls_ctr_drbg_random,
             &session.ctr_drbg,
         ) != 0) return error.FailedParsePrivateKey;
 
+        try session.createCertificate(io);
+        m.mbedtls_debug_set_threshold(config.debug_level);
+
         return session;
+    }
+
+    fn createCertificate(session: *Session, io: std.Io) !void {
+        if (m.psa_crypto_init() != m.PSA_SUCCESS) return error.CryptoInitFailed;
+
+        var cert: m.mbedtls_x509write_cert = undefined;
+        m.mbedtls_x509write_crt_init(&cert);
+        defer m.mbedtls_x509write_crt_free(&cert);
+
+        if (m.mbedtls_ctr_drbg_seed(
+            &session.ctr_drbg,
+            m.mbedtls_entropy_func,
+            &session.entropy,
+            null,
+            0,
+        ) != 0) return error.CtrDrbgSeedFailed;
+
+        m.mbedtls_x509write_crt_set_md_alg(&cert, m.MBEDTLS_MD_SHA256);
+        m.mbedtls_x509write_crt_set_issuer_key(&cert, &session.key);
+        m.mbedtls_x509write_crt_set_subject_key(&cert, &session.key);
+        var ret = m.mbedtls_x509write_crt_set_validity(&cert, "20250101000000", "20350101000000");
+        try checkError(ret);
+
+        var serial: [16]u8 = @splat(0);
+        io.random(&serial);
+        ret = m.mbedtls_x509write_crt_set_serial_raw(&cert, serial[0..].ptr, serial.len);
+        try checkError(ret);
+
+        ret = m.mbedtls_x509write_crt_set_subject_name(&cert, "CN=Zig WebRTC");
+        try checkError(ret);
+        ret = m.mbedtls_x509write_crt_set_issuer_name(&cert, "CN=Zig WebRTC");
+        try checkError(ret);
+
+        var buffer: [4096]u8 = @splat(0);
+        ret = m.mbedtls_x509write_crt_der(&cert, buffer[0..].ptr, buffer.len, m.mbedtls_ctr_drbg_random, &session.ctr_drbg);
+        try checkError(ret);
+
+        const len: u32 = @bitCast(ret);
+        const certificate = buffer[buffer.len - len ..];
+        ret = m.mbedtls_x509_crt_parse_der(&session.crt, certificate.ptr, certificate.len);
+        try checkError(ret);
     }
 
     pub fn setRole(session: *Session, server: bool) !void {
@@ -125,8 +163,6 @@ pub const Session = struct {
             0,
         ) != 0) return error.CtrDrbgSeedFailed;
         m.mbedtls_ssl_conf_rng(&session.ssl_conf, m.mbedtls_ctr_drbg_random, &session.ctr_drbg);
-
-        if (m.psa_crypto_init() != m.PSA_SUCCESS) return error.CryptoInitFailed;
 
         if (m.mbedtls_ssl_config_defaults(
             &session.ssl_conf,
@@ -351,5 +387,14 @@ pub const Session = struct {
         var file_path = std.mem.sliceTo(file, 0);
         file_path = if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |idx| file_path[idx + 1 ..] else file_path;
         Logger.debug("file={s} {s}", .{ file_path, message[0 .. message.len - 1] });
+    }
+
+    fn checkError(ret: i32) !void {
+        if (ret < 0) {
+            var buffer: [1024]u8 = @splat(0);
+            m.mbedtls_strerror(ret, buffer[0..].ptr, buffer.len);
+            Logger.err("{s}", .{buffer});
+            return error.ParseCertificateFailed;
+        }
     }
 };
