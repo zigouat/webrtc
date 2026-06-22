@@ -41,6 +41,8 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_mod_tests.step);
     }
 
+}
+
 fn mbedtls_config(b: *std.Build) *std.Build.Step.ConfigHeader {
     return b.addConfigHeader(.{
         .style = .blank,
