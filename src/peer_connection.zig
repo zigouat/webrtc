@@ -81,10 +81,7 @@ const ParsedSesssionDescription = struct {
 pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnection {
     _ = config;
 
-    var dtls_transport: DtlsTransport = try .init(io, allocator, .{
-        .certificate = webrtc.certificate,
-        .private_key = webrtc.private_key,
-    });
+    var dtls_transport: DtlsTransport = try .init(io, allocator, .{});
     errdefer dtls_transport.deinit();
 
     const queue_buffer = try allocator.alloc(Event, 5);

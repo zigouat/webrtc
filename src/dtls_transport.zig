@@ -37,21 +37,21 @@ pub const Event = union(enum) {
     rtcp: []const u8,
 };
 
-pub const Config = struct {
-    certificate: []const u8,
-    private_key: []const u8,
-};
+pub const Config = struct {};
 
-pub fn init(io: std.Io, allocator: std.mem.Allocator, config: Config) !DtlsTransport {
+pub fn init(io: std.Io, allocator: std.mem.Allocator, _: Config) !DtlsTransport {
     var ice_agent: ice.Agent = try .init(io, allocator, .{});
     errdefer ice_agent.deinit();
+
+    const pair = try dtls.P256KeyPair.init(io);
+    var der_buffer: [256]u8 = @splat(0);
+    const der = try pair.toDer(&der_buffer);
 
     return .{
         .allocator = allocator,
         .ice_agent = ice_agent,
-        .session = try .init(.{
-            .certificate = config.certificate,
-            .private_key = config.private_key,
+        .session = try .init(io, .{
+            .key_pair = der,
             .on_send_data = onDtlsSendData,
             .on_set_timer = setDtlsTimer,
             .on_get_timer_state = getDtlsTimerState,

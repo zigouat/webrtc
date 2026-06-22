@@ -6,28 +6,6 @@ const rtp = @import("rtp");
 const utils = @import("utils.zig");
 const FmtpParams = sdp.Attribute.Fmtp.Params;
 
-pub const certificate =
-    \\-----BEGIN CERTIFICATE-----
-    \\MIIBfjCCASOgAwIBAgIUYavCUhZeRApuoEbsQ/xjvrI4DK8wCgYIKoZIzj0EAwIw
-    \\FDESMBAGA1UEAwwJdGVzdC1wMjU2MB4XDTI2MDUxNzEyNDg0NFoXDTI3MDUxNzEy
-    \\NDg0NFowFDESMBAGA1UEAwwJdGVzdC1wMjU2MFkwEwYHKoZIzj0CAQYIKoZIzj0D
-    \\AQcDQgAEmEjZ7oAvJ2AY1RlpjtjhQCICJH7oDI9QwIb1U/JFwttpIoGe8whpUbV+
-    \\JcR3YqTugA05G1+OsPX156xVDvpjgKNTMFEwHQYDVR0OBBYEFP7ISDzgFHBv8bwC
-    \\jD8tKgKIJ8HEMB8GA1UdIwQYMBaAFP7ISDzgFHBv8bwCjD8tKgKIJ8HEMA8GA1Ud
-    \\EwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDSQAwRgIhAJP7rtdyrIW+DZV9RvB5snVd
-    \\3jhrV5nv4mgIaqRgvdUOAiEA5xwOylwYp6DVPmik/9242lOukDmmCH6apB1pSOpg
-    \\mhA=
-    \\-----END CERTIFICATE-----
-;
-
-pub const private_key =
-    \\-----BEGIN EC PRIVATE KEY-----
-    \\MHcCAQEEIFojeYcUfkE6L5aUAsfG5jAc4tXjkNsr0VYxPWJMJUPXoAoGCCqGSM49
-    \\AwEHoUQDQgAEmEjZ7oAvJ2AY1RlpjtjhQCICJH7oDI9QwIb1U/JFwttpIoGe8whp
-    \\UbV+JcR3YqTugA05G1+OsPX156xVDvpjgA==
-    \\-----END EC PRIVATE KEY-----
-;
-
 const std = @import("std");
 const DtlsTransport = @import("dtls_transport.zig");
 
@@ -92,12 +70,6 @@ pub const default_video_codecs = [_]RtpCodecParameters{
             },
         },
     },
-    // .{
-    //     .payload_type = 97,
-    //     .mime_type = "video/rtx",
-    //     .clock_rate = 90000,
-    //     .sdp_fmtp_line = "apt=96",
-    // },
 };
 
 pub const default_video_extensions = [_]RtpHeaderExtensionParameter{
