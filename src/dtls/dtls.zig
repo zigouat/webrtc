@@ -46,10 +46,10 @@ pub const SrtpProfile = struct {
 pub const Session = struct {
     const KEYINIG_EXTRACTOR_LABEL = "EXTRACTOR-dtls_srtp";
 
+    io: std.Io,
     connection_state: ConnectionState,
     key: m.mbedtls_pk_context,
     entropy: m.mbedtls_entropy_context,
-    ctr_drbg: m.mbedtls_ctr_drbg_context,
     ssl: m.mbedtls_ssl_context,
     ssl_conf: m.mbedtls_ssl_config,
     crt: m.mbedtls_x509_crt,
@@ -80,6 +80,7 @@ pub const Session = struct {
     pub fn init(io: std.Io, config: Config) !Session {
         var session: Session = undefined;
 
+        session.io = io;
         session.connection_state = .new;
         session.on_send_data = config.on_send_data;
         session.on_set_timer = config.on_set_timer;
@@ -94,7 +95,6 @@ pub const Session = struct {
         m.mbedtls_ssl_init(&session.ssl);
         m.mbedtls_ssl_config_init(&session.ssl_conf);
         m.mbedtls_x509_crt_init(&session.crt);
-        m.mbedtls_ctr_drbg_init(&session.ctr_drbg);
         errdefer session.deinit();
 
         if (m.mbedtls_pk_parse_key(
@@ -103,8 +103,8 @@ pub const Session = struct {
             config.key_pair.len + 1,
             null,
             0,
-            m.mbedtls_ctr_drbg_random,
-            &session.ctr_drbg,
+            random,
+            &session.io,
         ) != 0) return error.FailedParsePrivateKey;
 
         try session.createCertificate(io);
@@ -113,56 +113,8 @@ pub const Session = struct {
         return session;
     }
 
-    fn createCertificate(session: *Session, io: std.Io) !void {
-        if (m.psa_crypto_init() != m.PSA_SUCCESS) return error.CryptoInitFailed;
-
-        var cert: m.mbedtls_x509write_cert = undefined;
-        m.mbedtls_x509write_crt_init(&cert);
-        defer m.mbedtls_x509write_crt_free(&cert);
-
-        if (m.mbedtls_ctr_drbg_seed(
-            &session.ctr_drbg,
-            m.mbedtls_entropy_func,
-            &session.entropy,
-            null,
-            0,
-        ) != 0) return error.CtrDrbgSeedFailed;
-
-        m.mbedtls_x509write_crt_set_md_alg(&cert, m.MBEDTLS_MD_SHA256);
-        m.mbedtls_x509write_crt_set_issuer_key(&cert, &session.key);
-        m.mbedtls_x509write_crt_set_subject_key(&cert, &session.key);
-        var ret = m.mbedtls_x509write_crt_set_validity(&cert, "20250101000000", "20350101000000");
-        try checkError(ret);
-
-        var serial: [16]u8 = @splat(0);
-        io.random(&serial);
-        ret = m.mbedtls_x509write_crt_set_serial_raw(&cert, serial[0..].ptr, serial.len);
-        try checkError(ret);
-
-        ret = m.mbedtls_x509write_crt_set_subject_name(&cert, "CN=Zig WebRTC");
-        try checkError(ret);
-        ret = m.mbedtls_x509write_crt_set_issuer_name(&cert, "CN=Zig WebRTC");
-        try checkError(ret);
-
-        var buffer: [4096]u8 = @splat(0);
-        ret = m.mbedtls_x509write_crt_der(&cert, buffer[0..].ptr, buffer.len, m.mbedtls_ctr_drbg_random, &session.ctr_drbg);
-        try checkError(ret);
-
-        const len: u32 = @bitCast(ret);
-        const certificate = buffer[buffer.len - len ..];
-        ret = m.mbedtls_x509_crt_parse_der(&session.crt, certificate.ptr, certificate.len);
-        try checkError(ret);
-    }
-
     pub fn setRole(session: *Session, server: bool) !void {
-        if (m.mbedtls_ctr_drbg_seed(
-            &session.ctr_drbg,
-            m.mbedtls_entropy_func,
-            &session.entropy,
-            null,
-            0,
-        ) != 0) return error.CtrDrbgSeedFailed;
-        m.mbedtls_ssl_conf_rng(&session.ssl_conf, m.mbedtls_ctr_drbg_random, &session.ctr_drbg);
+        m.mbedtls_ssl_conf_rng(&session.ssl_conf, random, &session.io);
 
         if (m.mbedtls_ssl_config_defaults(
             &session.ssl_conf,
@@ -188,7 +140,6 @@ pub const Session = struct {
     pub fn deinit(session: *Session) void {
         m.mbedtls_pk_free(&session.key);
         m.mbedtls_entropy_free(&session.entropy);
-        m.mbedtls_ctr_drbg_free(&session.ctr_drbg);
         m.mbedtls_ssl_free(&session.ssl);
         m.mbedtls_ssl_config_free(&session.ssl_conf);
         m.mbedtls_x509_crt_free(&session.crt);
@@ -291,6 +242,39 @@ pub const Session = struct {
         _ = m.mbedtls_ssl_close_notify(&session.ssl);
     }
 
+    fn createCertificate(session: *Session, io: std.Io) !void {
+        if (m.psa_crypto_init() != m.PSA_SUCCESS) return error.CryptoInitFailed;
+
+        var cert: m.mbedtls_x509write_cert = undefined;
+        m.mbedtls_x509write_crt_init(&cert);
+        defer m.mbedtls_x509write_crt_free(&cert);
+
+        m.mbedtls_x509write_crt_set_md_alg(&cert, m.MBEDTLS_MD_SHA256);
+        m.mbedtls_x509write_crt_set_issuer_key(&cert, &session.key);
+        m.mbedtls_x509write_crt_set_subject_key(&cert, &session.key);
+        var ret = m.mbedtls_x509write_crt_set_validity(&cert, "20250101000000", "20350101000000");
+        try checkError(ret);
+
+        var serial: [16]u8 = @splat(0);
+        io.random(&serial);
+        ret = m.mbedtls_x509write_crt_set_serial_raw(&cert, serial[0..].ptr, serial.len);
+        try checkError(ret);
+
+        ret = m.mbedtls_x509write_crt_set_subject_name(&cert, "CN=Zig WebRTC");
+        try checkError(ret);
+        ret = m.mbedtls_x509write_crt_set_issuer_name(&cert, "CN=Zig WebRTC");
+        try checkError(ret);
+
+        var buffer: [4096]u8 = @splat(0);
+        ret = m.mbedtls_x509write_crt_der(&cert, buffer[0..].ptr, buffer.len, random, &session.io);
+        try checkError(ret);
+
+        const len: u32 = @bitCast(ret);
+        const certificate = buffer[buffer.len - len ..];
+        ret = m.mbedtls_x509_crt_parse_der(&session.crt, certificate.ptr, certificate.len);
+        try checkError(ret);
+    }
+
     fn handshake(session: *Session) !void {
         const result = switch (m.mbedtls_ssl_handshake(&session.ssl)) {
             0 => session.connection_state = .connected,
@@ -376,6 +360,12 @@ pub const Session = struct {
 
         @memcpy(session.session_keys.rand_bytes[0..max_dtls_random_bytes], client_random[0..max_dtls_random_bytes]);
         @memcpy(session.session_keys.rand_bytes[max_dtls_random_bytes..], server_random[0..max_dtls_random_bytes]);
+    }
+
+    fn random(ctx: ?*anyopaque, data: [*c]u8, len: usize) callconv(.c) c_int {
+        const io: *std.Io = @ptrCast(@alignCast(ctx));
+        io.randomSecure(data[0..len]) catch return m.PSA_ERROR_INSUFFICIENT_ENTROPY;
+        return 0;
     }
 
     fn logDebugMessages(ctx: ?*anyopaque, level: c_int, file: [*c]const u8, len: c_int, str: [*c]const u8) callconv(.c) void {
