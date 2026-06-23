@@ -107,6 +107,13 @@ pub inline fn sendRtp(transport: *DtlsTransport, data: []const u8) !void {
     try transport.ice_agent.sendData(encrypted);
 }
 
+pub fn sendRtcp(transport: *DtlsTransport, data: []const u8) !void {
+    const buffer = try transport.ice_agent.createPacket();
+    defer transport.ice_agent.destroyPacket(buffer);
+    const encrypted = try transport.out_srtp_session.?.encryptRtcp(data, buffer);
+    try transport.ice_agent.sendData(encrypted);
+}
+
 pub fn poll(transport: *DtlsTransport) !Event {
     while (transport.ice_agent.poll()) |ice_event| switch (ice_event) {
         .candidate => |candidate| return .{ .ice_candidate = candidate },
