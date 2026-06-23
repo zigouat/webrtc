@@ -586,7 +586,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescr
     }
 }
 
-fn updateSignalingStateToStable(pc: *PeerConnection) !void {
+fn updateSignalingStateToStable(pc: *PeerConnection) void {
     pc.signaling_state = .stable;
 
     if (pc.local_description) |*local_desc| local_desc.deinit(pc.allocator);

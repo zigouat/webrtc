@@ -205,16 +205,31 @@ pub const RtpSender = struct {
     report: Report,
 
     const Report = struct {
+        last_sequence_number: ?u16,
         rtp_timestamp: u32,
         timestamp: i64,
         packet_count: u32,
         octet_count: u32,
 
-        const empty: Report = .{ .rtp_timestamp = 0, .timestamp = 0, .packet_count = 0, .octet_count = 0 };
+        const empty: Report = .{
+            .last_sequence_number = null,
+            .rtp_timestamp = 0,
+            .timestamp = 0,
+            .packet_count = 0,
+            .octet_count = 0,
+        };
 
         inline fn recordPacket(report: *Report, packet: *const rtp.Packet, timestamp: i64) void {
-            report.rtp_timestamp = packet.header.timestamp;
-            report.timestamp = timestamp;
+            const last_seq_number = report.last_sequence_number orelse packet.header.sequence_number -% 1;
+            const diff = @as(i16, @bitCast(packet.header.sequence_number)) -% @as(i16, @bitCast(last_seq_number));
+
+            // check for out of order packets
+            if (diff > 0) {
+                report.last_sequence_number = packet.header.sequence_number;
+                report.rtp_timestamp = packet.header.timestamp;
+                report.timestamp = timestamp;
+            }
+
             report.packet_count += 1;
             report.octet_count += @intCast(packet.payload.len);
         }
@@ -295,6 +310,52 @@ pub const RtpSender = struct {
         const ntp_seconds = @divTrunc(timestamp, std.time.us_per_s) + ntp_unix_epoch_diff;
         const ntp_fraction = @rem(timestamp, std.time.us_per_s);
         return @bitCast((ntp_seconds << 32) | ntp_fraction);
+    }
+
+    test "record packets" {
+        var report: Report = .empty;
+        const payload = "hello";
+        var packet: rtp.Packet = .{
+            .header = .{
+                .ssrc = 0,
+                .timestamp = 1000,
+                .sequence_number = 10,
+                .payload_type = 96,
+                .marker = false,
+                .extension = false,
+                .padding = false,
+            },
+            .payload = payload,
+        };
+
+        report.recordPacket(&packet, 5000);
+
+        try std.testing.expectEqual(10, report.last_sequence_number);
+        try std.testing.expectEqual(1000, report.rtp_timestamp);
+        try std.testing.expectEqual(5000, report.timestamp);
+        try std.testing.expectEqual(1, report.packet_count);
+        try std.testing.expectEqual(payload.len, report.octet_count);
+
+        packet.header.timestamp = 2000;
+        packet.header.sequence_number = 11;
+
+        report.recordPacket(&packet, 6000);
+        try std.testing.expectEqual(11, report.last_sequence_number);
+        try std.testing.expectEqual(2000, report.rtp_timestamp);
+        try std.testing.expectEqual(6000, report.timestamp);
+        try std.testing.expectEqual(2, report.packet_count);
+        try std.testing.expectEqual(payload.len * 2, report.octet_count);
+
+        packet.header.timestamp = 1500;
+        packet.header.sequence_number = 9;
+
+        report.recordPacket(&packet, 7000);
+
+        try std.testing.expectEqual(11, report.last_sequence_number);
+        try std.testing.expectEqual(2000, report.rtp_timestamp);
+        try std.testing.expectEqual(6000, report.timestamp);
+        try std.testing.expectEqual(3, report.packet_count);
+        try std.testing.expectEqual(payload.len * 3, report.octet_count);
     }
 
     test "convert microseconds to ntp" {
