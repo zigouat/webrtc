@@ -541,10 +541,22 @@ pub const RtpTransceiver = struct {
         tr.sender.codecs = getCodecCapabilities(.video);
         var buffer: [64]u8 = @splat(0);
 
-        const data = tr.getRtcpReport(10000, &buffer);
+        tr.sender.report = .{
+            .last_sequence_number = 0,
+            .rtp_timestamp = 8700,
+            .timestamp = 1782239529800000,
+            .octet_count = 10000,
+            .packet_count = 100,
+        };
+
+        const data = tr.getRtcpReport(1782239530300000, &buffer);
         const packet = try rtcp.Packet.parse(data);
         try std.testing.expectEqual(.sender_report, packet.header.payload_type);
         try std.testing.expectEqual(tr.sender.ssrc, packet.payload.sender_report.ssrc);
+        try std.testing.expectEqual(53700, packet.payload.sender_report.rtp_timestamp);
+        try std.testing.expectEqual(17142195148218995680, packet.payload.sender_report.ntp_timestamp);
+        try std.testing.expectEqual(10000, packet.payload.sender_report.octet_count);
+        try std.testing.expectEqual(100, packet.payload.sender_report.packet_count);
     }
 };
 

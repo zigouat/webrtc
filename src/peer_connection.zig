@@ -726,6 +726,7 @@ fn doSendReports(pc: *PeerConnection) !void {
 
             Logger.debug("send rtcp report for transceiver: {?s}", .{tr.mid});
             const data = tr.getRtcpReport(timestamp, buffer);
+            if (data.len == 0) continue;
             try pc.dtls_transport.sendRtcp(data);
         }
     }
