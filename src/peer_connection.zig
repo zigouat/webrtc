@@ -458,6 +458,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
     if (!std.mem.eql(u8, pc.last_answer.sdp, sess_desc.sdp)) return error.TamperedOffer;
     const sdp_session = pc.last_answer.session;
     const offer_session = pc.pending_remote_description.?.session;
+    const renegotiation = pc.local_description != null;
 
     var media_exists: bool = false;
     for (sdp_session.medias, 0..) |*media, idx| {
@@ -476,7 +477,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
     }
 
     // if there's no negotiated media, don't start connectivity checks
-    if (media_exists and pc.dtls_transport.ice_agent.gathering_state == .new) {
+    if (media_exists and !renegotiation) {
         try pc.group.concurrent(pc.dtls_transport.getIo(), pollTransportWrapper, .{pc});
         try pc.dtls_transport.gatherCandidates(pc.last_answer.getIceRole());
     }
@@ -485,6 +486,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
     pc.pending_local_description = pc.last_answer;
     pc.updateSignalingStateToStable();
     pc.deleteTransceivers();
+    try pc.startSenderReports();
 }
 
 fn applyRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescription) !void {
@@ -493,6 +495,8 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescr
 
     var remote_sdp = try SDPSession.parse(pc.allocator, sdp_text);
     errdefer remote_sdp.deinit(pc.allocator);
+
+    const renegotiation = pc.remote_description != null;
 
     if (session_desc.desc_type == .answer) {
         const local_session = pc.pending_local_description.?.session;
@@ -553,10 +557,10 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescr
         }
     }
 
-    if (first_media) |media| {
+    if (!renegotiation) if (first_media) |media| {
         try pc.dtls_transport.applyIceAttributes(media);
         pc.dtls_transport.setPeerFingerprint(&remote_sdp.fingerprint);
-    }
+    };
 
     switch (session_desc.desc_type) {
         .answer => {
@@ -568,6 +572,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescr
             };
             pc.updateSignalingStateToStable();
             pc.deleteTransceivers();
+            try pc.startSenderReports();
         },
         .offer => {
             pc.pending_remote_description = .{
@@ -687,6 +692,43 @@ fn deleteTransceivers(pc: *PeerConnection) void {
         }
 
         idx += 1;
+    }
+}
+
+fn startSenderReports(pc: *PeerConnection) !void {
+    try pc.group.concurrent(pc.dtls_transport.getIo(), sendReports, .{pc});
+}
+
+fn sendReports(pc: *PeerConnection) !void {
+    pc.doSendReports() catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => |e| Logger.err("Error occurred while sending report: {}", .{e}),
+    };
+}
+
+fn doSendReports(pc: *PeerConnection) !void {
+    const io = pc.dtls_transport.getIo();
+    const seed = Io.Timestamp.now(io, .awake).toMicroseconds();
+    var random = std.Random.DefaultPrng.init(@bitCast(seed));
+    var r = random.random();
+
+    while (true) {
+        const sleep_ms = r.intRangeAtMost(u16, 500, 1000);
+        try io.sleep(.fromMilliseconds(sleep_ms + 500), .awake);
+
+        const buffer = try pc.dtls_transport.ice_agent.createPacket();
+        defer pc.dtls_transport.ice_agent.destroyPacket(buffer);
+        const timestamp = Io.Timestamp.now(io, .real).toMicroseconds();
+
+        for (0..pc.transceivers.items.len) |idx| {
+            const tr = pc.transceivers.items[idx];
+            if (tr.stopping or tr.direction == .stopped or tr.direction == .inactive) continue;
+
+            Logger.debug("send rtcp report for transceiver: {?s}", .{tr.mid});
+            const data = tr.getRtcpReport(timestamp, buffer);
+            if (data.len == 0) continue;
+            try pc.dtls_transport.sendRtcp(data);
+        }
     }
 }
 

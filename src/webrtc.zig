@@ -3,11 +3,14 @@ pub const SDPSession = @import("sdp_session.zig");
 
 const sdp = @import("sdp");
 const rtp = @import("rtp");
+const rtcp = @import("rtcp");
 const utils = @import("utils.zig");
 const FmtpParams = sdp.Attribute.Fmtp.Params;
 
 const std = @import("std");
 const DtlsTransport = @import("dtls_transport.zig");
+
+const ntp_unix_epoch_diff = 2_208_988_800;
 
 pub const SignalingState = enum { stable, have_local_offer, have_remote_offer, have_local_pranswer, have_remote_pranswer, closed };
 
@@ -196,8 +199,50 @@ pub const MediaStreamTrack = struct {
 };
 
 pub const RtpSender = struct {
-    track: ?MediaStreamTrack = null,
-    codecs: []const RtpCodecParameters = &.{},
+    track: ?MediaStreamTrack,
+    codecs: []const RtpCodecParameters,
+    ssrc: u32,
+    report: Report,
+
+    const Report = struct {
+        last_sequence_number: ?u16,
+        rtp_timestamp: u32,
+        timestamp: i64,
+        packet_count: u32,
+        octet_count: u32,
+
+        const empty: Report = .{
+            .last_sequence_number = null,
+            .rtp_timestamp = 0,
+            .timestamp = 0,
+            .packet_count = 0,
+            .octet_count = 0,
+        };
+
+        inline fn recordPacket(report: *Report, packet: *const rtp.Packet, timestamp: i64) void {
+            const last_seq_number = report.last_sequence_number orelse packet.header.sequence_number -% 1;
+            const diff = @as(i16, @bitCast(packet.header.sequence_number)) -% @as(i16, @bitCast(last_seq_number));
+
+            // check for out of order packets
+            if (diff > 0) {
+                report.last_sequence_number = packet.header.sequence_number;
+                report.rtp_timestamp = packet.header.timestamp;
+                report.timestamp = timestamp;
+            }
+
+            report.packet_count += 1;
+            report.octet_count += @intCast(packet.payload.len);
+        }
+    };
+
+    pub fn init(track: ?MediaStreamTrack) RtpSender {
+        return .{
+            .track = track,
+            .codecs = &.{},
+            .ssrc = 0x18192021,
+            .report = .empty,
+        };
+    }
 
     pub fn getCapabilities(kind: TrackKind) RtpCapabilities {
         _ = kind;
@@ -215,19 +260,115 @@ pub const RtpSender = struct {
         var buffer = try tr.transport.ice_agent.createPacket();
         defer tr.transport.ice_agent.destroyPacket(buffer);
 
+        const timestamp = std.Io.Timestamp.now(tr.transport.getIo(), .real).toMicroseconds();
+
         const header: rtp.Packet.Header = .{
             .extension = false,
             .marker = packet.header.marker,
             .padding = false,
             .payload_type = @intCast(tr.sender.codecs[0].payload_type),
             .sequence_number = packet.header.sequence_number,
-            .ssrc = 0x18192021,
+            .ssrc = sender.ssrc,
             .timestamp = packet.header.timestamp,
         };
 
         std.mem.writeInt(u96, buffer[0..12], @bitCast(header), .big);
         @memcpy(buffer[12 .. packet.payload.len + 12], packet.payload);
         try tr.transport.sendRtp(buffer[0 .. packet.payload.len + 12]);
+        sender.report.recordPacket(packet, timestamp);
+    }
+
+    fn writeReport(sender: *const RtpSender, timestamp: i64, buffer: []u8) []const u8 {
+        std.debug.assert(buffer.len >= rtcp.header_size + rtcp.sr_base_size);
+        const length = rtcp.header_size + rtcp.sr_base_size;
+
+        const header: rtcp.Header = .{
+            .payload_type = .sender_report,
+            .rc = 0,
+            .length = length / 4 - 1,
+            .padding = false,
+        };
+        std.mem.writeInt(@Int(.unsigned, @bitSizeOf(rtcp.Header)), buffer[0..rtcp.header_size], @bitCast(header), .big);
+
+        const report = sender.report;
+        const codec = sender.codecs[0]; // First codec is used for sending
+        const diff: u32 = @intCast(@divTrunc((timestamp - sender.report.timestamp) * codec.clock_rate, std.time.us_per_s));
+
+        const sender_report: rtcp.SenderReport = .{
+            .ssrc = sender.ssrc,
+            .ntp_timestamp = microsecondsToNtp(timestamp),
+            .rtp_timestamp = report.rtp_timestamp + diff,
+            .octet_count = report.octet_count,
+            .packet_count = report.packet_count,
+        };
+        sender_report.write(buffer[rtcp.header_size..][0..rtcp.sr_base_size]);
+
+        return buffer[0..length];
+    }
+
+    fn microsecondsToNtp(timestamp: i64) u64 {
+        const ntp_seconds = @divTrunc(timestamp, std.time.us_per_s) + ntp_unix_epoch_diff;
+        const ntp_fraction = @rem(timestamp, std.time.us_per_s);
+        return @bitCast((ntp_seconds << 32) | ntp_fraction);
+    }
+
+    test "record packets" {
+        var report: Report = .empty;
+        const payload = "hello";
+        var packet: rtp.Packet = .{
+            .header = .{
+                .ssrc = 0,
+                .timestamp = 1000,
+                .sequence_number = 10,
+                .payload_type = 96,
+                .marker = false,
+                .extension = false,
+                .padding = false,
+            },
+            .payload = payload,
+        };
+
+        report.recordPacket(&packet, 5000);
+
+        try std.testing.expectEqual(10, report.last_sequence_number);
+        try std.testing.expectEqual(1000, report.rtp_timestamp);
+        try std.testing.expectEqual(5000, report.timestamp);
+        try std.testing.expectEqual(1, report.packet_count);
+        try std.testing.expectEqual(payload.len, report.octet_count);
+
+        packet.header.timestamp = 2000;
+        packet.header.sequence_number = 11;
+
+        report.recordPacket(&packet, 6000);
+        try std.testing.expectEqual(11, report.last_sequence_number);
+        try std.testing.expectEqual(2000, report.rtp_timestamp);
+        try std.testing.expectEqual(6000, report.timestamp);
+        try std.testing.expectEqual(2, report.packet_count);
+        try std.testing.expectEqual(payload.len * 2, report.octet_count);
+
+        packet.header.timestamp = 1500;
+        packet.header.sequence_number = 9;
+
+        report.recordPacket(&packet, 7000);
+
+        try std.testing.expectEqual(11, report.last_sequence_number);
+        try std.testing.expectEqual(2000, report.rtp_timestamp);
+        try std.testing.expectEqual(6000, report.timestamp);
+        try std.testing.expectEqual(3, report.packet_count);
+        try std.testing.expectEqual(payload.len * 3, report.octet_count);
+    }
+
+    test "convert microseconds to ntp" {
+        {
+            const ntp = microsecondsToNtp(1782228674132465);
+            try std.testing.expectEqual(0xEDE52542, ntp >> 32);
+            try std.testing.expectEqual(132465, ntp & std.math.maxInt(u32));
+        }
+        {
+            const ntp = microsecondsToNtp(1782228863900100);
+            try std.testing.expectEqual(0xEDE525FF, ntp >> 32);
+            try std.testing.expectEqual(900100, ntp & std.math.maxInt(u32));
+        }
     }
 };
 
@@ -267,7 +408,7 @@ pub const RtpTransceiver = struct {
         tr.* = .{
             .kind = track.kind,
             .direction = .sendrecv,
-            .sender = .{ .track = track },
+            .sender = .init(track),
             .receiver = .init(track.kind),
             .addedByAddTrack = true,
             .transport = transport,
@@ -281,7 +422,7 @@ pub const RtpTransceiver = struct {
         tr.* = .{
             .kind = kind,
             .direction = .sendrecv,
-            .sender = .{ .track = null },
+            .sender = .init(null),
             .receiver = .init(kind),
             .addedByAddTrack = true,
             .transport = transport,
@@ -296,7 +437,7 @@ pub const RtpTransceiver = struct {
             .direction = .recvonly,
             .kind = sdp_media.kind,
             .receiver = .init(sdp_media.kind),
-            .sender = .{},
+            .sender = .init(null),
             .mid = &sdp_media.mid,
             .sdp_mline_index = index,
             .transport = undefined,
@@ -357,14 +498,29 @@ pub const RtpTransceiver = struct {
         // TODO: stop sender and receiver
     }
 
-    test "canAssocaiteTrack" {
-        var tr: RtpTransceiver = .{
-            .sender = .{},
+    /// Get rtcp report of the transceiver.
+    ///
+    /// For now it only gets sender report
+    pub fn getRtcpReport(tr: *const RtpTransceiver, timestamp: i64, buffer: []u8) []const u8 {
+        return switch (tr.direction) {
+            .sendrecv, .sendonly => tr.sender.writeReport(timestamp, buffer),
+            else => &.{},
+        };
+    }
+
+    fn newTestRtpTransceiver() RtpTransceiver {
+        return .{
+            .sender = .init(null),
             .receiver = .{ .track = .{ .id = "track", .kind = .video } },
-            .direction = .recvonly,
+            .direction = .sendrecv,
             .kind = .video,
             .transport = undefined,
         };
+    }
+
+    test "canAssocaiteTrack" {
+        var tr: RtpTransceiver = newTestRtpTransceiver();
+        tr.direction = .recvonly;
 
         try std.testing.expect(tr.canAssociateTrack(.video));
 
@@ -378,6 +534,29 @@ pub const RtpTransceiver = struct {
         tr.sender.track = null;
         tr.stopping = true;
         try std.testing.expect(!tr.canAssociateTrack(.video));
+    }
+
+    test "getRtcpReport" {
+        var tr: RtpTransceiver = newTestRtpTransceiver();
+        tr.sender.codecs = getCodecCapabilities(.video);
+        var buffer: [64]u8 = @splat(0);
+
+        tr.sender.report = .{
+            .last_sequence_number = 0,
+            .rtp_timestamp = 8700,
+            .timestamp = 1782239529800000,
+            .octet_count = 10000,
+            .packet_count = 100,
+        };
+
+        const data = tr.getRtcpReport(1782239530300000, &buffer);
+        const packet = try rtcp.Packet.parse(data);
+        try std.testing.expectEqual(.sender_report, packet.header.payload_type);
+        try std.testing.expectEqual(tr.sender.ssrc, packet.payload.sender_report.ssrc);
+        try std.testing.expectEqual(53700, packet.payload.sender_report.rtp_timestamp);
+        try std.testing.expectEqual(17142195148218995680, packet.payload.sender_report.ntp_timestamp);
+        try std.testing.expectEqual(10000, packet.payload.sender_report.octet_count);
+        try std.testing.expectEqual(100, packet.payload.sender_report.packet_count);
     }
 };
 
