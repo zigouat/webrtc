@@ -95,10 +95,10 @@ test "addTransceiver" {
 }
 
 test "Negotiate between peers" {
-    var pc1: PeerConnection = try .init(io, allocator, .{});
+    var pc1: PeerConnection = try .init(io, allocator, .{ .inner_queue_size = 20 });
     defer pc1.deinit();
 
-    var pc2: PeerConnection = try .init(io, allocator, .{});
+    var pc2: PeerConnection = try .init(io, allocator, .{ .inner_queue_size = 20 });
     defer pc2.deinit();
 
     _ = try pc1.addTrack(.{ .id = "video1", .kind = .video });
@@ -124,6 +124,13 @@ test "Negotiate between peers" {
         try testing.expectEqual(.recvonly, tr.current_direction);
     }
 
+    // pc2 track events
+    for (0..2) |_| {
+        const event = try pc2.poll();
+        try testing.expectEqual(.track_event, std.meta.activeTag(event));
+        try testing.expectEqualStrings("track-recv", event.track_event.track.id);
+    }
+
     for (0..10) |_| {
         const screen1 = try pc1.addTrack(.{ .id = "screenshare", .kind = .video });
         const screen2 = try pc2.addTrack(.{ .id = "screenshare", .kind = .video });
@@ -131,6 +138,11 @@ test "Negotiate between peers" {
 
         try testing.expectEqual(3, pc1.getTransceivers().len);
         try testing.expectEqual(3, pc2.getTransceivers().len);
+
+        const event = try pc1.poll();
+        try testing.expectEqual(.track_event, std.meta.activeTag(event));
+        // screenshare is linked to video1
+        try testing.expectEqualStrings("video1", event.track_event.track.id);
 
         try pc1.removeTrack(screen1);
         try pc2.removeTrack(screen2);

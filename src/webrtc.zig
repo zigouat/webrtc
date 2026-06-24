@@ -198,6 +198,12 @@ pub const MediaStreamTrack = struct {
     kind: TrackKind,
 };
 
+pub const TrackEventInit = struct {
+    receiver: *RtpReceiver,
+    track: MediaStreamTrack,
+    transceiver: *RtpTransceiver,
+};
+
 pub const RtpSender = struct {
     track: ?MediaStreamTrack,
     codecs: []const RtpCodecParameters,
@@ -279,6 +285,7 @@ pub const RtpSender = struct {
     }
 
     fn writeReport(sender: *const RtpSender, timestamp: i64, buffer: []u8) []const u8 {
+        if (sender.report.packet_count == 0) return &.{};
         std.debug.assert(buffer.len >= rtcp.header_size + rtcp.sr_base_size);
         const length = rtcp.header_size + rtcp.sr_base_size;
 
@@ -376,8 +383,8 @@ pub const RtpReceiver = struct {
     track: MediaStreamTrack,
     codecs: []const RtpCodecParameters = &.{},
 
-    pub fn init(kind: TrackKind) RtpReceiver {
-        return .{ .track = .{ .id = "recv-track", .kind = kind } };
+    pub fn init(track: MediaStreamTrack) RtpReceiver {
+        return .{ .track = track };
     }
 
     pub fn getCapabilities(kind: TrackKind) RtpCapabilities {
@@ -397,6 +404,7 @@ pub const RtpTransceiver = struct {
     kind: TrackKind,
     direction: Direction,
     current_direction: ?Direction = null,
+    fired_direction: ?Direction = null,
     mid: ?[]const u8 = null,
     sdp_mline_index: ?u8 = null,
     stopping: bool = false,
@@ -409,7 +417,7 @@ pub const RtpTransceiver = struct {
             .kind = track.kind,
             .direction = .sendrecv,
             .sender = .init(track),
-            .receiver = .init(track.kind),
+            .receiver = .init(track),
             .addedByAddTrack = true,
             .transport = transport,
         };
@@ -423,7 +431,7 @@ pub const RtpTransceiver = struct {
             .kind = kind,
             .direction = .sendrecv,
             .sender = .init(null),
-            .receiver = .init(kind),
+            .receiver = .init(.{ .kind = kind, .id = "track-recv" }),
             .addedByAddTrack = true,
             .transport = transport,
         };
@@ -433,10 +441,12 @@ pub const RtpTransceiver = struct {
 
     pub fn initFromSdpMedia(allocator: std.mem.Allocator, sdp_media: *const SDPSession.SDPMedia, index: u8) !*RtpTransceiver {
         const tr = try allocator.create(RtpTransceiver);
+        const track_id = if (sdp_media.msid) |msid| msid.app_data orelse "track-recv" else "track-recv";
+
         tr.* = .{
             .direction = .recvonly,
             .kind = sdp_media.kind,
-            .receiver = .init(sdp_media.kind),
+            .receiver = .init(.{ .id = track_id, .kind = sdp_media.kind }),
             .sender = .init(null),
             .mid = &sdp_media.mid,
             .sdp_mline_index = index,
@@ -495,7 +505,38 @@ pub const RtpTransceiver = struct {
         if (tr.direction != .stopped) tr.stopping = true;
         tr.direction = .stopped;
         tr.current_direction = null;
+        tr.fired_direction = null;
         // TODO: stop sender and receiver
+    }
+
+    pub fn processRemoteTrack(tr: *RtpTransceiver, direction: Direction) ?TrackEventInit {
+        // It's safe to set default value to inactive
+        // Since it's not included in the clauses that mute tracks and it's included
+        // in the clauses that create init track event.
+        const fired_direction = tr.fired_direction orelse .inactive;
+        tr.fired_direction = direction;
+
+        switch (direction) {
+            .sendonly, .inactive => {
+                switch (fired_direction) {
+                    .sendrecv, .recvonly => {}, // TODO: mute track
+                    else => {},
+                }
+            },
+            .sendrecv, .recvonly => {
+                switch (fired_direction) {
+                    .sendrecv, .recvonly => {},
+                    else => return TrackEventInit{
+                        .receiver = &tr.receiver,
+                        .track = tr.receiver.track,
+                        .transceiver = tr,
+                    },
+                }
+            },
+            else => {},
+        }
+
+        return null;
     }
 
     /// Get rtcp report of the transceiver.

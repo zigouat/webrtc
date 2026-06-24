@@ -81,14 +81,16 @@ pub fn applyIceAttributes(transport: *DtlsTransport, media: *SDPSession.SDPMedia
     if (remote_credens) |credens| {
         if (!std.mem.eql(u8, media.ice_ufrag, credens.username) or !std.mem.eql(u8, media.ice_pwd, credens.password))
             return error.MismatchedIceCredentials;
-    } else try transport.ice_agent.setRemoteCredentials(.{ .username = media.ice_ufrag, .password = media.ice_pwd });
+    } else {
+        try transport.ice_agent.setRemoteCredentials(.{ .username = media.ice_ufrag, .password = media.ice_pwd });
 
-    for (media.candidates) |candidate| {
-        if (candidate.component != 1 or candidate.transport == .tcp or std.meta.activeTag(candidate.address) == .ip6) continue;
-        try transport.ice_agent.addRemoteCandidate(candidate);
+        for (media.candidates) |candidate| {
+            if (candidate.component != 1 or candidate.transport == .tcp or std.meta.activeTag(candidate.address) == .ip6) continue;
+            try transport.ice_agent.addRemoteCandidate(candidate);
+        }
+
+        try transport.session.setRole(media.setup == .active);
     }
-
-    try transport.session.setRole(media.setup == .active);
 }
 
 pub fn gatherCandidates(transport: *DtlsTransport, role: ice.Role) !void {
