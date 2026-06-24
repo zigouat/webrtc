@@ -236,9 +236,9 @@ test "parse: sdp offer" {
 
     try testing.expectEqualSlices(u8, &expected_fingerprint, &session.fingerprint);
     try testing.expect(!session.ice_lite);
-    try testing.expectEqual(2, session.medias.len);
+    try testing.expectEqual(2, session.getMedias().len);
 
-    const audio_media = session.medias[0];
+    const audio_media = session.getMedias()[0];
     try testing.expectEqual(.audio, audio_media.kind);
     try testing.expectEqual(9, audio_media.port);
     try testing.expectEqualStrings("0", audio_media.getMid());
@@ -283,7 +283,7 @@ test "parse: sdp offer" {
         audio_media.rtp_header_extensions[0].uri,
     );
 
-    const video_media = session.medias[1];
+    const video_media = session.getMedias()[1];
     try testing.expectEqual(.video, video_media.kind);
     try testing.expectEqual(9, video_media.port);
     try testing.expectEqualStrings("1", video_media.getMid());
@@ -348,9 +348,19 @@ test "parse: sdp offer" {
 }
 
 test "parse: missing bundle group" {
+    const sdp = head ++
+        \\m=audio 9 UDP/TLS/RTP/SAVPF 111
+        \\c=IN IP4 0.0.0.0
+        \\a=rtpmap:111 opus/48000/2
+        \\a=setup:actpass
+        \\a=mid:0
+        \\a=rtcp-mux
+        \\
+    ;
+
     try testing.expectError(
         error.MissingBundleGroup,
-        SDPSession.parse(testing.allocator, head),
+        SDPSession.parse(testing.allocator, sdp),
     );
 }
 

@@ -506,7 +506,7 @@ pub const RtpTransceiver = struct {
         var media: SDPSession.SDPMedia = .empty;
 
         media.kind = tr.kind;
-        media.port = if (tr.current_direction == .stopped) 0 else 9;
+        media.port = if (tr.stopping) 0 else 9;
         media.direction = tr.direction;
         media.rtp_codec_parameters = try allocator.dupe(RtpCodecParameters, getCodecCapabilities(tr.kind));
         media.rtcp_mux = true;
@@ -544,11 +544,14 @@ pub const RtpTransceiver = struct {
     }
 
     pub fn stop(tr: *RtpTransceiver) void {
-        if (tr.direction != .stopped) tr.stopping = true;
-        tr.direction = .stopped;
-        tr.current_direction = null;
-        tr.fired_direction = null;
+        if (tr.stopping) return;
+        tr.stopping = true;
+        tr.direction = .inactive;
         // TODO: stop sender and receiver
+    }
+
+    pub fn isStopped(tr: *const RtpTransceiver) bool {
+        return tr.stopping or tr.direction == .stopped;
     }
 
     pub fn processRemoteTrack(tr: *RtpTransceiver, direction: Direction) ?TrackEventInit {

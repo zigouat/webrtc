@@ -21,9 +21,9 @@ pub fn deinit(demuxer: *Demuxer) void {
 }
 
 pub fn updateMaps(demuxer: *Demuxer, sdp_session: *const SDPSession) !void {
-    for (sdp_session.medias) |*media| {
+    for (sdp_session.getMedias()) |*media| {
         inner: for (media.rtp_codec_parameters) |codec| {
-            for (sdp_session.medias) |*m| if (!std.mem.eql(u8, media.getMid(), m.getMid()) and m.hasPayload(codec.payload_type))
+            for (sdp_session.getMedias()) |*m| if (!std.mem.eql(u8, media.getMid(), m.getMid()) and m.hasPayload(codec.payload_type))
                 continue :inner;
 
             try demuxer.pt_to_mid.put(codec.payload_type, media.mid);
@@ -60,7 +60,7 @@ fn testSdpSession(alloc: std.mem.Allocator) !SDPSession {
     for (medias) |*m| m.* = .empty;
 
     var session: SDPSession = .empty;
-    session.medias = medias;
+    session.medias = .fromOwnedSlice(medias);
 
     var media1_params = try alloc.alloc(RtpCodecParameters, 3);
     medias[0].rtp_codec_parameters = media1_params;

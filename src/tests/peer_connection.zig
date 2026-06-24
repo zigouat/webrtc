@@ -1,6 +1,7 @@
 const std = @import("std");
 const PeerConnection = @import("../peer_connection.zig");
 const webrtc = @import("../webrtc.zig");
+const SDPSession = @import("../sdp_session.zig");
 
 const testing = std.testing;
 const io = testing.io;
@@ -93,6 +94,92 @@ test "addTransceiver" {
     }
 }
 
+test "createOffer: empty offer" {
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    defer pc.deinit();
+
+    const offer = try pc.createOffer();
+    try testing.expectEqual(.offer, offer.desc_type);
+
+    const sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
+    try testing.expectEqual(0, sdp_session.getMedias().len);
+}
+
+test "createOffer: m-lines created for each transceiver" {
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    defer pc.deinit();
+
+    _ = try pc.addTrack(.initWithId("video", .video));
+    _ = try pc.addTrack(.initWithId("audio", .audio));
+    _ = try pc.addTrack(.initWithId("video", .video));
+
+    const offer = try pc.createOffer();
+    try testing.expectEqual(.offer, offer.desc_type);
+
+    var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
+    defer sdp_session.deinit(testing.allocator);
+
+    try testing.expectEqual(3, sdp_session.getMedias().len);
+    const transceivers = pc.getTransceivers();
+    const medias = sdp_session.getMedias();
+    for (transceivers, medias, 0..) |tr, media, idx| {
+        try testing.expectEqual(media.kind, tr.kind);
+        try testing.expectEqual(idx, tr.sdp_mline_index.?);
+        try testing.expect(media.getMid().len != 0);
+    }
+}
+
+test "createOffer: stopped non-associted transceiver is ignored" {
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    defer pc.deinit();
+
+    const tr = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
+    tr.stop();
+
+    _ = try pc.addTrack(.initWithId("video", .video));
+
+    const offer = try pc.createOffer();
+    try testing.expectEqual(.offer, offer.desc_type);
+
+    var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
+    defer sdp_session.deinit(testing.allocator);
+
+    try testing.expectEqual(1, sdp_session.getMedias().len);
+}
+
+test "createOffer: multiple offers" {
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    defer pc.deinit();
+
+    _ = try pc.addTrack(.initWithId("video", .video));
+    _ = try pc.addTrack(.initWithId("audio", .audio));
+
+    var offer = try pc.createOffer();
+    try pc.setLocalDescription(offer);
+    pc.getTransceivers()[1].stop();
+
+    offer = try pc.createOffer();
+    var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
+    try testing.expectEqual(2, sdp_session.getMedias().len);
+    try testing.expect(sdp_session.getMedias()[1].port == 0);
+    const old_mid = sdp_session.getMedias()[1].mid;
+
+    try pc.setLocalDescription(offer);
+    _ = try pc.addTrack(.initWithId("video2", .video));
+
+    offer = try pc.createOffer();
+    sdp_session.deinit(testing.allocator);
+    sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
+    defer sdp_session.deinit(testing.allocator);
+
+    std.debug.print("{s}\n", .{offer.sdp});
+
+    // Test media recycling
+    try testing.expectEqual(2, sdp_session.getMedias().len);
+    try testing.expect(sdp_session.getMedias()[1].port != 0);
+    try testing.expect(!std.mem.eql(u8, &old_mid, sdp_session.getMedias()[1].getMid()));
+}
+
 test "Negotiate between peers" {
     var pc1: PeerConnection = try .init(io, allocator, .{ .inner_queue_size = 20 });
     defer pc1.deinit();
@@ -158,4 +245,9 @@ fn negotiate(pc1: *PeerConnection, pc2: *PeerConnection) !void {
     const answer = try pc2.createAnswer();
     try pc2.setLocalDescription(answer);
     try pc1.setRemoteDescription(answer);
+}
+
+test "weird scenarios" {
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    defer pc.deinit();
 }

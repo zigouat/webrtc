@@ -33,7 +33,7 @@ pub fn main(init: std.process.Init) !void {
     pc = try .init(io, allocator, .{});
     defer pc.deinit();
 
-    const sender = try pc.addTrack(.{ .id = "video-track", .kind = .video });
+    const sender = try pc.addTrack(.initWithId("video-track", .video));
 
     try grp.concurrent(io, startHttpServer, .{ io, allocator });
 

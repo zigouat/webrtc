@@ -25,13 +25,13 @@ pub const Error = SDPError || std.mem.Allocator.Error;
 fingerprint: [32]u8,
 bundle: []const u8,
 ice_lite: bool,
-medias: []SDPMedia,
+medias: std.ArrayList(SDPMedia),
 
 pub const empty: SDPSession = .{
     .fingerprint = @splat(0),
     .bundle = &.{},
     .ice_lite = false,
-    .medias = &.{},
+    .medias = .empty,
 };
 
 pub const SDPMedia = struct {
@@ -207,6 +207,13 @@ pub const SDPMedia = struct {
         return std.mem.sliceTo(&media.mid, 0);
     }
 
+    pub fn clone(media: *const SDPMedia, allocator: std.mem.Allocator) !SDPMedia {
+        var new_media = media.*;
+        new_media.rtp_codec_parameters = try allocator.dupe(webrtc.RtpCodecParameters, media.rtp_codec_parameters);
+        new_media.rtp_header_extensions = try allocator.dupe(webrtc.RtpHeaderExtensionParameter, media.rtp_header_extensions);
+        return new_media;
+    }
+
     fn validateRtpCodecParameters(rtp_codec_parameters: std.ArrayList(webrtc.RtpCodecParameters)) !void {
         for (rtp_codec_parameters.items) |*rtp_codec| {
             if (rtp_codec.mime_type.len == 0) return error.InvalidMedia; // no rtpmap entry exists
@@ -237,6 +244,10 @@ pub const SDPMedia = struct {
     }
 };
 
+pub inline fn getMedias(session: *const SDPSession) []SDPMedia {
+    return session.medias.items;
+}
+
 pub fn parse(allocator: std.mem.Allocator, data: []const u8) !SDPSession {
     const session = sdp.Session.parse(data) catch return error.ParseError;
     if (session.version != 0) return error.ParseError;
@@ -257,8 +268,6 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !SDPSession {
         else => {},
     };
 
-    if (result.bundle.len == 0) return error.MissingBundleGroup;
-
     var medias: std.ArrayList(SDPMedia) = .empty;
     errdefer {
         for (medias.items) |*m| m.deinit(allocator);
@@ -270,21 +279,24 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !SDPSession {
         try medias.append(allocator, try .parse(allocator, media, &result.fingerprint));
     }
 
+    for (medias.items) |*media| if (media.port != 0 and result.bundle.len == 0)
+        return error.MissingBundleGroup;
+
     // TODO: check all media have different mid values
     try validateIceCredentials(medias.items);
 
-    result.medias = try medias.toOwnedSlice(allocator);
+    result.medias = medias;
     return result;
 }
 
 pub fn deinit(s: *SDPSession, allocator: std.mem.Allocator) void {
-    for (s.medias) |*m| m.deinit(allocator);
-    allocator.free(s.medias);
+    for (s.getMedias()) |*m| m.deinit(allocator);
+    s.medias.deinit(allocator);
 }
 
 pub fn write(s: *const SDPSession, w: *std.Io.Writer) !void {
     var bundle: bool = false;
-    for (s.medias) |*m| if (m.port != 0) {
+    for (s.getMedias()) |*m| if (m.port != 0) {
         bundle = true;
         break;
     };
@@ -293,13 +305,31 @@ pub fn write(s: *const SDPSession, w: *std.Io.Writer) !void {
 
     if (bundle) {
         try w.writeAll("a=group:BUNDLE");
-        for (s.medias) |*m| if (m.port != 0) try w.print(" {s}", .{m.getMid()});
+        for (s.getMedias()) |*m| if (m.port != 0) try w.print(" {s}", .{m.getMid()});
         try w.writeAll("\r\n");
     }
 
     try SDPAttribute.write(.{ .ice_options = .{ .ice2 = true } }, w);
     try s.writeFingerprint(w);
-    for (s.medias) |*m| try m.write(w);
+    for (s.getMedias()) |*m| try m.write(w);
+}
+
+pub fn clone(s: *const SDPSession, allocator: std.mem.Allocator) !SDPSession {
+    var new_session: SDPSession = .{
+        .bundle = &.{},
+        .fingerprint = s.fingerprint,
+        .ice_lite = s.ice_lite,
+        .medias = try .initCapacity(allocator, s.getMedias().len),
+    };
+    errdefer new_session.deinit(allocator);
+
+    for (s.getMedias()) |*m| {
+        const media = try new_session.medias.addOne(allocator);
+        media.* = .empty;
+        media.* = try m.clone(allocator);
+    }
+
+    return new_session;
 }
 
 fn writeFingerprint(s: *const SDPSession, w: *std.Io.Writer) !void {
