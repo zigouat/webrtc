@@ -49,6 +49,7 @@ pub const SDPMedia = struct {
     fingerprint: ?[32]u8,
     rtcp_mux: bool,
     rtcp_rsize: bool,
+    msid: ?sdp.Attribute.Msid,
 
     pub const empty: SDPMedia = .{
         .kind = .video,
@@ -65,6 +66,7 @@ pub const SDPMedia = struct {
         .setup = .actpass,
         .rtcp_mux = false,
         .rtcp_rsize = false,
+        .msid = null,
     };
 
     pub fn parse(allocator: std.mem.Allocator, media: sdp.Media, fingerprint: *[32]u8) !SDPMedia {
@@ -150,6 +152,7 @@ pub const SDPMedia = struct {
                 .id = @intCast(extmap.id),
                 .uri = extmap.uri,
             }),
+            .msid => |msid| sdp_media.msid = msid,
             else => {},
         };
 

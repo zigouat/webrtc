@@ -19,6 +19,7 @@ pub const Error = error{InvalidState} || std.mem.Allocator.Error;
 
 pub const Event = union(enum) {
     connection_state: webrtc.ConnectionState,
+    track_event: webrtc.TrackEventInit,
     rtp: rtp.Packet,
     rtcp: []const u8,
 };
@@ -45,7 +46,9 @@ queue_buffer: []Event,
 queue: Io.Queue(Event),
 group: std.Io.Group = .init,
 
-pub const Config = struct {};
+pub const Config = struct {
+    inner_queue_size: u8 = 5,
+};
 
 const ParsedSesssionDescription = struct {
     desc_type: webrtc.SessionDescriptionType,
@@ -79,12 +82,10 @@ const ParsedSesssionDescription = struct {
 };
 
 pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnection {
-    _ = config;
-
     var dtls_transport: DtlsTransport = try .init(io, allocator, .{});
     errdefer dtls_transport.deinit();
 
-    const queue_buffer = try allocator.alloc(Event, 5);
+    const queue_buffer = try allocator.alloc(Event, config.inner_queue_size);
 
     return .{
         .signaling_state = .stable,
@@ -474,6 +475,8 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
         tr.current_direction = media.direction;
         tr.sender.codecs = codecs.@"0";
         tr.receiver.codecs = codecs.@"1";
+
+        // TODO: track removal
     }
 
     // if there's no negotiated media, don't start connectivity checks
@@ -496,8 +499,6 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescr
     var remote_sdp = try SDPSession.parse(pc.allocator, sdp_text);
     errdefer remote_sdp.deinit(pc.allocator);
 
-    const renegotiation = pc.remote_description != null;
-
     if (session_desc.desc_type == .answer) {
         const local_session = pc.pending_local_description.?.session;
         if (remote_sdp.medias.len != local_session.medias.len) return error.InvalidAnswer;
@@ -508,6 +509,8 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescr
     // TODO: Add rtcp feedback
 
     var first_media: ?*SDPSession.SDPMedia = null;
+    var track_events: std.ArrayList(webrtc.TrackEventInit) = .empty;
+    defer track_events.deinit(pc.allocator);
     for (remote_sdp.medias, 0..) |*media, idx| {
         var transceiver = blk: {
             switch (session_desc.desc_type) {
@@ -519,7 +522,12 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescr
                     if (pc.findTransceiverByMediaIndex(idx)) |tr| break :blk tr;
                     for (pc.transceivers.items) |tr| if (tr.canAssociateMedia(media)) break :blk tr;
 
-                    const tr = try webrtc.RtpTransceiver.initFromSdpMedia(pc.allocator, media, @intCast(idx));
+                    const tr = try webrtc.RtpTransceiver.initFromSdpMedia(
+                        pc.allocator,
+                        pc.dtls_transport.getIo(),
+                        media,
+                        @intCast(idx),
+                    );
                     errdefer tr.deinit(pc.allocator);
                     tr.transport = &pc.dtls_transport;
                     try pc.transceivers.append(pc.allocator, tr);
@@ -555,12 +563,16 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescr
             transceiver.sender.codecs = codecs.@"0";
             transceiver.receiver.codecs = codecs.@"1";
         }
+
+        if (transceiver.processRemoteTrack(direction)) |track_init_event| {
+            try track_events.append(pc.allocator, track_init_event);
+        }
     }
 
-    if (!renegotiation) if (first_media) |media| {
+    if (first_media) |media| {
         try pc.dtls_transport.applyIceAttributes(media);
         pc.dtls_transport.setPeerFingerprint(&remote_sdp.fingerprint);
-    };
+    }
 
     switch (session_desc.desc_type) {
         .answer => {
@@ -584,6 +596,9 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescr
         },
         else => {},
     }
+
+    for (track_events.items) |event|
+        try pc.queue.putOne(pc.dtls_transport.getIo(), .{ .track_event = event });
 }
 
 fn updateSignalingStateToStable(pc: *PeerConnection) void {

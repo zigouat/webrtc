@@ -193,9 +193,51 @@ pub const SessionDescription = struct {
 };
 
 pub const MediaStreamTrack = struct {
-    id: []const u8,
-    stream_id: ?[]const u8 = null,
+    id: [64:0]u8,
+    stream_id: [][]const u8 = &.{},
     kind: TrackKind,
+
+    /// Init a new track with generated id.
+    ///
+    /// Th io instance is needed to generate an id
+    pub fn init(io: std.Io, kind: TrackKind) MediaStreamTrack {
+        var buf: [16]u8 = undefined;
+        io.random(&buf);
+
+        var track: MediaStreamTrack = .{
+            .id = @splat(0),
+            .kind = kind,
+        };
+
+        @memcpy(track.id[0..32], &std.fmt.bytesToHex(buf, .lower));
+        return track;
+    }
+
+    pub fn initWithId(id: []const u8, kind: TrackKind) MediaStreamTrack {
+        std.debug.assert(id.len <= 64);
+        var track: MediaStreamTrack = .{
+            .id = @splat(0),
+            .kind = kind,
+        };
+
+        @memcpy(track.id[0..id.len], id);
+        return track;
+    }
+
+    pub fn getId(track: *const MediaStreamTrack) []const u8 {
+        return std.mem.sliceTo(&track.id, 0);
+    }
+
+    test "init" {
+        const track = init(std.testing.io, .video);
+        try std.testing.expect(!std.mem.eql(u8, &track.id, &@as([64:0]u8, @splat(0))));
+    }
+};
+
+pub const TrackEventInit = struct {
+    receiver: *RtpReceiver,
+    track: MediaStreamTrack,
+    transceiver: *RtpTransceiver,
 };
 
 pub const RtpSender = struct {
@@ -279,6 +321,7 @@ pub const RtpSender = struct {
     }
 
     fn writeReport(sender: *const RtpSender, timestamp: i64, buffer: []u8) []const u8 {
+        if (sender.report.packet_count == 0) return &.{};
         std.debug.assert(buffer.len >= rtcp.header_size + rtcp.sr_base_size);
         const length = rtcp.header_size + rtcp.sr_base_size;
 
@@ -376,8 +419,8 @@ pub const RtpReceiver = struct {
     track: MediaStreamTrack,
     codecs: []const RtpCodecParameters = &.{},
 
-    pub fn init(kind: TrackKind) RtpReceiver {
-        return .{ .track = .{ .id = "recv-track", .kind = kind } };
+    pub fn init(track: MediaStreamTrack) RtpReceiver {
+        return .{ .track = track };
     }
 
     pub fn getCapabilities(kind: TrackKind) RtpCapabilities {
@@ -397,6 +440,7 @@ pub const RtpTransceiver = struct {
     kind: TrackKind,
     direction: Direction,
     current_direction: ?Direction = null,
+    fired_direction: ?Direction = null,
     mid: ?[]const u8 = null,
     sdp_mline_index: ?u8 = null,
     stopping: bool = false,
@@ -409,7 +453,7 @@ pub const RtpTransceiver = struct {
             .kind = track.kind,
             .direction = .sendrecv,
             .sender = .init(track),
-            .receiver = .init(track.kind),
+            .receiver = .init(track),
             .addedByAddTrack = true,
             .transport = transport,
         };
@@ -423,7 +467,7 @@ pub const RtpTransceiver = struct {
             .kind = kind,
             .direction = .sendrecv,
             .sender = .init(null),
-            .receiver = .init(kind),
+            .receiver = .init(.init(transport.getIo(), kind)),
             .addedByAddTrack = true,
             .transport = transport,
         };
@@ -431,12 +475,20 @@ pub const RtpTransceiver = struct {
         return tr;
     }
 
-    pub fn initFromSdpMedia(allocator: std.mem.Allocator, sdp_media: *const SDPSession.SDPMedia, index: u8) !*RtpTransceiver {
+    pub fn initFromSdpMedia(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        sdp_media: *const SDPSession.SDPMedia,
+        index: u8,
+    ) !*RtpTransceiver {
         const tr = try allocator.create(RtpTransceiver);
+        const track_id = if (sdp_media.msid) |msid| msid.app_data orelse "" else "";
+        const track: MediaStreamTrack = if (track_id.len == 0) .init(io, sdp_media.kind) else .initWithId(track_id, sdp_media.kind);
+
         tr.* = .{
             .direction = .recvonly,
             .kind = sdp_media.kind,
-            .receiver = .init(sdp_media.kind),
+            .receiver = .init(track),
             .sender = .init(null),
             .mid = &sdp_media.mid,
             .sdp_mline_index = index,
@@ -495,7 +547,38 @@ pub const RtpTransceiver = struct {
         if (tr.direction != .stopped) tr.stopping = true;
         tr.direction = .stopped;
         tr.current_direction = null;
+        tr.fired_direction = null;
         // TODO: stop sender and receiver
+    }
+
+    pub fn processRemoteTrack(tr: *RtpTransceiver, direction: Direction) ?TrackEventInit {
+        // It's safe to set default value to inactive
+        // Since it's not included in the clauses that mute tracks and it's included
+        // in the clauses that create init track event.
+        const fired_direction = tr.fired_direction orelse .inactive;
+        tr.fired_direction = direction;
+
+        switch (direction) {
+            .sendonly, .inactive => {
+                switch (fired_direction) {
+                    .sendrecv, .recvonly => {}, // TODO: mute track
+                    else => {},
+                }
+            },
+            .sendrecv, .recvonly => {
+                switch (fired_direction) {
+                    .sendrecv, .recvonly => {},
+                    else => return TrackEventInit{
+                        .receiver = &tr.receiver,
+                        .track = tr.receiver.track,
+                        .transceiver = tr,
+                    },
+                }
+            },
+            else => {},
+        }
+
+        return null;
     }
 
     /// Get rtcp report of the transceiver.
@@ -508,10 +591,10 @@ pub const RtpTransceiver = struct {
         };
     }
 
-    fn newTestRtpTransceiver() RtpTransceiver {
+    fn newTestRtpTransceiver(io: std.Io) RtpTransceiver {
         return .{
             .sender = .init(null),
-            .receiver = .{ .track = .{ .id = "track", .kind = .video } },
+            .receiver = .{ .track = .init(io, .video) },
             .direction = .sendrecv,
             .kind = .video,
             .transport = undefined,
@@ -519,7 +602,7 @@ pub const RtpTransceiver = struct {
     }
 
     test "canAssocaiteTrack" {
-        var tr: RtpTransceiver = newTestRtpTransceiver();
+        var tr: RtpTransceiver = newTestRtpTransceiver(std.testing.io);
         tr.direction = .recvonly;
 
         try std.testing.expect(tr.canAssociateTrack(.video));
@@ -528,7 +611,7 @@ pub const RtpTransceiver = struct {
         try std.testing.expect(!tr.canAssociateTrack(.video));
 
         tr.kind = .video;
-        tr.sender.track = .{ .id = "track-1", .kind = .video };
+        tr.sender.track = .init(std.testing.io, .video);
         try std.testing.expect(!tr.canAssociateTrack(.video));
 
         tr.sender.track = null;
@@ -537,7 +620,7 @@ pub const RtpTransceiver = struct {
     }
 
     test "getRtcpReport" {
-        var tr: RtpTransceiver = newTestRtpTransceiver();
+        var tr: RtpTransceiver = newTestRtpTransceiver(std.testing.io);
         tr.sender.codecs = getCodecCapabilities(.video);
         var buffer: [64]u8 = @splat(0);
 
@@ -557,6 +640,24 @@ pub const RtpTransceiver = struct {
         try std.testing.expectEqual(17142195148218995680, packet.payload.sender_report.ntp_timestamp);
         try std.testing.expectEqual(10000, packet.payload.sender_report.octet_count);
         try std.testing.expectEqual(100, packet.payload.sender_report.packet_count);
+    }
+
+    test "processRemoteTrack" {
+        var tr = newTestRtpTransceiver(std.testing.io);
+
+        var maybe_event = tr.processRemoteTrack(.sendrecv);
+        try std.testing.expect(maybe_event != null);
+        try std.testing.expect(maybe_event.?.transceiver == &tr);
+        try std.testing.expect(tr.fired_direction == .sendrecv);
+
+        maybe_event = tr.processRemoteTrack(.recvonly);
+        try std.testing.expect(maybe_event == null);
+
+        maybe_event = tr.processRemoteTrack(.inactive);
+        try std.testing.expect(maybe_event == null);
+
+        maybe_event = tr.processRemoteTrack(.recvonly);
+        try std.testing.expect(maybe_event != null);
     }
 };
 
