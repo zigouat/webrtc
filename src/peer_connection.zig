@@ -522,7 +522,12 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescr
                     if (pc.findTransceiverByMediaIndex(idx)) |tr| break :blk tr;
                     for (pc.transceivers.items) |tr| if (tr.canAssociateMedia(media)) break :blk tr;
 
-                    const tr = try webrtc.RtpTransceiver.initFromSdpMedia(pc.allocator, media, @intCast(idx));
+                    const tr = try webrtc.RtpTransceiver.initFromSdpMedia(
+                        pc.allocator,
+                        pc.dtls_transport.getIo(),
+                        media,
+                        @intCast(idx),
+                    );
                     errdefer tr.deinit(pc.allocator);
                     tr.transport = &pc.dtls_transport;
                     try pc.transceivers.append(pc.allocator, tr);
