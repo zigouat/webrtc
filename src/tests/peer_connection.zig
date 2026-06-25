@@ -189,9 +189,6 @@ test "Negotiate between peers" {
     var pc2: PeerConnection = try .init(io, allocator, .{ .inner_queue_size = 1 });
     defer pc2.deinit();
 
-    var grp: std.Io.Group = .init;
-    defer grp.cancel(io);
-
     var pc1_collector: EventCollector = .{};
     var pc2_collector: EventCollector = .{};
     defer pc1_collector.deinit();
