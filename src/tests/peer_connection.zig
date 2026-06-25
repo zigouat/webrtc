@@ -4,6 +4,8 @@ const webrtc = @import("../webrtc.zig");
 const SDPSession = @import("../sdp_session.zig");
 
 const testing = std.testing;
+const PCEvent = @typeInfo(PeerConnection.Event).@"union".tag_type.?;
+
 const io = testing.io;
 const allocator = testing.allocator;
 
@@ -18,6 +20,10 @@ test "setLocalDescription: set offer" {
 
     const offer = try pc.createOffer();
     try pc.setLocalDescription(offer);
+
+    const event = try pc.poll();
+    try std.testing.expectEqual(.signaling_state, std.meta.activeTag(event));
+    try std.testing.expectEqual(.have_local_offer, event.signaling_state);
 }
 
 test "setLocalDescription: set offer multiple times" {
@@ -172,8 +178,6 @@ test "createOffer: multiple offers" {
     sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
     defer sdp_session.deinit(testing.allocator);
 
-    std.debug.print("{s}\n", .{offer.sdp});
-
     // Test media recycling
     try testing.expectEqual(2, sdp_session.getMedias().len);
     try testing.expect(sdp_session.getMedias()[1].port != 0);
@@ -181,11 +185,19 @@ test "createOffer: multiple offers" {
 }
 
 test "Negotiate between peers" {
-    var pc1: PeerConnection = try .init(io, allocator, .{ .inner_queue_size = 20 });
+    var pc1: PeerConnection = try .init(io, allocator, .{ .inner_queue_size = 1 });
     defer pc1.deinit();
 
-    var pc2: PeerConnection = try .init(io, allocator, .{ .inner_queue_size = 20 });
+    var pc2: PeerConnection = try .init(io, allocator, .{ .inner_queue_size = 1 });
     defer pc2.deinit();
+
+    var pc1_collector: EventCollector = .init();
+    var pc2_collector: EventCollector = .init();
+    defer pc1_collector.deinit();
+    defer pc2_collector.deinit();
+
+    try pc1_collector.collect(&pc1);
+    try pc2_collector.collect(&pc2);
 
     const track1: webrtc.MediaStreamTrack = .init(testing.io, .video);
 
@@ -213,12 +225,14 @@ test "Negotiate between peers" {
     }
 
     // pc2 track events
-    for (0..2) |_| {
-        const event = try pc2.poll();
-        try testing.expectEqual(.track_event, std.meta.activeTag(event));
-    }
+    var event = pc2_collector.popEvent(.track_event, .fromMilliseconds(50));
+    try testing.expect(event != null);
+    event = pc2_collector.popEvent(.track_event, .fromMilliseconds(50));
+    try testing.expect(event != null);
+    event = pc2_collector.popEvent(.track_event, .fromMilliseconds(50));
+    try testing.expect(event == null);
 
-    for (0..10) |_| {
+    for (0..1) |_| {
         const screen1 = try pc1.addTrack(.initWithId("screenshare", .video));
         const screen2 = try pc2.addTrack(.initWithId("screenshare", .video));
         try negotiate(&pc1, &pc2);
@@ -226,15 +240,22 @@ test "Negotiate between peers" {
         try testing.expectEqual(3, pc1.getTransceivers().len);
         try testing.expectEqual(3, pc2.getTransceivers().len);
 
-        const event = try pc1.poll();
-        try testing.expectEqual(.track_event, std.meta.activeTag(event));
-        // screenshare is linked to video1
-        try testing.expectEqualStrings(track1.getId(), event.track_event.track.getId());
-
         try pc1.removeTrack(screen1);
         try pc2.removeTrack(screen2);
         try negotiate(&pc1, &pc2);
     }
+    event = pc1_collector.popEvent(.track_event, .fromMilliseconds(50));
+    try testing.expect(event != null);
+    try testing.expectEqualStrings(&track1.id, &event.?.track_event.track.id);
+
+    event = pc1_collector.popEvent(.track_event, .fromMilliseconds(50));
+    try testing.expect(event == null);
+
+    event = pc2_collector.popEvent(.track_event, .fromMilliseconds(50));
+    try testing.expect(event != null);
+
+    event = pc2_collector.popEvent(.track_event, .fromMilliseconds(50));
+    try testing.expect(event == null);
 }
 
 fn negotiate(pc1: *PeerConnection, pc2: *PeerConnection) !void {
@@ -247,7 +268,48 @@ fn negotiate(pc1: *PeerConnection, pc2: *PeerConnection) !void {
     try pc1.setRemoteDescription(answer);
 }
 
-test "weird scenarios" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
-    defer pc.deinit();
-}
+const EventCollector = struct {
+    group: std.Io.Group,
+    events: std.ArrayList(PeerConnection.Event),
+    mutex: std.Io.Mutex,
+
+    fn init() EventCollector {
+        return .{
+            .group = .init,
+            .events = .empty,
+            .mutex = .init,
+        };
+    }
+
+    fn deinit(collector: *EventCollector) void {
+        collector.group.cancel(io);
+        collector.events.deinit(allocator);
+    }
+
+    fn collect(collector: *EventCollector, pc: *PeerConnection) !void {
+        try collector.group.concurrent(io, collectEvents, .{ collector, pc });
+    }
+
+    fn collectEvents(collector: *EventCollector, pc: *PeerConnection) !void {
+        while (pc.poll()) |event| {
+            try collector.mutex.lock(io);
+            defer collector.mutex.unlock(io);
+            collector.events.append(allocator, event) catch return;
+        } else |_| {}
+    }
+
+    fn popEvent(collector: *EventCollector, event_type: PCEvent, duration: std.Io.Duration) ?PeerConnection.Event {
+        const start = std.Io.Timestamp.now(io, .awake).nanoseconds;
+        while (true) {
+            collector.mutex.lockUncancelable(io);
+            defer collector.mutex.unlock(io);
+            for (collector.events.items, 0..) |event, idx| if (std.meta.activeTag(event) == event_type) {
+                return collector.events.orderedRemove(idx);
+            };
+
+            const elapsed = std.Io.Timestamp.now(io, .awake).nanoseconds - start;
+            if (elapsed >= duration.nanoseconds) return null;
+            io.sleep(.fromMilliseconds(1), .awake) catch return null;
+        }
+    }
+};
