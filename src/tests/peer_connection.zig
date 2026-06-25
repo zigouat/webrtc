@@ -244,13 +244,13 @@ test "Negotiate between peers" {
         try testing.expect(event != null);
         try testing.expectEqualStrings(&track1.id, &event.?.track_event.track.id);
 
-        event = pc1_collector.popEvent(.track_event, .fromMilliseconds(50));
-        try testing.expect(event == null);
-
         try pc1.removeTrack(screen1);
         try pc2.removeTrack(screen2);
         try negotiate(&pc1, &pc2);
     }
+
+    event = pc1_collector.popEvent(.track_event, .fromMilliseconds(50));
+    try testing.expect(event == null);
 
     event = pc2_collector.popEvent(.track_event, .fromMilliseconds(50));
     try testing.expect(event != null);
@@ -302,15 +302,17 @@ const EventCollector = struct {
     fn popEvent(collector: *EventCollector, event_type: PCEvent, duration: std.Io.Duration) ?PeerConnection.Event {
         const start = std.Io.Timestamp.now(io, .awake).nanoseconds;
         while (true) {
-            collector.mutex.lockUncancelable(io);
-            defer collector.mutex.unlock(io);
-            for (collector.events.items, 0..) |event, idx| if (std.meta.activeTag(event) == event_type) {
-                return collector.events.orderedRemove(idx);
-            };
+            {
+                collector.mutex.lockUncancelable(io);
+                defer collector.mutex.unlock(io);
+                for (collector.events.items, 0..) |event, idx| if (std.meta.activeTag(event) == event_type) {
+                    return collector.events.orderedRemove(idx);
+                };
+            }
 
             const elapsed = std.Io.Timestamp.now(io, .awake).nanoseconds - start;
             if (elapsed >= duration.nanoseconds) return null;
-            io.sleep(.fromMilliseconds(1), .awake) catch return null;
+            io.sleep(.fromMilliseconds(5), .awake) catch return null;
         }
     }
 };
