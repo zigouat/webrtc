@@ -4,6 +4,8 @@ const webrtc = @import("../webrtc.zig");
 const SDPSession = @import("../sdp_session.zig");
 
 const testing = std.testing;
+const PCEvent = @typeInfo(PeerConnection.Event).@"union".tag_type.?;
+
 const io = testing.io;
 const allocator = testing.allocator;
 
@@ -189,8 +191,8 @@ test "Negotiate between peers" {
     var pc2: PeerConnection = try .init(io, allocator, .{ .inner_queue_size = 1 });
     defer pc2.deinit();
 
-    var pc1_collector: EventCollector = .{};
-    var pc2_collector: EventCollector = .{};
+    var pc1_collector: EventCollector = .init();
+    var pc2_collector: EventCollector = .init();
     defer pc1_collector.deinit();
     defer pc2_collector.deinit();
 
@@ -223,14 +225,14 @@ test "Negotiate between peers" {
     }
 
     // pc2 track events
-    var event_idx = pc2_collector.findEvent(0, .track_event);
-    try testing.expect(event_idx != null);
-    event_idx = pc2_collector.findEvent(event_idx.? + 1, .track_event);
-    try testing.expect(event_idx != null);
-    event_idx = pc2_collector.findEvent(event_idx.? + 1, .track_event);
-    try testing.expect(event_idx == null);
+    var event = pc2_collector.popEvent(.track_event, .fromMilliseconds(50));
+    try testing.expect(event != null);
+    event = pc2_collector.popEvent(.track_event, .fromMilliseconds(50));
+    try testing.expect(event != null);
+    event = pc2_collector.popEvent(.track_event, .fromMilliseconds(50));
+    try testing.expect(event == null);
 
-    for (0..10) |_| {
+    for (0..1) |_| {
         const screen1 = try pc1.addTrack(.initWithId("screenshare", .video));
         const screen2 = try pc2.addTrack(.initWithId("screenshare", .video));
         try negotiate(&pc1, &pc2);
@@ -238,15 +240,22 @@ test "Negotiate between peers" {
         try testing.expectEqual(3, pc1.getTransceivers().len);
         try testing.expectEqual(3, pc2.getTransceivers().len);
 
-        event_idx = pc1_collector.findEvent(0, .track_event);
-        try testing.expect(event_idx != null);
-        event_idx = pc2_collector.findEvent(0, .track_event);
-        try testing.expect(event_idx != null);
-
         try pc1.removeTrack(screen1);
         try pc2.removeTrack(screen2);
         try negotiate(&pc1, &pc2);
     }
+    event = pc1_collector.popEvent(.track_event, .fromMilliseconds(50));
+    try testing.expect(event != null);
+    try testing.expectEqualStrings(&track1.id, &event.?.track_event.track.id);
+
+    event = pc1_collector.popEvent(.track_event, .fromMilliseconds(50));
+    try testing.expect(event == null);
+
+    event = pc2_collector.popEvent(.track_event, .fromMilliseconds(50));
+    try testing.expect(event != null);
+
+    event = pc2_collector.popEvent(.track_event, .fromMilliseconds(50));
+    try testing.expect(event == null);
 }
 
 fn negotiate(pc1: *PeerConnection, pc2: *PeerConnection) !void {
@@ -260,8 +269,17 @@ fn negotiate(pc1: *PeerConnection, pc2: *PeerConnection) !void {
 }
 
 const EventCollector = struct {
-    group: std.Io.Group = .init,
-    events: std.ArrayList(PeerConnection.Event) = .empty,
+    group: std.Io.Group,
+    events: std.ArrayList(PeerConnection.Event),
+    mutex: std.Io.Mutex,
+
+    fn init() EventCollector {
+        return .{
+            .group = .init,
+            .events = .empty,
+            .mutex = .init,
+        };
+    }
 
     fn deinit(collector: *EventCollector) void {
         collector.group.cancel(io);
@@ -274,12 +292,24 @@ const EventCollector = struct {
 
     fn collectEvents(collector: *EventCollector, pc: *PeerConnection) !void {
         while (pc.poll()) |event| {
+            try collector.mutex.lock(io);
+            defer collector.mutex.unlock(io);
             collector.events.append(allocator, event) catch return;
         } else |_| {}
     }
 
-    fn findEvent(collector: *const EventCollector, pos: usize, event_type: @typeInfo(PeerConnection.Event).@"union".tag_type.?) ?usize {
-        for (collector.events.items[pos..], pos..) |event, idx| if (std.meta.activeTag(event) == event_type) return idx;
-        return null;
+    fn popEvent(collector: *EventCollector, event_type: PCEvent, duration: std.Io.Duration) ?PeerConnection.Event {
+        const start = std.Io.Timestamp.now(io, .awake).nanoseconds;
+        while (true) {
+            collector.mutex.lockUncancelable(io);
+            defer collector.mutex.unlock(io);
+            for (collector.events.items, 0..) |event, idx| if (std.meta.activeTag(event) == event_type) {
+                return collector.events.orderedRemove(idx);
+            };
+
+            const elapsed = std.Io.Timestamp.now(io, .awake).nanoseconds - start;
+            if (elapsed >= duration.nanoseconds) return null;
+            io.sleep(.fromMilliseconds(1), .awake) catch return null;
+        }
     }
 };

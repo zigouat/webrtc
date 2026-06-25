@@ -309,11 +309,11 @@ pub fn setRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDes
 
     switch (session_desc.desc_type) {
         .offer => switch (pc.signaling_state) {
-            .have_remote_offer, .stable => try pc.applyRemoteDescription(session_desc),
+            .have_remote_offer, .stable => try pc.applyRemoteDescription(&session_desc),
             else => return error.InvalidState,
         },
         .answer => switch (pc.signaling_state) {
-            .have_local_offer => try pc.applyRemoteDescription(session_desc),
+            .have_local_offer => try pc.applyRemoteDescription(&session_desc),
             else => return error.InvalidState,
         },
         else => return error.NotImplemented,
@@ -528,6 +528,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
         media_exists = true;
 
         tr.current_direction = media.direction;
+        tr.fired_direction = media.direction;
         tr.sender.codecs = media.rtp_codec_parameters;
         tr.receiver.codecs = media.rtp_codec_parameters;
         // TODO: track removal
@@ -546,7 +547,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
     try pc.startSenderReports();
 }
 
-fn applyRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescription) !void {
+fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.SessionDescription) !void {
     const sdp_text = try pc.allocator.dupe(u8, session_desc.sdp);
     errdefer pc.allocator.free(sdp_text);
 
