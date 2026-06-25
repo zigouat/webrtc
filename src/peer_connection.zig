@@ -15,9 +15,10 @@ const Io = std.Io;
 const PeerConnection = @This();
 const Logger = std.log.scoped(.pc);
 
-pub const Error = error{InvalidState} || std.mem.Allocator.Error;
+pub const Error = error{ InvalidState, QueueClosed } || std.mem.Allocator.Error;
 
 pub const Event = union(enum) {
+    negotiation_needed: void,
     signaling_state: webrtc.SignalingState,
     connection_state: webrtc.ConnectionState,
     track_event: webrtc.TrackEventInit,
@@ -28,6 +29,7 @@ pub const Event = union(enum) {
 allocator: std.mem.Allocator,
 signaling_state: webrtc.SignalingState,
 connection_state: webrtc.ConnectionState,
+negotiation_needed: bool = false,
 
 local_description: ?ParsedSesssionDescription = null,
 remote_description: ?ParsedSesssionDescription = null,
@@ -139,7 +141,7 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack) Error!*webr
         break :blk tr;
     };
 
-    //TODO: update negotiation needed flag
+    try pc.checkNegotiationNeeded();
     return &tr.sender;
 }
 
@@ -153,7 +155,8 @@ pub fn removeTrack(pc: *PeerConnection, sender: *webrtc.RtpSender) !void {
         .sendonly => tr.direction = .inactive,
         else => {},
     }
-    // TODO: update negotiation flag
+
+    try pc.checkNegotiationNeeded();
 }
 
 pub const AddTransceiverInit = struct {
@@ -173,7 +176,7 @@ pub fn addTransceiverFromTrack(
     errdefer tr.deinit(pc.allocator);
     try pc.transceivers.append(pc.allocator, tr);
     tr.direction = init_config.direction;
-    //TODO: Update negotiation needed flag
+    try pc.checkNegotiationNeeded();
     return tr;
 }
 
@@ -186,7 +189,7 @@ pub fn addTransceiverFromKind(
     errdefer tr.deinit(pc.allocator);
     try pc.transceivers.append(pc.allocator, tr);
     tr.direction = init_config.direction;
-    //TODO: Update negotiation needed flag
+    try pc.checkNegotiationNeeded();
     return tr;
 }
 
@@ -451,6 +454,41 @@ fn createSubsequentOffer(pc: *PeerConnection) !webrtc.SessionDescription {
     return pc.last_offer.toSessionDescription();
 }
 
+fn checkNegotiationNeeded(pc: *PeerConnection) !void {
+    if (pc.signaling_state != .stable) return;
+
+    if (pc.isNegotiationNeeded()) {
+        if (pc.negotiation_needed) return;
+        pc.negotiation_needed = true;
+        pc.queue.putOne(pc.dtls_transport.getIo(), .negotiation_needed) catch return error.QueueClosed;
+    } else {
+        pc.negotiation_needed = false;
+    }
+}
+
+fn isNegotiationNeeded(pc: *const PeerConnection) bool {
+    // TODO: Check ice restart
+    const local_desc = pc.local_description orelse return false;
+    const remote_desc = pc.local_description orelse return false;
+    for (pc.getTransceivers()) |tr| {
+        if (tr.stopping and tr.direction != .stopped) return true;
+        if (!tr.isStopped()) {
+            if (tr.sdp_mline_index == null) return true;
+            const local_media = local_desc.session.getMedias()[tr.sdp_mline_index.?];
+            const remote_media = remote_desc.session.getMedias()[tr.sdp_mline_index.?];
+            // TODO: check msid
+            if (local_desc.desc_type == .offer and local_media.direction != tr.direction and remote_media.direction.reverse() != tr.direction) return true;
+            if (local_desc.desc_type == .answer and local_media.direction != tr.direction.intersect(remote_media.direction)) return true;
+        } else if (tr.sdp_mline_index) |idx| {
+            const local_media = local_desc.session.getMedias()[idx];
+            const remote_media = remote_desc.session.getMedias()[idx];
+            if (local_media.port != 0 and remote_media.port != 0) return true;
+        }
+    }
+
+    return false;
+}
+
 fn updateState(pc: *PeerConnection) !void {
     const old_state = pc.connection_state;
     const ice_state, const dtls_state = pc.dtls_transport.getConnectionState();
@@ -543,7 +581,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
 
     pc.pending_local_description = pc.last_answer;
     try pc.updateSignalingStateToStable();
-    pc.deleteTransceivers();
+    pc.removeTransceivers();
     try pc.startSenderReports();
 }
 
@@ -640,7 +678,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
                 .session = remote_sdp,
             };
             try pc.updateSignalingStateToStable();
-            pc.deleteTransceivers();
+            pc.removeTransceivers();
             try pc.startSenderReports();
         },
         .offer => {
@@ -675,6 +713,9 @@ fn updateSignalingStateToStable(pc: *PeerConnection) !void {
     pc.last_offer = .empty(.offer);
 
     try pc.queue.putOne(pc.dtls_transport.getIo(), .{ .signaling_state = pc.signaling_state });
+
+    pc.negotiation_needed = false;
+    try pc.checkNegotiationNeeded();
 }
 
 fn findTransceiverByMediaIndex(pc: *PeerConnection, index: usize) ?*webrtc.RtpTransceiver {
@@ -705,7 +746,10 @@ fn pollTransport(pc: *PeerConnection) !void {
         .ice_candidate => |candidate| if (candidate) |c| Logger.debug("candidate:{f}", .{c}),
         .ice_connection_state, .dtls_connection_state => {
             try pc.updateState();
-            if (pc.connection_state == .closed) return;
+            if (pc.connection_state == .closed) {
+                pc.signaling_state = .closed;
+                return;
+            }
         },
         .rtcp => |data| {
             Logger.debug("Decrypted rtcp packet: {x}", .{data});
@@ -751,7 +795,7 @@ fn writeIceCandidates(pc: *PeerConnection, w: *Io.Writer) !void {
     }
 }
 
-fn deleteTransceivers(pc: *PeerConnection) void {
+fn removeTransceivers(pc: *PeerConnection) void {
     if (pc.local_description == null or pc.remote_description == null) return;
     const local = pc.local_description.?.session;
     const remote = pc.remote_description.?.session;
