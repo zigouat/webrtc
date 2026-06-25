@@ -18,6 +18,7 @@ const Logger = std.log.scoped(.pc);
 pub const Error = error{InvalidState} || std.mem.Allocator.Error;
 
 pub const Event = union(enum) {
+    signaling_state: webrtc.SignalingState,
     connection_state: webrtc.ConnectionState,
     track_event: webrtc.TrackEventInit,
     rtp: rtp.Packet,
@@ -199,101 +200,6 @@ pub fn createOffer(pc: *PeerConnection) !webrtc.SessionDescription {
     return if (first_offer) pc.createFirstOffer() else pc.createSubsequentOffer();
 }
 
-fn createFirstOffer(pc: *PeerConnection) !webrtc.SessionDescription {
-    var w = std.Io.Writer.Allocating.init(pc.allocator);
-    errdefer w.deinit();
-
-    var sdp_session: SDPSession = .empty;
-    errdefer sdp_session.deinit(pc.allocator);
-    pc.dtls_transport.session.getFingerprint(&sdp_session.fingerprint);
-
-    const transceivers = pc.transceivers.items;
-    sdp_session.medias = try .initCapacity(pc.allocator, transceivers.len);
-    var medias = &sdp_session.medias;
-
-    var mid = pc.mid;
-    for (transceivers) |tr| {
-        if (tr.stopping and tr.mid == null) continue;
-        const media = try medias.addOne(pc.allocator);
-        media.* = .empty;
-        media.* = try tr.toSdpMedia(pc.allocator);
-        _ = try std.fmt.bufPrint(&media.mid, "{}", .{mid});
-
-        tr.sdp_mline_index = @intCast(medias.items.len - 1);
-        mid +%= 1;
-    }
-
-    try sdp_session.write(&w.writer);
-
-    pc.last_offer.deinit(pc.allocator);
-    pc.last_offer = .{
-        .desc_type = .offer,
-        .sdp = try w.toOwnedSlice(),
-        .session = sdp_session,
-    };
-
-    return pc.last_offer.toSessionDescription();
-}
-
-fn createSubsequentOffer(pc: *PeerConnection) !webrtc.SessionDescription {
-    const sess_desc = pc.pending_local_description orelse pc.local_description.?;
-    const remote_desc = pc.pending_remote_description orelse pc.remote_description;
-
-    var sdp_session = try sess_desc.session.clone(pc.allocator);
-    errdefer sdp_session.deinit(pc.allocator);
-
-    var w = std.Io.Writer.Allocating.init(pc.allocator);
-    errdefer w.deinit();
-
-    const transceivers = pc.transceivers.items;
-    for (transceivers) |tr| if (tr.sdp_mline_index == null) {
-        if (tr.isStopped()) continue;
-        // Check if we can recycle a media
-        const media = blk: {
-            for (sdp_session.getMedias(), 0..) |*media, idx| {
-                const remote_rejected = remote_desc != null and remote_desc.?.session.getMedias()[idx].port == 0;
-                if (media.port == 0 or remote_rejected) {
-                    media.deinit(pc.allocator);
-                    media.* = .empty;
-
-                    for (transceivers) |local_tr| if (local_tr.sdp_mline_index) |tr_idx| if (tr_idx == idx) {
-                        local_tr.sdp_mline_index = null;
-                    };
-
-                    tr.sdp_mline_index = @intCast(idx);
-                    break :blk media;
-                }
-            }
-
-            const media = try sdp_session.medias.addOne(pc.allocator);
-            media.* = .empty;
-            tr.sdp_mline_index = @intCast(sdp_session.medias.items.len - 1);
-            break :blk media;
-        };
-        media.* = try tr.toSdpMedia(pc.allocator);
-        _ = try std.fmt.bufPrint(&media.mid, "{}", .{pc.mid});
-        pc.mid +%= 1;
-    };
-
-    for (transceivers) |tr| if (tr.sdp_mline_index) |idx| {
-        const media = &sdp_session.getMedias()[idx];
-        media.port = if (tr.isStopped()) 0 else 9;
-        // TODO: other field to update
-    };
-
-    try sdp_session.write(&w.writer);
-    try pc.writeIceCandidates(&w.writer);
-
-    pc.last_offer.deinit(pc.allocator);
-    pc.last_offer = .{
-        .desc_type = .offer,
-        .sdp = try w.toOwnedSlice(),
-        .session = sdp_session,
-    };
-
-    return pc.last_offer.toSessionDescription();
-}
-
 /// Creates an answer to a remote offer.
 ///
 /// See [MDN RTCPeerConnection: createAnswer](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/createAnswer)
@@ -307,38 +213,39 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
     defer w.deinit();
 
     var sdp_session: SDPSession = .empty;
+    errdefer sdp_session.deinit(pc.allocator);
+
+    sdp_session.medias = try .initCapacity(pc.allocator, offer.session.getMedias().len);
     pc.dtls_transport.session.getFingerprint(&sdp_session.fingerprint);
 
     var idx: usize = 0;
-    const medias = try pc.allocator.alloc(SDPSession.SDPMedia, offer.session.getMedias().len);
-    errdefer {
-        for (0..idx) |id| medias[id].deinit(pc.allocator);
-        pc.allocator.free(medias);
-    }
-
     for (offer.session.getMedias()) |*media| {
         const tr = pc.findTransceiverByMediaIndex(idx) orelse return error.Unexpected;
-        const codecs = try utils.getCodecIntersection(pc.allocator, webrtc.getCodecCapabilities(tr.kind), media.rtp_codec_parameters);
+        const codecs = try utils.getCodecIntersection(
+            pc.allocator,
+            media.rtp_codec_parameters,
+            webrtc.getCodecCapabilities(tr.kind),
+        );
 
-        medias[idx] = .empty;
-        medias[idx].kind = tr.kind;
-        medias[idx].port = if (codecs.len == 0) 0 else media.port;
-        medias[idx].rtcp_mux = true;
-        medias[idx].rtcp_rsize = false;
-        medias[idx].setup = .active;
-        medias[idx].direction = media.direction.reverse().intersect(tr.direction);
-        medias[idx].rtp_codec_parameters = if (codecs.len == 0)
+        var new_media = sdp_session.medias.addOneAssumeCapacity();
+        new_media.* = .empty;
+        new_media.kind = tr.kind;
+        new_media.port = if (codecs.len == 0 or tr.isStopped()) 0 else 9;
+        new_media.rtcp_mux = true;
+        new_media.rtcp_rsize = false;
+        new_media.setup = .active;
+        new_media.direction = media.direction.reverse().intersect(tr.direction);
+        new_media.rtp_codec_parameters = if (new_media.port == 0)
             try pc.allocator.dupe(webrtc.RtpCodecParameters, media.rtp_codec_parameters)
         else
             codecs;
 
-        @memcpy(medias[idx].mid[0..tr.mid.?.len], tr.mid.?);
-        medias[idx].setIceCredentials(pc.dtls_transport.ice_agent.credentials);
+        @memcpy(new_media.mid[0..tr.mid.?.len], tr.mid.?);
+        new_media.setIceCredentials(pc.dtls_transport.ice_agent.credentials);
 
         idx += 1;
     }
 
-    sdp_session.medias = .fromOwnedSlice(medias);
     try sdp_session.write(&w.writer);
 
     const answer_sdp = try w.toOwnedSlice();
@@ -449,6 +356,101 @@ fn checkNotClosed(pc: *const PeerConnection) !void {
     if (pc.connection_state == .closed) return error.InvalidState;
 }
 
+fn createFirstOffer(pc: *PeerConnection) !webrtc.SessionDescription {
+    var w = std.Io.Writer.Allocating.init(pc.allocator);
+    errdefer w.deinit();
+
+    var sdp_session: SDPSession = .empty;
+    errdefer sdp_session.deinit(pc.allocator);
+    pc.dtls_transport.session.getFingerprint(&sdp_session.fingerprint);
+
+    const transceivers = pc.transceivers.items;
+    sdp_session.medias = try .initCapacity(pc.allocator, transceivers.len);
+    var medias = &sdp_session.medias;
+
+    var mid = pc.mid;
+    for (transceivers) |tr| {
+        if (tr.stopping and tr.mid == null) continue;
+        const media = try medias.addOne(pc.allocator);
+        media.* = .empty;
+        media.* = try tr.toSdpMedia(pc.allocator);
+        _ = try std.fmt.bufPrint(&media.mid, "{}", .{mid});
+
+        tr.sdp_mline_index = @intCast(medias.items.len - 1);
+        mid +%= 1;
+    }
+
+    try sdp_session.write(&w.writer);
+
+    pc.last_offer.deinit(pc.allocator);
+    pc.last_offer = .{
+        .desc_type = .offer,
+        .sdp = try w.toOwnedSlice(),
+        .session = sdp_session,
+    };
+
+    return pc.last_offer.toSessionDescription();
+}
+
+fn createSubsequentOffer(pc: *PeerConnection) !webrtc.SessionDescription {
+    const sess_desc = pc.pending_local_description orelse pc.local_description.?;
+    const remote_desc = pc.pending_remote_description orelse pc.remote_description;
+
+    var sdp_session = try sess_desc.session.clone(pc.allocator);
+    errdefer sdp_session.deinit(pc.allocator);
+
+    var w = std.Io.Writer.Allocating.init(pc.allocator);
+    errdefer w.deinit();
+
+    const transceivers = pc.transceivers.items;
+    for (transceivers) |tr| if (tr.sdp_mline_index == null) {
+        if (tr.isStopped()) continue;
+        // Check if we can recycle a media
+        const media = blk: {
+            for (sdp_session.getMedias(), 0..) |*media, idx| {
+                const remote_rejected = remote_desc != null and remote_desc.?.session.getMedias()[idx].port == 0;
+                if (media.port == 0 or remote_rejected) {
+                    media.deinit(pc.allocator);
+                    media.* = .empty;
+
+                    for (transceivers) |local_tr| if (local_tr.sdp_mline_index) |tr_idx| if (tr_idx == idx) {
+                        local_tr.sdp_mline_index = null;
+                    };
+
+                    tr.sdp_mline_index = @intCast(idx);
+                    break :blk media;
+                }
+            }
+
+            const media = try sdp_session.medias.addOne(pc.allocator);
+            media.* = .empty;
+            tr.sdp_mline_index = @intCast(sdp_session.medias.items.len - 1);
+            break :blk media;
+        };
+        media.* = try tr.toSdpMedia(pc.allocator);
+        _ = try std.fmt.bufPrint(&media.mid, "{}", .{pc.mid});
+        pc.mid +%= 1;
+    };
+
+    for (transceivers) |tr| if (tr.sdp_mline_index) |idx| {
+        const media = &sdp_session.getMedias()[idx];
+        media.port = if (tr.isStopped()) 0 else 9;
+        // TODO: other field to update
+    };
+
+    try sdp_session.write(&w.writer);
+    try pc.writeIceCandidates(&w.writer);
+
+    pc.last_offer.deinit(pc.allocator);
+    pc.last_offer = .{
+        .desc_type = .offer,
+        .sdp = try w.toOwnedSlice(),
+        .session = sdp_session,
+    };
+
+    return pc.last_offer.toSessionDescription();
+}
+
 fn updateState(pc: *PeerConnection) !void {
     const old_state = pc.connection_state;
     const ice_state, const dtls_state = pc.dtls_transport.getConnectionState();
@@ -507,32 +509,27 @@ fn applyLocalOffer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescript
     pc.pending_local_description = pc.last_offer;
     pc.last_offer = .empty(.offer);
     pc.mid +%= @intCast(offer.getMedias().len);
+
+    try pc.queue.putOne(pc.dtls_transport.getIo(), .{ .signaling_state = pc.signaling_state });
 }
 
 fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescription) !void {
     if (!std.mem.eql(u8, pc.last_answer.sdp, sess_desc.sdp)) return error.TamperedOffer;
     const sdp_session = pc.last_answer.session;
-    const offer_session = pc.pending_remote_description.?.session;
     const renegotiation = pc.local_description != null;
 
     var media_exists: bool = false;
-    for (sdp_session.getMedias(), 0..) |*media, idx| {
+    for (sdp_session.getMedias()) |*media| {
         const tr = pc.findTransceiverByMid(&media.mid).?;
         if (media.port == 0) {
-            tr.stop();
             continue;
         }
 
         media_exists = true;
 
-        const codecs = try utils.intersectCodecs(
-            media.rtp_codec_parameters,
-            offer_session.getMedias()[idx].rtp_codec_parameters,
-        );
         tr.current_direction = media.direction;
-        tr.sender.codecs = codecs.@"0";
-        tr.receiver.codecs = codecs.@"1";
-
+        tr.sender.codecs = media.rtp_codec_parameters;
+        tr.receiver.codecs = media.rtp_codec_parameters;
         // TODO: track removal
     }
 
@@ -544,7 +541,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
     try pc.demuxer.updateMaps(&sdp_session);
 
     pc.pending_local_description = pc.last_answer;
-    pc.updateSignalingStateToStable();
+    try pc.updateSignalingStateToStable();
     pc.deleteTransceivers();
     try pc.startSenderReports();
 }
@@ -641,7 +638,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescr
                 .sdp = sdp_text,
                 .session = remote_sdp,
             };
-            pc.updateSignalingStateToStable();
+            try pc.updateSignalingStateToStable();
             pc.deleteTransceivers();
             try pc.startSenderReports();
         },
@@ -652,6 +649,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescr
                 .session = remote_sdp,
             };
             pc.signaling_state = .have_remote_offer;
+            try pc.queue.putOne(pc.dtls_transport.getIo(), .{ .signaling_state = pc.signaling_state });
         },
         else => {},
     }
@@ -660,7 +658,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescr
         try pc.queue.putOne(pc.dtls_transport.getIo(), .{ .track_event = event });
 }
 
-fn updateSignalingStateToStable(pc: *PeerConnection) void {
+fn updateSignalingStateToStable(pc: *PeerConnection) !void {
     pc.signaling_state = .stable;
 
     if (pc.local_description) |*local_desc| local_desc.deinit(pc.allocator);
@@ -674,6 +672,8 @@ fn updateSignalingStateToStable(pc: *PeerConnection) void {
 
     pc.last_answer = .empty(.answer);
     pc.last_offer = .empty(.offer);
+
+    try pc.queue.putOne(pc.dtls_transport.getIo(), .{ .signaling_state = pc.signaling_state });
 }
 
 fn findTransceiverByMediaIndex(pc: *PeerConnection, index: usize) ?*webrtc.RtpTransceiver {
@@ -796,7 +796,7 @@ fn doSendReports(pc: *PeerConnection) !void {
 
         for (0..pc.transceivers.items.len) |idx| {
             const tr = pc.transceivers.items[idx];
-            if (tr.stopping or tr.direction == .stopped or tr.direction == .inactive) continue;
+            if (tr.isStopped() or tr.direction == .inactive) continue;
 
             Logger.debug("send rtcp report for transceiver: {?s}", .{tr.mid});
             const data = tr.getRtcpReport(timestamp, buffer);
