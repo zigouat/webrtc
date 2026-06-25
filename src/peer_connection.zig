@@ -15,7 +15,13 @@ const Io = std.Io;
 const PeerConnection = @This();
 const Logger = std.log.scoped(.pc);
 
-pub const Error = error{ InvalidState, QueueClosed } || std.mem.Allocator.Error;
+pub const Error = error{
+    InvalidState,
+    QueueClosed,
+    /// Returned when an ssrc cannot be
+    /// generated for a sender
+    SsrcUnavailable,
+} || std.mem.Allocator.Error;
 
 pub const Event = union(enum) {
     negotiation_needed: void,
@@ -134,13 +140,7 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack) Error!*webr
         break :blk null;
     };
 
-    const tr = maybe_transceiver orelse blk: {
-        const tr = try webrtc.RtpTransceiver.initFromTrack(pc.allocator, track, &pc.dtls_transport);
-        errdefer pc.allocator.destroy(tr);
-        try pc.transceivers.append(pc.allocator, tr);
-        break :blk tr;
-    };
-
+    const tr = maybe_transceiver orelse try pc.initTransceiverFromTrack(track, true);
     try pc.checkNegotiationNeeded();
     return &tr.sender;
 }
@@ -172,9 +172,12 @@ pub fn addTransceiverFromTrack(
     track: webrtc.MediaStreamTrack,
     init_config: AddTransceiverInit,
 ) Error!*webrtc.RtpTransceiver {
-    const tr = try webrtc.RtpTransceiver.initFromTrack(pc.allocator, track, &pc.dtls_transport);
-    errdefer tr.deinit(pc.allocator);
-    try pc.transceivers.append(pc.allocator, tr);
+    const tr = try pc.initTransceiverFromTrack(track, false);
+    errdefer {
+        pc.allocator.destroy(tr);
+        _ = pc.transceivers.swapRemove(pc.getTransceivers().len - 1);
+    }
+
     tr.direction = init_config.direction;
     try pc.checkNegotiationNeeded();
     return tr;
@@ -185,11 +188,40 @@ pub fn addTransceiverFromKind(
     kind: webrtc.TrackKind,
     init_config: AddTransceiverInit,
 ) Error!*webrtc.RtpTransceiver {
-    const tr = try webrtc.RtpTransceiver.initFromKind(pc.allocator, kind, &pc.dtls_transport);
-    errdefer tr.deinit(pc.allocator);
+    const io = pc.dtls_transport.getIo();
+    const tr = try pc.allocator.create(webrtc.RtpTransceiver);
+    errdefer pc.allocator.destroy(tr);
+
     try pc.transceivers.append(pc.allocator, tr);
-    tr.direction = init_config.direction;
+    errdefer _ = pc.transceivers.swapRemove(pc.getTransceivers().len - 1);
+
+    tr.* = .{
+        .kind = kind,
+        .direction = init_config.direction,
+        .sender = .init(null),
+        .receiver = .init(.init(io, kind)),
+        .transport = &pc.dtls_transport,
+    };
+    tr.sender.ssrc = try generateSsrc(io, &pc.demuxer);
     try pc.checkNegotiationNeeded();
+    return tr;
+}
+
+fn initTransceiverFromTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, added_by_add_track: bool) !*webrtc.RtpTransceiver {
+    const tr = try pc.allocator.create(webrtc.RtpTransceiver);
+    errdefer pc.allocator.destroy(tr);
+    try pc.transceivers.append(pc.allocator, tr);
+
+    tr.* = .{
+        .kind = track.kind,
+        .direction = .sendrecv,
+        .sender = .init(track),
+        .receiver = .init(track),
+        .added_by_add_track = added_by_add_track,
+        .transport = &pc.dtls_transport,
+    };
+    tr.sender.ssrc = try generateSsrc(pc.dtls_transport.getIo(), &pc.demuxer);
+
     return tr;
 }
 
@@ -849,6 +881,18 @@ fn doSendReports(pc: *PeerConnection) !void {
             try pc.dtls_transport.sendRtcp(data);
         }
     }
+}
+
+fn generateSsrc(io: Io, demuxer: *const Demuxer) !u32 {
+    var max_retries: usize = 100;
+    var buf: [4]u8 = @splat(0);
+    while (max_retries > 0) : (max_retries -= 1) {
+        io.random(&buf);
+        const ssrc = std.mem.readInt(u32, &buf, .big);
+        if (!demuxer.ssrc_to_mid.contains(ssrc)) return ssrc;
+    }
+
+    return error.SsrcUnavailable;
 }
 
 test {

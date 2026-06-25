@@ -281,7 +281,7 @@ pub const RtpSender = struct {
         return .{
             .track = track,
             .codecs = &.{},
-            .ssrc = 0x18192021,
+            .ssrc = 0,
             .report = .empty,
         };
     }
@@ -298,7 +298,17 @@ pub const RtpSender = struct {
     }
 
     pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) !void {
+        if (sender.track == null) {
+            @branchHint(.cold);
+            return error.NoAssociatedTrack;
+        }
+
         const tr: *RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
+        if (tr.current_direction == null or (tr.current_direction.? != .sendrecv and tr.current_direction.? != .sendonly)) {
+            @branchHint(.unlikely);
+            return error.InvalidDirection;
+        }
+
         var buffer = try tr.transport.ice_agent.createPacket();
         defer tr.transport.ice_agent.destroyPacket(buffer);
 
@@ -444,36 +454,8 @@ pub const RtpTransceiver = struct {
     mid: ?[]const u8 = null,
     sdp_mline_index: ?u8 = null,
     stopping: bool = false,
-    addedByAddTrack: bool = false,
+    added_by_add_track: bool = false,
     transport: *DtlsTransport,
-
-    pub fn initFromTrack(allocator: std.mem.Allocator, track: MediaStreamTrack, transport: *DtlsTransport) !*RtpTransceiver {
-        const tr = try allocator.create(RtpTransceiver);
-        tr.* = .{
-            .kind = track.kind,
-            .direction = .sendrecv,
-            .sender = .init(track),
-            .receiver = .init(track),
-            .addedByAddTrack = true,
-            .transport = transport,
-        };
-
-        return tr;
-    }
-
-    pub fn initFromKind(allocator: std.mem.Allocator, kind: TrackKind, transport: *DtlsTransport) !*RtpTransceiver {
-        const tr = try allocator.create(RtpTransceiver);
-        tr.* = .{
-            .kind = kind,
-            .direction = .sendrecv,
-            .sender = .init(null),
-            .receiver = .init(.init(transport.getIo(), kind)),
-            .addedByAddTrack = true,
-            .transport = transport,
-        };
-
-        return tr;
-    }
 
     pub fn initFromSdpMedia(
         allocator: std.mem.Allocator,

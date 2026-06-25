@@ -84,11 +84,15 @@ test "addTransceiver" {
         try std.testing.expectEqual(1, pc.transceivers.items.len);
         try std.testing.expectEqual(.sendrecv, tr.direction);
         try std.testing.expectEqualStrings(&track.id, &tr.sender.track.?.id);
+        try std.testing.expect(tr.sender.ssrc != 0);
 
         const tr2 = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
         try std.testing.expectEqual(2, pc.transceivers.items.len);
         try std.testing.expectEqual(.recvonly, tr2.direction);
         try std.testing.expect(tr2.sender.track == null);
+        try std.testing.expect(tr2.sender.ssrc != 0);
+
+        try std.testing.expect(tr.sender.ssrc != tr2.sender.ssrc);
     }
 
     {
