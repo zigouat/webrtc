@@ -79,7 +79,7 @@ const ParsedSesssionDescription = struct {
 
     fn toSessionDescription(sess_desc: *const ParsedSesssionDescription) webrtc.SessionDescription {
         return .{
-            .desc_type = sess_desc.desc_type,
+            .type = sess_desc.desc_type,
             .sdp = sess_desc.sdp,
         };
     }
@@ -256,27 +256,30 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
     var idx: usize = 0;
     for (offer.session.getMedias()) |*media| {
         const tr = pc.findTransceiverByMediaIndex(idx) orelse return error.Unexpected;
-        const codecs = try utils.getCodecIntersection(
-            pc.allocator,
-            media.rtp_codec_parameters,
-            webrtc.getCodecCapabilities(tr.kind),
-        );
-
-        var new_media = sdp_session.medias.addOneAssumeCapacity();
-        new_media.* = .empty;
-        new_media.kind = tr.kind;
-        new_media.port = if (codecs.len == 0 or tr.isStopped()) 0 else 9;
-        new_media.rtcp_mux = true;
-        new_media.rtcp_rsize = false;
-        new_media.setup = .active;
-        new_media.direction = media.direction.reverse().intersect(tr.direction);
-        new_media.rtp_codec_parameters = if (new_media.port == 0)
-            try pc.allocator.dupe(webrtc.RtpCodecParameters, media.rtp_codec_parameters)
-        else
-            codecs;
-
-        @memcpy(new_media.mid[0..tr.mid.?.len], tr.mid.?);
-        new_media.setIceCredentials(pc.dtls_transport.ice_agent.credentials);
+        if (media.isRejected()) {
+            var new_media = try media.clone(pc.allocator);
+            new_media.bundle_only = false;
+        } else {
+            const codecs = try utils.getCodecIntersection(
+                pc.allocator,
+                media.rtp_codec_parameters,
+                webrtc.getCodecCapabilities(tr.kind),
+            );
+            var new_media = sdp_session.medias.addOneAssumeCapacity();
+            new_media.* = .empty;
+            new_media.kind = tr.kind;
+            new_media.port = if (codecs.len == 0) 0 else 9;
+            new_media.rtcp_mux = true;
+            new_media.rtcp_rsize = false;
+            new_media.setup = .active;
+            new_media.direction = media.direction.reverse().intersect(tr.direction);
+            new_media.rtp_codec_parameters = if (new_media.port == 0)
+                try pc.allocator.dupe(webrtc.RtpCodecParameters, media.rtp_codec_parameters)
+            else
+                codecs;
+            @memcpy(new_media.mid[0..tr.mid.?.len], tr.mid.?);
+            new_media.setIceCredentials(pc.dtls_transport.ice_agent.credentials);
+        }
 
         idx += 1;
     }
@@ -306,7 +309,7 @@ pub fn getLocalDescription(pc: *PeerConnection) !?webrtc.SessionDescription {
 
         try pc.writeLocalDescription(&w.writer);
 
-        return .{ .desc_type = desc.desc_type, .sdp = try w.toOwnedSlice() };
+        return .{ .type = desc.desc_type, .sdp = try w.toOwnedSlice() };
     }
 
     return null;
@@ -326,7 +329,7 @@ pub fn getRemoteDescription(pc: *PeerConnection) !?webrtc.SessionDescription {
 pub fn setLocalDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescription) !void {
     try pc.checkNotClosed();
 
-    switch (session_desc.desc_type) {
+    switch (session_desc.type) {
         .offer => switch (pc.signaling_state) {
             .stable, .have_local_offer => try pc.applyLocalOffer(&session_desc),
             else => return error.InvalidState,
@@ -342,7 +345,7 @@ pub fn setLocalDescription(pc: *PeerConnection, session_desc: webrtc.SessionDesc
 pub fn setRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescription) !void {
     try pc.checkNotClosed();
 
-    switch (session_desc.desc_type) {
+    switch (session_desc.type) {
         .offer => switch (pc.signaling_state) {
             .have_remote_offer, .stable => try pc.applyRemoteDescription(&session_desc),
             else => return error.InvalidState,
@@ -624,7 +627,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     var remote_sdp = try SDPSession.parse(pc.allocator, sdp_text);
     errdefer remote_sdp.deinit(pc.allocator);
 
-    if (session_desc.desc_type == .answer) {
+    if (session_desc.type == .answer) {
         const local_session = pc.pending_local_description.?.session;
         if (remote_sdp.getMedias().len != local_session.getMedias().len) return error.InvalidAnswer;
     }
@@ -638,7 +641,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     defer track_events.deinit(pc.allocator);
     for (remote_sdp.getMedias(), 0..) |*media, idx| {
         var transceiver = blk: {
-            switch (session_desc.desc_type) {
+            switch (session_desc.type) {
                 .answer => {
                     const tr = pc.findTransceiverByMediaIndex(idx) orelse return error.NotExistingTransceiver;
                     break :blk tr;
@@ -665,7 +668,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
         transceiver.mid = &media.mid;
         transceiver.sdp_mline_index = @intCast(idx);
 
-        if (media.port == 0) {
+        if (media.isRejected()) {
             if (!transceiver.stopping) transceiver.stop();
             transceiver.direction = .stopped;
             transceiver.current_direction = null;
@@ -681,7 +684,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
         }
         transceiver.current_direction = direction;
 
-        if (session_desc.desc_type == .answer) {
+        if (session_desc.type == .answer) {
             const local_sdp = pc.pending_local_description.?.session;
             const local_codecs = local_sdp.getMedias()[idx].rtp_codec_parameters;
             const remote_codecs = media.rtp_codec_parameters;
@@ -701,7 +704,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
         pc.dtls_transport.setPeerFingerprint(&remote_sdp.fingerprint);
     }
 
-    switch (session_desc.desc_type) {
+    switch (session_desc.type) {
         .answer => {
             try pc.demuxer.updateMaps(&remote_sdp);
             pc.pending_remote_description = .{

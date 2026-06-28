@@ -40,6 +40,85 @@ test "setLocalDescription: set offer multiple times" {
     try pc.setLocalDescription(offer);
 }
 
+test "setRemoteDescription: set offer" {
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    defer pc.deinit();
+
+    const offer =
+        \\v=0
+        \\o=- 1000 1779396395 IN IP4 0.0.0.0
+        \\s=-
+        \\t=0 0
+        \\a=group:BUNDLE 0
+        \\a=ice-options:ice2 
+        \\a=fingerprint:sha-256 A4:14:A3:5D:02:35:5B:E0:C6:E0:EF:7D:D9:63:3F:30:D4:FD:43:76:50:A8:25:4A:96:25:F1:8A:0A:DC:F4:26
+        \\m=video 9 UDP/TLS/RTP/SAVPF 96
+        \\c=IN IP4 0.0.0.0
+        \\a=rtpmap:96 VP8/90000
+        \\a=fmtp:96 max-fs=12288;max-fr=60
+        \\a=setup:actpass
+        \\a=sendrecv
+        \\a=mid:0
+        \\a=rtcp-mux
+        \\a=ice-ufrag:elsfVzJM
+        \\a=ice-pwd:/KLNLMQnQm5TWswZ9MAnalyn
+        \\
+    ;
+
+    try pc.setRemoteDescription(.{ .type = .offer, .sdp = offer });
+
+    const event = try pc.poll();
+    try std.testing.expectEqual(.signaling_state, std.meta.activeTag(event));
+    try std.testing.expectEqual(.have_remote_offer, event.signaling_state);
+}
+
+test "setRemoteDescription: set offer - do not reject bundle only m-lines" {
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    defer pc.deinit();
+
+    const offer =
+        \\v=0
+        \\o=- 1000 1779396395 IN IP4 0.0.0.0
+        \\s=-
+        \\t=0 0
+        \\a=group:BUNDLE 0
+        \\a=ice-options:ice2 
+        \\a=fingerprint:sha-256 A4:14:A3:5D:02:35:5B:E0:C6:E0:EF:7D:D9:63:3F:30:D4:FD:43:76:50:A8:25:4A:96:25:F1:8A:0A:DC:F4:26
+        \\m=video 9 UDP/TLS/RTP/SAVPF 96
+        \\c=IN IP4 0.0.0.0
+        \\a=rtpmap:96 VP8/90000
+        \\a=fmtp:96 max-fs=12288;max-fr=60
+        \\a=setup:actpass
+        \\a=sendrecv
+        \\a=mid:0
+        \\a=rtcp-mux
+        \\a=ice-ufrag:elsfVzJM
+        \\a=ice-pwd:/KLNLMQnQm5TWswZ9MAnalyn
+        \\m=video 0 UDP/TLS/RTP/SAVPF 96
+        \\c=IN IP4 0.0.0.0
+        \\a=bundle-only
+        \\a=rtpmap:96 VP8/90000
+        \\a=fmtp:96 max-fs=12288;max-fr=60
+        \\a=setup:actpass
+        \\a=sendrecv
+        \\a=mid:1
+        \\a=rtcp-mux
+        \\
+    ;
+
+    try pc.setRemoteDescription(.{ .type = .offer, .sdp = offer });
+
+    const event = try pc.poll();
+    try std.testing.expectEqual(.signaling_state, std.meta.activeTag(event));
+    try std.testing.expectEqual(.have_remote_offer, event.signaling_state);
+
+    try std.testing.expectEqual(2, pc.getTransceivers().len);
+    for (pc.getTransceivers()) |tr| {
+        try std.testing.expectEqual(.video, tr.kind);
+        try std.testing.expect(!tr.isStopped());
+    }
+}
+
 test "addTrack" {
     var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
     defer pc.deinit();
@@ -109,7 +188,7 @@ test "createOffer: empty offer" {
     defer pc.deinit();
 
     const offer = try pc.createOffer();
-    try testing.expectEqual(.offer, offer.desc_type);
+    try testing.expectEqual(.offer, offer.type);
 
     const sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
     try testing.expectEqual(0, sdp_session.getMedias().len);
@@ -124,7 +203,7 @@ test "createOffer: m-lines created for each transceiver" {
     _ = try pc.addTrack(.initWithId("video", .video));
 
     const offer = try pc.createOffer();
-    try testing.expectEqual(.offer, offer.desc_type);
+    try testing.expectEqual(.offer, offer.type);
 
     var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
     defer sdp_session.deinit(testing.allocator);
@@ -149,7 +228,7 @@ test "createOffer: stopped non-associted transceiver is ignored" {
     _ = try pc.addTrack(.initWithId("video", .video));
 
     const offer = try pc.createOffer();
-    try testing.expectEqual(.offer, offer.desc_type);
+    try testing.expectEqual(.offer, offer.type);
 
     var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
     defer sdp_session.deinit(testing.allocator);
