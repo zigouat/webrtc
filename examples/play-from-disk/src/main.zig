@@ -118,7 +118,7 @@ fn doHandleClientConnection(io: Io, allocator: std.mem.Allocator, stream: Io.net
         try reader.readSliceAll(answer);
         try req.respond(&.{}, .{ .transfer_encoding = .none });
 
-        try pc.setRemoteDescription(.{ .desc_type = .answer, .sdp = answer });
+        try pc.setRemoteDescription(.{ .type = .answer, .sdp = answer });
     }
 }
 

@@ -627,7 +627,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     var remote_sdp = try SDPSession.parse(pc.allocator, sdp_text);
     errdefer remote_sdp.deinit(pc.allocator);
 
-    if (session_desc.desc_type == .answer) {
+    if (session_desc.type == .answer) {
         const local_session = pc.pending_local_description.?.session;
         if (remote_sdp.getMedias().len != local_session.getMedias().len) return error.InvalidAnswer;
     }
