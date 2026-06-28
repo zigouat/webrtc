@@ -5,7 +5,7 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .webrtc = .{
-            .path = "../..",
+            .path = "..",
         },
         .media = .{
             .url = "git+https://github.com/zigouat/media.git#010b7d8e1a10282758c8a6cd54f4bd8fcec046c7",
@@ -23,6 +23,7 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "src",
+        "play-from-disk",
+        "play-from-disk-renegotiation",
     },
 }
