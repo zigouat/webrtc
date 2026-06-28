@@ -37,6 +37,7 @@ pub const empty: SDPSession = .{
 pub const SDPMedia = struct {
     kind: webrtc.TrackKind,
     port: u16,
+    bundle_only: bool,
     rtp_codec_parameters: []webrtc.RtpCodecParameters,
     rtp_header_extensions: []webrtc.RtpHeaderExtensionParameter,
     mid: [3]u8,
@@ -54,6 +55,7 @@ pub const SDPMedia = struct {
     pub const empty: SDPMedia = .{
         .kind = .video,
         .port = 0,
+        .bundle_only = false,
         .rtp_codec_parameters = &.{},
         .rtp_header_extensions = &.{},
         .mid = @splat(0),
@@ -106,6 +108,7 @@ pub const SDPMedia = struct {
 
         var attr_it = media.attributeIterator();
         while (try attr_it.next()) |attr| switch (try attr.parse()) {
+            .bundle_only => sdp_media.bundle_only = true,
             .mid => |v| {
                 if (v.len > 3) return error.InvalidSDP;
                 @memcpy(sdp_media.mid[0..v.len], v);
@@ -183,6 +186,7 @@ pub const SDPMedia = struct {
         for (media.rtp_codec_parameters) |*codec| try w.print(" {}", .{codec.payload_type});
         try w.writeAll("\r\n");
         try w.writeAll("c=IN IP4 0.0.0.0\r\n");
+        if (media.bundle_only) try SDPAttribute.write(.bundle_only, w);
         for (media.rtp_codec_parameters) |*codec| try codec.format(w);
         for (media.rtp_header_extensions) |*ext| try ext.format(w);
         try SDPAttribute.write(.{ .setup = media.setup }, w);
@@ -205,6 +209,10 @@ pub const SDPMedia = struct {
 
     pub fn getMid(media: *const SDPMedia) []const u8 {
         return std.mem.sliceTo(&media.mid, 0);
+    }
+
+    pub fn isRejected(media: *const SDPMedia) bool {
+        return media.port == 0 and !media.bundle_only;
     }
 
     pub fn clone(media: *const SDPMedia, allocator: std.mem.Allocator) !SDPMedia {

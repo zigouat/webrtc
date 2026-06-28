@@ -184,7 +184,7 @@ pub const TrackKind = enum { audio, video };
 pub const SessionDescriptionType = enum { offer, pranswer, answer, rollback };
 
 pub const SessionDescription = struct {
-    desc_type: SessionDescriptionType,
+    type: SessionDescriptionType,
     sdp: []const u8,
 
     pub fn deinit(sess_desc: *SessionDescription, allocator: std.mem.Allocator) void {
