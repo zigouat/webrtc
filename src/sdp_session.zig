@@ -51,7 +51,6 @@ pub const SDPMedia = struct {
     fingerprint: ?[32]u8,
     rtcp_mux: bool,
     rtcp_rsize: bool,
-    /// The track associated with this media. This field is owned by the transceiver (either sender or receiver).
     track: ?webrtc.MediaStreamTrack,
 
     pub const empty: SDPMedia = .{
@@ -157,7 +156,12 @@ pub const SDPMedia = struct {
                 .id = @intCast(extmap.id),
                 .uri = extmap.uri,
             }),
-            // .msid => |msid| sdp_media.msid = msid,
+            .msid => |msid| if (msid.app_data) |track_id| {
+                if (sdp_media.track == null) {
+                    sdp_media.track = .initWithId(track_id, sdp_media.kind);
+                }
+                try sdp_media.track.?.stream_ids.append(allocator, msid.id);
+            },
             else => {},
         };
 
@@ -176,6 +180,7 @@ pub const SDPMedia = struct {
         allocator.free(m.rtp_codec_parameters);
         allocator.free(m.rtp_header_extensions);
         allocator.free(m.candidates);
+        if (m.track) |*track| track.deinit(allocator);
     }
 
     pub fn hasPayload(media: *const SDPMedia, pt: u8) bool {

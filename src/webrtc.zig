@@ -313,7 +313,7 @@ pub const RtpSender = struct {
         }
 
         const tr: *RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
-        if (tr.current_direction == null or (tr.current_direction.? != .sendrecv and tr.current_direction.? != .sendonly)) {
+        if (!tr.canSend()) {
             @branchHint(.unlikely);
             return error.InvalidDirection;
         }
@@ -479,9 +479,11 @@ pub const RtpTransceiver = struct {
         index: u8,
     ) !*RtpTransceiver {
         const tr = try allocator.create(RtpTransceiver);
-        // const track_id = if (sdp_media.msid) |msid| msid.app_data orelse "" else "";
-        const track_id = "";
-        const track: MediaStreamTrack = if (track_id.len == 0) .init(io, sdp_media.kind) else .initWithId(track_id, sdp_media.kind);
+        const track = if (sdp_media.track) |track| MediaStreamTrack{
+            .id = track.id,
+            .kind = track.kind,
+            .stream_ids = try track.stream_ids.clone(allocator),
+        } else MediaStreamTrack.init(io, sdp_media.kind);
 
         tr.* = .{
             .direction = .recvonly,
@@ -512,7 +514,11 @@ pub const RtpTransceiver = struct {
         media.rtcp_mux = true;
         media.rtcp_rsize = false;
         media.setIceCredentials(tr.transport.ice_agent.credentials);
-        media.track = tr.sender.track;
+        media.track = if (tr.sender.track) |t| .{
+            .id = t.id,
+            .kind = t.kind,
+            .stream_ids = try t.stream_ids.clone(allocator),
+        } else null;
 
         if (tr.mid) |mid| @memcpy(media.mid[0..mid.len], mid);
 
@@ -567,6 +573,11 @@ pub const RtpTransceiver = struct {
             .sendonly => tr.direction = .inactive,
             else => {},
         }
+    }
+
+    pub inline fn canSend(tr: *const RtpTransceiver) bool {
+        if (tr.current_direction) |direction| return direction == .sendrecv or direction == .sendonly;
+        return false;
     }
 
     pub fn processRemoteTrack(tr: *RtpTransceiver, direction: Direction) ?TrackEventInit {
