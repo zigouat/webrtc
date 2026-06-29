@@ -128,7 +128,7 @@ pub fn deinit(pc: *PeerConnection) void {
     pc.demuxer.deinit();
 }
 
-pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack) Error!*webrtc.RtpSender {
+pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, streams: []const []const u8) Error!*webrtc.RtpSender {
     try pc.checkNotClosed();
 
     const maybe_transceiver = blk: {
@@ -140,7 +140,7 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack) Error!*webr
         break :blk null;
     };
 
-    const tr = maybe_transceiver orelse try pc.initTransceiverFromTrack(track, true);
+    const tr = maybe_transceiver orelse try pc.initTransceiverFromTrack(track, streams, true);
     try pc.checkNegotiationNeeded();
     return &tr.sender;
 }
@@ -148,20 +148,9 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack) Error!*webr
 pub fn removeTrack(pc: *PeerConnection, sender: *webrtc.RtpSender) !void {
     try pc.checkNotClosed();
     const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
-    if (tr.stopping or sender.track == null) return;
-    tr.sender.track = null;
-    switch (tr.direction) {
-        .sendrecv => tr.direction = .recvonly,
-        .sendonly => tr.direction = .inactive,
-        else => {},
-    }
-
+    tr.removeTrack(pc.allocator);
     try pc.checkNegotiationNeeded();
 }
-
-pub const AddTransceiverInit = struct {
-    direction: webrtc.Direction,
-};
 
 pub inline fn getTransceivers(pc: *const PeerConnection) []*webrtc.RtpTransceiver {
     return pc.transceivers.items;
@@ -170,15 +159,16 @@ pub inline fn getTransceivers(pc: *const PeerConnection) []*webrtc.RtpTransceive
 pub fn addTransceiverFromTrack(
     pc: *PeerConnection,
     track: webrtc.MediaStreamTrack,
-    init_config: AddTransceiverInit,
+    init_config: webrtc.TransceiverInit,
 ) Error!*webrtc.RtpTransceiver {
-    const tr = try pc.initTransceiverFromTrack(track, false);
+    const tr = try pc.initTransceiverFromTrack(track, init_config.streams, false);
     errdefer {
-        pc.allocator.destroy(tr);
+        tr.deinit(pc.allocator);
         _ = pc.transceivers.swapRemove(pc.getTransceivers().len - 1);
     }
 
     tr.direction = init_config.direction;
+
     try pc.checkNegotiationNeeded();
     return tr;
 }
@@ -186,7 +176,7 @@ pub fn addTransceiverFromTrack(
 pub fn addTransceiverFromKind(
     pc: *PeerConnection,
     kind: webrtc.TrackKind,
-    init_config: AddTransceiverInit,
+    init_config: webrtc.TransceiverInit,
 ) Error!*webrtc.RtpTransceiver {
     const io = pc.dtls_transport.getIo();
     const tr = try pc.allocator.create(webrtc.RtpTransceiver);
@@ -207,9 +197,14 @@ pub fn addTransceiverFromKind(
     return tr;
 }
 
-fn initTransceiverFromTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, added_by_add_track: bool) !*webrtc.RtpTransceiver {
+fn initTransceiverFromTrack(
+    pc: *PeerConnection,
+    track: webrtc.MediaStreamTrack,
+    streams: []const []const u8,
+    added_by_add_track: bool,
+) !*webrtc.RtpTransceiver {
     const tr = try pc.allocator.create(webrtc.RtpTransceiver);
-    errdefer pc.allocator.destroy(tr);
+    errdefer tr.deinit(pc.allocator);
     try pc.transceivers.append(pc.allocator, tr);
 
     tr.* = .{
@@ -220,6 +215,7 @@ fn initTransceiverFromTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack,
         .added_by_add_track = added_by_add_track,
         .transport = &pc.dtls_transport,
     };
+    try tr.sender.addStreams(pc.allocator, streams);
     tr.sender.ssrc = try generateSsrc(pc.dtls_transport.getIo(), &pc.demuxer);
 
     return tr;

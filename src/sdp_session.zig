@@ -11,6 +11,7 @@ const sdp_header =
     \\o=- 1000 1779396395 IN IP4 0.0.0.0
     \\s=-
     \\t=0 0
+    \\a=msid-semantic: WMS *
     \\
 ;
 
@@ -50,7 +51,7 @@ pub const SDPMedia = struct {
     fingerprint: ?[32]u8,
     rtcp_mux: bool,
     rtcp_rsize: bool,
-    msid: ?sdp.Attribute.Msid,
+    track: ?webrtc.MediaStreamTrack,
 
     pub const empty: SDPMedia = .{
         .kind = .video,
@@ -68,7 +69,7 @@ pub const SDPMedia = struct {
         .setup = .actpass,
         .rtcp_mux = false,
         .rtcp_rsize = false,
-        .msid = null,
+        .track = null,
     };
 
     pub fn parse(allocator: std.mem.Allocator, media: sdp.Media, fingerprint: *[32]u8) !SDPMedia {
@@ -155,7 +156,12 @@ pub const SDPMedia = struct {
                 .id = @intCast(extmap.id),
                 .uri = extmap.uri,
             }),
-            .msid => |msid| sdp_media.msid = msid,
+            .msid => |msid| if (msid.app_data) |track_id| {
+                if (sdp_media.track == null) {
+                    sdp_media.track = .initWithId(track_id, sdp_media.kind);
+                }
+                try sdp_media.track.?.streams.append(allocator, msid.id);
+            },
             else => {},
         };
 
@@ -174,6 +180,7 @@ pub const SDPMedia = struct {
         allocator.free(m.rtp_codec_parameters);
         allocator.free(m.rtp_header_extensions);
         allocator.free(m.candidates);
+        if (m.track) |*track| track.deinit(allocator);
     }
 
     pub fn hasPayload(media: *const SDPMedia, pt: u8) bool {
@@ -200,6 +207,9 @@ pub const SDPMedia = struct {
 
         for (media.candidates) |candidate| try w.print("a=candidate:{f}\r\n", .{candidate});
         if (media.end_of_candidates) try SDPAttribute.write(.end_of_candidates, w);
+        if (media.track) |track| for (track.streams.items) |msid| {
+            try w.print("a=msid:{s} {s}\r\n", .{ msid, track.id });
+        };
     }
 
     pub fn setIceCredentials(media: *SDPMedia, credens: ice.Credentials) void {

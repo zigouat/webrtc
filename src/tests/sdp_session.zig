@@ -252,9 +252,10 @@ test "parse: sdp offer" {
     try testing.expectEqual(12, audio_media.candidates.len);
     try testing.expect(audio_media.end_of_candidates);
 
-    try testing.expect(audio_media.msid != null);
-    try testing.expectEqualStrings("dummy", audio_media.msid.?.id);
-    try testing.expectEqualStrings("audio", audio_media.msid.?.app_data.?);
+    try testing.expect(audio_media.track != null);
+    try testing.expectEqualStrings("audio", audio_media.track.?.getId());
+    try testing.expect(audio_media.track.?.streams.items.len == 1);
+    try testing.expectEqualStrings("dummy", audio_media.track.?.streams.items[0]);
 
     const audio_codecs = audio_media.rtp_codec_parameters;
     try testing.expectEqual(4, audio_codecs.len);
@@ -297,9 +298,10 @@ test "parse: sdp offer" {
     try testing.expectEqual(0, video_media.candidates.len);
     try testing.expect(!video_media.end_of_candidates);
 
-    try testing.expect(video_media.msid != null);
-    try testing.expectEqualStrings("dummy", video_media.msid.?.id);
-    try testing.expectEqualStrings("video", video_media.msid.?.app_data.?);
+    try testing.expect(video_media.track != null);
+    try testing.expectEqualStrings("video", video_media.track.?.getId());
+    try testing.expect(video_media.track.?.streams.items.len == 1);
+    try testing.expectEqualStrings("dummy", video_media.track.?.streams.items[0]);
 
     const video_codecs = video_media.rtp_codec_parameters;
     try testing.expectEqual(24, video_codecs.len);
