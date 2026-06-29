@@ -159,11 +159,19 @@ test "addTransceiver" {
 
         const track: webrtc.MediaStreamTrack = .initWithId("track1", .video);
 
-        const tr = try pc.addTransceiverFromTrack(track, .{ .direction = .sendrecv });
+        const tr = try pc.addTransceiverFromTrack(track, .{
+            .direction = .sendrecv,
+            .streams = &.{ "stream-1", "stream-2" },
+        });
         try std.testing.expectEqual(1, pc.transceivers.items.len);
         try std.testing.expectEqual(.sendrecv, tr.direction);
         try std.testing.expectEqualStrings(&track.id, &tr.sender.track.?.id);
         try std.testing.expect(tr.sender.ssrc != 0);
+
+        const sender_track = tr.sender.track.?;
+        try std.testing.expectEqual(2, sender_track.streams.items.len);
+        try std.testing.expectEqualStrings("stream-1", sender_track.streams.items[0]);
+        try std.testing.expectEqualStrings("stream-2", sender_track.streams.items[1]);
 
         const tr2 = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
         try std.testing.expectEqual(2, pc.transceivers.items.len);

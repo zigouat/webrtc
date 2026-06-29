@@ -234,7 +234,12 @@ pub const MediaStreamTrack = struct {
 
     test "init" {
         const track = init(std.testing.io, .video);
-        try std.testing.expect(!std.mem.eql(u8, &track.id, &@as([64:0]u8, @splat(0))));
+        try std.testing.expect(!std.mem.eql(u8, &.{}, track.getId()));
+    }
+
+    test "getId" {
+        const track = initWithId("test-track", .audio);
+        try std.testing.expectEqualStrings("test-track", track.getId());
     }
 };
 
@@ -514,11 +519,14 @@ pub const RtpTransceiver = struct {
         media.rtcp_mux = true;
         media.rtcp_rsize = false;
         media.setIceCredentials(tr.transport.ice_agent.credentials);
-        media.track = if (tr.sender.track) |t| .{
-            .id = t.id,
-            .kind = t.kind,
-            .streams = try t.streams.clone(allocator),
-        } else null;
+        media.track = switch (tr.direction) {
+            .sendonly, .sendrecv => if (tr.sender.track) |t| .{
+                .id = t.id,
+                .kind = t.kind,
+                .streams = try t.streams.clone(allocator),
+            } else null,
+            else => null,
+        };
 
         if (tr.mid) |mid| @memcpy(media.mid[0..mid.len], mid);
 
