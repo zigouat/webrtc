@@ -194,8 +194,8 @@ pub const SessionDescription = struct {
 
 pub const MediaStreamTrack = struct {
     id: [64:0]u8,
-    stream_id: [][]const u8 = &.{},
     kind: TrackKind,
+    stream_ids: std.ArrayList([]const u8) = .empty,
 
     /// Init a new track with generated id.
     ///
@@ -211,6 +211,10 @@ pub const MediaStreamTrack = struct {
 
         @memcpy(track.id[0..32], &std.fmt.bytesToHex(buf, .lower));
         return track;
+    }
+
+    pub fn deinit(track: *MediaStreamTrack, allocator: std.mem.Allocator) void {
+        track.stream_ids.deinit(allocator);
     }
 
     pub fn initWithId(id: []const u8, kind: TrackKind) MediaStreamTrack {
@@ -297,6 +301,11 @@ pub const RtpSender = struct {
         @panic("Not Implemented");
     }
 
+    pub fn addStreams(sender: *RtpSender, allocator: std.mem.Allocator, streams: []const []const u8) !void {
+        if (sender.track == null) return;
+        for (streams) |stream| try sender.track.?.stream_ids.append(allocator, stream);
+    }
+
     pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) !void {
         if (sender.track == null) {
             @branchHint(.cold);
@@ -345,7 +354,8 @@ pub const RtpSender = struct {
 
         const report = sender.report;
         const codec = sender.codecs[0]; // First codec is used for sending
-        const diff: u32 = @intCast(@divTrunc((timestamp - sender.report.timestamp) * codec.clock_rate, std.time.us_per_s));
+        const ts = if (timestamp <= report.timestamp) report.timestamp else timestamp;
+        const diff: u32 = @intCast(@divTrunc((ts - report.timestamp) * codec.clock_rate, std.time.us_per_s));
 
         const sender_report: rtcp.SenderReport = .{
             .ssrc = sender.ssrc,
@@ -444,6 +454,11 @@ pub const RtpReceiver = struct {
     }
 };
 
+pub const TransceiverInit = struct {
+    direction: Direction,
+    streams: []const []const u8 = &.{},
+};
+
 pub const RtpTransceiver = struct {
     sender: RtpSender,
     receiver: RtpReceiver,
@@ -464,7 +479,8 @@ pub const RtpTransceiver = struct {
         index: u8,
     ) !*RtpTransceiver {
         const tr = try allocator.create(RtpTransceiver);
-        const track_id = if (sdp_media.msid) |msid| msid.app_data orelse "" else "";
+        // const track_id = if (sdp_media.msid) |msid| msid.app_data orelse "" else "";
+        const track_id = "";
         const track: MediaStreamTrack = if (track_id.len == 0) .init(io, sdp_media.kind) else .initWithId(track_id, sdp_media.kind);
 
         tr.* = .{
@@ -481,6 +497,8 @@ pub const RtpTransceiver = struct {
     }
 
     pub fn deinit(tr: *RtpTransceiver, allocator: std.mem.Allocator) void {
+        if (tr.sender.track) |*track| track.deinit(allocator);
+        tr.receiver.track.deinit(allocator);
         allocator.destroy(tr);
     }
 
@@ -494,6 +512,7 @@ pub const RtpTransceiver = struct {
         media.rtcp_mux = true;
         media.rtcp_rsize = false;
         media.setIceCredentials(tr.transport.ice_agent.credentials);
+        media.track = tr.sender.track;
 
         if (tr.mid) |mid| @memcpy(media.mid[0..mid.len], mid);
 
@@ -534,6 +553,20 @@ pub const RtpTransceiver = struct {
 
     pub fn isStopped(tr: *const RtpTransceiver) bool {
         return tr.stopping or tr.direction == .stopped;
+    }
+
+    /// Removes the track from transceiver.
+    pub fn removeTrack(tr: *RtpTransceiver, allocator: std.mem.Allocator) void {
+        if (tr.stopping or tr.sender.track == null) return;
+
+        tr.sender.track.?.deinit(allocator);
+        tr.sender.track = null;
+
+        switch (tr.direction) {
+            .sendrecv => tr.direction = .recvonly,
+            .sendonly => tr.direction = .inactive,
+            else => {},
+        }
     }
 
     pub fn processRemoteTrack(tr: *RtpTransceiver, direction: Direction) ?TrackEventInit {
