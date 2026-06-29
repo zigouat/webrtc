@@ -254,8 +254,8 @@ test "parse: sdp offer" {
 
     try testing.expect(audio_media.track != null);
     try testing.expectEqualStrings("audio", audio_media.track.?.getId());
-    try testing.expect(audio_media.track.?.stream_ids.items.len == 1);
-    try testing.expectEqualStrings("dummy", audio_media.track.?.stream_ids.items[0]);
+    try testing.expect(audio_media.track.?.streams.items.len == 1);
+    try testing.expectEqualStrings("dummy", audio_media.track.?.streams.items[0]);
 
     const audio_codecs = audio_media.rtp_codec_parameters;
     try testing.expectEqual(4, audio_codecs.len);
@@ -300,8 +300,8 @@ test "parse: sdp offer" {
 
     try testing.expect(video_media.track != null);
     try testing.expectEqualStrings("video", video_media.track.?.getId());
-    try testing.expect(video_media.track.?.stream_ids.items.len == 1);
-    try testing.expectEqualStrings("dummy", video_media.track.?.stream_ids.items[0]);
+    try testing.expect(video_media.track.?.streams.items.len == 1);
+    try testing.expectEqualStrings("dummy", video_media.track.?.streams.items[0]);
 
     const video_codecs = video_media.rtp_codec_parameters;
     try testing.expectEqual(24, video_codecs.len);

@@ -195,7 +195,7 @@ pub const SessionDescription = struct {
 pub const MediaStreamTrack = struct {
     id: [64:0]u8,
     kind: TrackKind,
-    stream_ids: std.ArrayList([]const u8) = .empty,
+    streams: std.ArrayList([]const u8) = .empty,
 
     /// Init a new track with generated id.
     ///
@@ -214,7 +214,7 @@ pub const MediaStreamTrack = struct {
     }
 
     pub fn deinit(track: *MediaStreamTrack, allocator: std.mem.Allocator) void {
-        track.stream_ids.deinit(allocator);
+        track.streams.deinit(allocator);
     }
 
     pub fn initWithId(id: []const u8, kind: TrackKind) MediaStreamTrack {
@@ -303,7 +303,7 @@ pub const RtpSender = struct {
 
     pub fn addStreams(sender: *RtpSender, allocator: std.mem.Allocator, streams: []const []const u8) !void {
         if (sender.track == null) return;
-        for (streams) |stream| try sender.track.?.stream_ids.append(allocator, stream);
+        for (streams) |stream| try sender.track.?.streams.append(allocator, stream);
     }
 
     pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) !void {
@@ -482,7 +482,7 @@ pub const RtpTransceiver = struct {
         const track = if (sdp_media.track) |track| MediaStreamTrack{
             .id = track.id,
             .kind = track.kind,
-            .stream_ids = try track.stream_ids.clone(allocator),
+            .streams = try track.streams.clone(allocator),
         } else MediaStreamTrack.init(io, sdp_media.kind);
 
         tr.* = .{
@@ -517,7 +517,7 @@ pub const RtpTransceiver = struct {
         media.track = if (tr.sender.track) |t| .{
             .id = t.id,
             .kind = t.kind,
-            .stream_ids = try t.stream_ids.clone(allocator),
+            .streams = try t.streams.clone(allocator),
         } else null;
 
         if (tr.mid) |mid| @memcpy(media.mid[0..mid.len], mid);

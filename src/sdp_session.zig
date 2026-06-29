@@ -160,7 +160,7 @@ pub const SDPMedia = struct {
                 if (sdp_media.track == null) {
                     sdp_media.track = .initWithId(track_id, sdp_media.kind);
                 }
-                try sdp_media.track.?.stream_ids.append(allocator, msid.id);
+                try sdp_media.track.?.streams.append(allocator, msid.id);
             },
             else => {},
         };
@@ -207,7 +207,7 @@ pub const SDPMedia = struct {
 
         for (media.candidates) |candidate| try w.print("a=candidate:{f}\r\n", .{candidate});
         if (media.end_of_candidates) try SDPAttribute.write(.end_of_candidates, w);
-        if (media.track) |track| for (track.stream_ids.items) |msid| {
+        if (media.track) |track| for (track.streams.items) |msid| {
             try w.print("a=msid:{s} {s}\r\n", .{ msid, track.id });
         };
     }
