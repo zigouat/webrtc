@@ -197,6 +197,15 @@ pub fn addTransceiverFromKind(
     return tr;
 }
 
+/// Stops the transceiver.
+///
+/// Prefer calling this instead of `RtpTransceiver.stop()` directly, as this will also check if negotiation is needed.
+pub fn stopTransceiver(pc: *PeerConnection, transceiver: *webrtc.RtpTransceiver) !void {
+    try pc.checkNotClosed();
+    transceiver.stop();
+    try pc.checkNegotiationNeeded();
+}
+
 fn initTransceiverFromTrack(
     pc: *PeerConnection,
     track: webrtc.MediaStreamTrack,
@@ -484,7 +493,7 @@ fn isNegotiationNeeded(pc: *const PeerConnection) bool {
     const local_desc = pc.local_description orelse return false;
     const remote_desc = pc.remote_description orelse return false;
     for (pc.getTransceivers()) |tr| {
-        if (tr.stopping and tr.direction != .stopped) return true;
+        if (tr.stopping and !tr.stopped) return true;
         if (!tr.isStopped()) {
             if (tr.sdp_mline_index == null) return true;
             const local_media = local_desc.session.getMedias()[tr.sdp_mline_index.?];
@@ -646,9 +655,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
         transceiver.sdp_mline_index = @intCast(idx);
 
         if (media.isRejected()) {
-            if (!transceiver.stopping) transceiver.stop();
-            transceiver.direction = .stopped;
-            transceiver.current_direction = null;
+            if (!transceiver.isStopped()) transceiver.stop();
             continue;
         }
 
@@ -763,10 +770,7 @@ fn pollTransport(pc: *PeerConnection) !void {
                 return;
             }
         },
-        .rtcp => |data| {
-            Logger.debug("Decrypted rtcp packet: {x}", .{data});
-            pc.dtls_transport.ice_agent.destroyPacket(data);
-        },
+        .rtcp => |data| pc.dtls_transport.ice_agent.destroyPacket(data),
         .rtp => |data| {
             if (pc.handleRtpPacket(data) catch {
                 pc.dtls_transport.ice_agent.destroyPacket(data);
@@ -815,7 +819,7 @@ fn removeTransceivers(pc: *PeerConnection) void {
     var idx: usize = 0;
     while (idx < pc.transceivers.items.len) {
         const tr = pc.transceivers.items[idx];
-        if (tr.direction == .stopped and tr.mid != null and (local.getMedias()[tr.sdp_mline_index.?].port == 0 or
+        if (tr.stopped and tr.mid != null and (local.getMedias()[tr.sdp_mline_index.?].port == 0 or
             remote.getMedias()[tr.sdp_mline_index.?].port == 0))
         {
             _ = pc.transceivers.orderedRemove(idx);
@@ -879,3 +883,29 @@ test {
     _ = @import("tests/peer_connection.zig");
     _ = @import("pc/demuxer.zig");
 }
+
+test "updateState" {
+    var pc: PeerConnection = try .init(std.testing.io, std.testing.allocator, .{});
+    defer pc.deinit();
+
+    try pc.updateState();
+    try std.testing.expect(pc.connection_state == .new);
+
+    pc.dtls_transport.ice_agent.connection_state = .connected;
+    pc.dtls_transport.session.connection_state = .connected;
+    try pc.updateState();
+    try std.testing.expect(pc.connection_state == .connected);
+
+    pc.dtls_transport.ice_agent.connection_state = .disconnected;
+    try pc.updateState();
+    try std.testing.expect(pc.connection_state == .disconnected);
+
+    pc.dtls_transport.ice_agent.connection_state = .failed;
+    try pc.updateState();
+    try std.testing.expect(pc.connection_state == .failed);
+
+    pc.dtls_transport.ice_agent.connection_state = .closed;
+    try pc.updateState();
+    try std.testing.expect(pc.connection_state == .closed);
+}
+

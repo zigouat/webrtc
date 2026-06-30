@@ -191,6 +191,17 @@ test "addTransceiver" {
     }
 }
 
+test "stopTransceiver" {
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    defer pc.deinit();
+
+    const tr = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
+    try std.testing.expect(!tr.isStopped());
+
+    tr.stop();
+    try std.testing.expect(tr.isStopped());
+}
+
 test "createOffer: empty offer" {
     var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
     defer pc.deinit();

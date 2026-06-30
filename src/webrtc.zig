@@ -13,6 +13,9 @@ const testing = std.testing;
 
 const ntp_unix_epoch_diff = 2_208_988_800;
 
+/// Default video codecs used for sending and receiving video tracks.
+///
+/// This can be overridden by the user to only include the codecs they want to support.
 pub var default_video_codecs: []const RtpCodecParameters = &[_]RtpCodecParameters{
     .{
         .payload_type = 96,
@@ -33,7 +36,24 @@ pub var default_video_codecs: []const RtpCodecParameters = &[_]RtpCodecParameter
     },
 };
 
-pub const SignalingState = enum { stable, have_local_offer, have_remote_offer, have_local_pranswer, have_remote_pranswer, closed };
+/// SignalingState represents the signaling state of the PeerConnection.
+pub const SignalingState = enum {
+    /// In the stable state there is no offer/answer exchange in progress.
+    /// This is also the initial state, in which case the local and remote descriptions are empty.
+    stable,
+    /// A local description, of type "offer", has been successfully applied.
+    have_local_offer,
+    /// A remote description, of type "offer", has been successfully applied.
+    have_remote_offer,
+    /// A remote description of type "offer" has been successfully applied and a local description of
+    /// type "pranswer" has been successfully applied.
+    have_local_pranswer,
+    /// A local description of type "offer" has been successfully applied and a remote description of
+    /// type "pranswer" has been successfully applied.
+    have_remote_pranswer,
+    /// The PeerConnection has been closed.
+    closed,
+};
 
 pub const ConnectionState = enum { new, connecting, connected, disconnected, failed, closed };
 
@@ -161,22 +181,16 @@ pub const Direction = enum {
     sendonly,
     recvonly,
     inactive,
-    stopped,
 
     pub fn reverse(direction: Direction) Direction {
-        std.debug.assert(direction != .stopped);
-
         return switch (direction) {
             .sendonly => .recvonly,
             .recvonly => .sendonly,
             .inactive, .sendrecv => |d| d,
-            else => unreachable,
         };
     }
 
     pub fn intersect(a: Direction, b: Direction) Direction {
-        std.debug.assert(a != .stopped and b != .stopped);
-
         if (a == b) return a;
         if (a == .inactive or b == .inactive) return .inactive;
         if (a == .sendrecv) return b;
@@ -512,6 +526,7 @@ pub const RtpTransceiver = struct {
     mid: ?[]const u8 = null,
     sdp_mline_index: ?u8 = null,
     stopping: bool = false,
+    stopped: bool = false,
     added_by_add_track: bool = false,
     transport: *DtlsTransport,
 
@@ -619,7 +634,7 @@ pub const RtpTransceiver = struct {
         return (media.direction == .sendrecv or media.direction == .recvonly) and
             tr.kind == media.kind and
             tr.mid == null and
-            tr.direction != .stopped;
+            !tr.stopped;
     }
 
     pub fn setSenderTrack(tr: *RtpTransceiver, track: MediaStreamTrack) void {
@@ -632,14 +647,17 @@ pub const RtpTransceiver = struct {
     }
 
     pub fn stop(tr: *RtpTransceiver) void {
-        if (tr.stopping) return;
-        tr.stopping = true;
-        tr.direction = .inactive;
+        if (!tr.stopping) {
+            tr.stopping = true;
+            tr.direction = .inactive;
+        }
         // TODO: stop sender and receiver
+        tr.stopped = true;
+        tr.current_direction = null;
     }
 
     pub fn isStopped(tr: *const RtpTransceiver) bool {
-        return tr.stopping or tr.direction == .stopped;
+        return tr.stopping or tr.stopped;
     }
 
     /// Removes the track from transceiver.
@@ -688,7 +706,6 @@ pub const RtpTransceiver = struct {
                     .transceiver = tr,
                 },
             },
-            else => {},
         }
 
         return null;
