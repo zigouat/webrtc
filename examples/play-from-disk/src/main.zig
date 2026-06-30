@@ -33,7 +33,7 @@ pub fn main(init: std.process.Init) !void {
     pc = try .init(io, allocator, .{});
     defer pc.deinit();
 
-    const sender = try pc.addTrack(.initWithId("video-track", .video));
+    const sender = try pc.addTrack(.initWithId("video-track", .video), &.{"stream"});
 
     try grp.concurrent(io, startHttpServer, .{ io, allocator });
 
@@ -140,7 +140,7 @@ fn doSendMediaData(io: Io, allocator: std.mem.Allocator, reader: *mp4.Reader, se
     var frame_iterator = try reader.frameIterator(allocator, &read_buffer);
     defer frame_iterator.deinit(allocator);
 
-    var h264_pack = rtp.packetizer.H264.init(io, .{ .payload_type = 0 });
+    var h264_pack = rtp.packetizer.H264.init(.init(io));
     var rtp_buffer: [1300]u8 = @splat(0);
 
     const sps, const pps = try getParameterSets(&video_stream);

@@ -275,7 +275,33 @@ test "createOffer: multiple offers" {
     try testing.expect(!std.mem.eql(u8, &old_mid, sdp_session.getMedias()[1].getMid()));
 }
 
-test "Negotiate between peers" {
+test "negotiation between peers" {
+    var pc1: PeerConnection = try .init(io, allocator, .{});
+    defer pc1.deinit();
+
+    var pc2: PeerConnection = try .init(io, allocator, .{});
+    defer pc2.deinit();
+
+    const sender1 = try pc1.addTrack(.initWithId("track-1", .video), &.{"stream-1"});
+    const sender2 = try pc1.addTrack(.init(testing.io, .video), &.{ "stream-1", "stream-2" });
+
+    try negotiate(&pc1, &pc2);
+
+    const transceivers = pc2.getTransceivers();
+    try testing.expectEqual(2, transceivers.len);
+    var track = transceivers[0].receiver.track;
+    try testing.expectEqualStrings(sender1.track.?.getId(), track.getId());
+    try testing.expectEqual(1, track.streams.items.len);
+    try testing.expectEqualStrings("stream-1", track.streams.items[0]);
+
+    track = transceivers[1].receiver.track;
+    try testing.expectEqualStrings(sender2.track.?.getId(), track.getId());
+    try testing.expectEqual(2, track.streams.items.len);
+    try testing.expectEqualStrings("stream-1", track.streams.items[0]);
+    try testing.expectEqualStrings("stream-2", track.streams.items[1]);
+}
+
+test "negotiation between peers: add/remove tracks" {
     var pc1: PeerConnection = try .init(io, allocator, .{ .inner_queue_size = 1 });
     defer pc1.deinit();
 

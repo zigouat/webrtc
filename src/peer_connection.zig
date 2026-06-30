@@ -275,6 +275,10 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
                 codecs;
             @memcpy(new_media.mid[0..tr.mid.?.len], tr.mid.?);
             new_media.setIceCredentials(pc.dtls_transport.ice_agent.credentials);
+            new_media.track = if (codecs.len == 0) null else switch (new_media.direction) {
+                .sendonly, .sendrecv => try tr.sender.track.?.clone(pc.allocator),
+                else => null,
+            };
         }
 
         idx += 1;
@@ -590,17 +594,15 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
     var media_exists: bool = false;
     for (sdp_session.getMedias()) |*media| {
         const tr = pc.findTransceiverByMid(&media.mid).?;
-        if (media.port == 0) {
-            continue;
-        }
+        if (media.port == 0) continue;
 
         media_exists = true;
 
-        tr.current_direction = media.direction;
-        tr.fired_direction = media.direction;
         tr.sender.codecs = media.rtp_codec_parameters;
         tr.receiver.codecs = media.rtp_codec_parameters;
         // TODO: track removal
+        tr.current_direction = media.direction;
+        tr.fired_direction = media.direction;
     }
 
     // if there's no negotiated media, don't start connectivity checks
@@ -608,6 +610,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
         try pc.group.concurrent(pc.dtls_transport.getIo(), pollTransportWrapper, .{pc});
         try pc.dtls_transport.gatherCandidates(pc.last_answer.getIceRole());
     }
+
     try pc.demuxer.updateMaps(&sdp_session);
 
     pc.pending_local_description = pc.last_answer;
@@ -674,10 +677,10 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
         first_media = first_media orelse media;
 
         const direction = media.direction.reverse();
-        switch (direction) {
-            .recvonly, .sendrecv => {}, // TODO: get msids from sdp and associate with receiver track
-            else => {},
-        }
+        const msids = switch (direction) {
+            .recvonly, .sendrecv => if (media.track) |track| track.streams.items else &.{},
+            else => &.{},
+        };
         transceiver.current_direction = direction;
 
         if (session_desc.type == .answer) {
@@ -690,7 +693,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
             transceiver.receiver.codecs = codecs.@"1";
         }
 
-        if (transceiver.processRemoteTrack(direction)) |track_init_event| {
+        if (try transceiver.processRemoteTrack(pc.allocator, direction, msids)) |track_init_event| {
             try track_events.append(pc.allocator, track_init_event);
         }
     }
