@@ -213,7 +213,7 @@ pub const SDPMedia = struct {
         for (media.candidates) |candidate| try w.print("a=candidate:{f}\r\n", .{candidate});
         if (media.end_of_candidates) try SDPAttribute.write(.end_of_candidates, w);
         if (media.track) |track| for (track.streams.items) |msid| {
-            try w.print("a=msid:{s} {s}\r\n", .{ msid, track.id });
+            try w.print("a=msid:{s} {s}\r\n", .{ msid, track.getId() });
         };
 
         if (media.ssrc) |ssrc| {

@@ -276,7 +276,7 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
             @memcpy(new_media.mid[0..tr.mid.?.len], tr.mid.?);
             new_media.setIceCredentials(pc.dtls_transport.ice_agent.credentials);
 
-            if (codecs.len == 0) switch (new_media.direction) {
+            if (codecs.len != 0) switch (new_media.direction) {
                 .sendonly, .sendrecv => {
                     new_media.track = try tr.sender.track.?.clone(pc.allocator);
                     new_media.ssrc = tr.sender.ssrc;

@@ -12,6 +12,26 @@ const DtlsTransport = @import("dtls_transport.zig");
 
 const ntp_unix_epoch_diff = 2_208_988_800;
 
+pub var default_video_codecs: []const RtpCodecParameters = &[_]RtpCodecParameters{
+    .{
+        .payload_type = 96,
+        .mime_type = MimeType.VP8,
+        .clock_rate = 90_000,
+    },
+    .{
+        .payload_type = 104,
+        .mime_type = MimeType.H264,
+        .clock_rate = 90_000,
+        .fmtp_params = .{
+            .h264 = .{
+                .profile_level_id = 0x42e01f,
+                .level_asymmetry_allowed = true,
+                .packetization_mode = 1,
+            },
+        },
+    },
+};
+
 pub const SignalingState = enum { stable, have_local_offer, have_remote_offer, have_local_pranswer, have_remote_pranswer, closed };
 
 pub const ConnectionState = enum { new, connecting, connected, disconnected, failed, closed };
@@ -58,21 +78,6 @@ pub const MimeType = struct {
                 audio_unknown,
         }
     }
-};
-
-pub const default_video_codecs = [_]RtpCodecParameters{
-    .{
-        .payload_type = 96,
-        .mime_type = MimeType.H264,
-        .clock_rate = 90_000,
-        .fmtp_params = .{
-            .h264 = .{
-                .profile_level_id = 0x42e01f,
-                .level_asymmetry_allowed = true,
-                .packetization_mode = 1,
-            },
-        },
-    },
 };
 
 pub const default_video_extensions = [_]RtpHeaderExtensionParameter{
@@ -721,7 +726,7 @@ pub const RtpTransceiver = struct {
 pub fn getCodecCapabilities(kind: TrackKind) []const RtpCodecParameters {
     return switch (kind) {
         .audio => &.{},
-        .video => &default_video_codecs,
+        .video => default_video_codecs,
     };
 }
 
