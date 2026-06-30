@@ -9,6 +9,7 @@ const FmtpParams = sdp.Attribute.Fmtp.Params;
 
 const std = @import("std");
 const DtlsTransport = @import("dtls_transport.zig");
+const testing = std.testing;
 
 const ntp_unix_epoch_diff = 2_208_988_800;
 
@@ -181,6 +182,22 @@ pub const Direction = enum {
         if (a == .sendrecv) return b;
         if (b == .sendrecv) return a;
         return .inactive;
+    }
+
+    test "reverse" {
+        try testing.expectEqual(.recvonly, Direction.reverse(.sendonly));
+        try testing.expectEqual(.sendonly, Direction.reverse(.recvonly));
+        try testing.expectEqual(.inactive, Direction.reverse(.inactive));
+        try testing.expectEqual(.sendrecv, Direction.reverse(.sendrecv));
+    }
+
+    test "intersect" {
+        try testing.expectEqual(.sendrecv, Direction.intersect(.sendrecv, .sendrecv));
+        try testing.expectEqual(.inactive, Direction.intersect(.sendonly, .recvonly));
+        try testing.expectEqual(.inactive, Direction.intersect(.inactive, .sendonly));
+        try testing.expectEqual(.inactive, Direction.intersect(.recvonly, .inactive));
+        try testing.expectEqual(.sendonly, Direction.intersect(.sendonly, .sendrecv));
+        try testing.expectEqual(.recvonly, Direction.intersect(.sendrecv, .recvonly));
     }
 };
 
@@ -551,6 +568,42 @@ pub const RtpTransceiver = struct {
         if (tr.mid) |mid| @memcpy(media.mid[0..mid.len], mid);
 
         return media;
+    }
+
+    pub fn toSdpMediaAnswer(tr: *const RtpTransceiver, allocator: std.mem.Allocator, media: *const SDPSession.SDPMedia) !SDPSession.SDPMedia {
+        var answer: SDPSession.SDPMedia = .empty;
+        errdefer answer.deinit(allocator);
+
+        const codecs = try utils.getCodecIntersection(
+            allocator,
+            media.rtp_codec_parameters,
+            getCodecCapabilities(tr.kind),
+        );
+        answer.kind = tr.kind;
+        answer.port = if (codecs.len == 0) 0 else 9;
+        answer.rtcp_mux = true;
+        answer.rtcp_rsize = false;
+        answer.setup = switch (media.setup) {
+            .active => .passive,
+            else => .active,
+        };
+        answer.direction = media.direction.reverse().intersect(tr.direction);
+        answer.rtp_codec_parameters = if (answer.port == 0)
+            try allocator.dupe(RtpCodecParameters, media.rtp_codec_parameters)
+        else
+            codecs;
+        @memcpy(answer.mid[0..tr.mid.?.len], tr.mid.?);
+        answer.setIceCredentials(tr.transport.ice_agent.credentials);
+
+        if (codecs.len != 0) switch (answer.direction) {
+            .sendonly, .sendrecv => {
+                answer.track = try tr.sender.track.?.clone(allocator);
+                answer.ssrc = tr.sender.ssrc;
+            },
+            else => {},
+        };
+
+        return answer;
     }
 
     /// Check if a track of kind `kind` can be associated with this transceiver.

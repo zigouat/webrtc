@@ -252,38 +252,12 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
     var idx: usize = 0;
     for (offer.session.getMedias()) |*media| {
         const tr = pc.findTransceiverByMediaIndex(idx) orelse return error.Unexpected;
-        if (media.isRejected()) {
-            var new_media = try media.clone(pc.allocator);
-            new_media.bundle_only = false;
-        } else {
-            const codecs = try utils.getCodecIntersection(
-                pc.allocator,
-                media.rtp_codec_parameters,
-                webrtc.getCodecCapabilities(tr.kind),
-            );
-            var new_media = sdp_session.medias.addOneAssumeCapacity();
-            new_media.* = .empty;
-            new_media.kind = tr.kind;
-            new_media.port = if (codecs.len == 0) 0 else 9;
-            new_media.rtcp_mux = true;
-            new_media.rtcp_rsize = false;
-            new_media.setup = .active;
-            new_media.direction = media.direction.reverse().intersect(tr.direction);
-            new_media.rtp_codec_parameters = if (new_media.port == 0)
-                try pc.allocator.dupe(webrtc.RtpCodecParameters, media.rtp_codec_parameters)
-            else
-                codecs;
-            @memcpy(new_media.mid[0..tr.mid.?.len], tr.mid.?);
-            new_media.setIceCredentials(pc.dtls_transport.ice_agent.credentials);
-
-            if (codecs.len != 0) switch (new_media.direction) {
-                .sendonly, .sendrecv => {
-                    new_media.track = try tr.sender.track.?.clone(pc.allocator);
-                    new_media.ssrc = tr.sender.ssrc;
-                },
-                else => {},
-            };
-        }
+        const new_media = sdp_session.medias.addOneAssumeCapacity();
+        new_media.* = if (media.isRejected()) blk: {
+            var cloned = try media.clone(pc.allocator);
+            cloned.bundle_only = false;
+            break :blk cloned;
+        } else try tr.toSdpMediaAnswer(pc.allocator, media);
 
         idx += 1;
     }
@@ -508,7 +482,7 @@ fn checkNegotiationNeeded(pc: *PeerConnection) !void {
 fn isNegotiationNeeded(pc: *const PeerConnection) bool {
     // TODO: Check ice restart
     const local_desc = pc.local_description orelse return false;
-    const remote_desc = pc.local_description orelse return false;
+    const remote_desc = pc.remote_description orelse return false;
     for (pc.getTransceivers()) |tr| {
         if (tr.stopping and tr.direction != .stopped) return true;
         if (!tr.isStopped()) {
