@@ -534,10 +534,14 @@ pub const RtpTransceiver = struct {
         media.rtcp_mux = true;
         media.rtcp_rsize = false;
         media.setIceCredentials(tr.transport.ice_agent.credentials);
-        media.track = switch (tr.direction) {
-            .sendonly, .sendrecv => if (tr.sender.track) |t| try t.clone(allocator) else null,
-            else => null,
-        };
+
+        switch (tr.direction) {
+            .sendonly, .sendrecv => {
+                media.track = if (tr.sender.track) |t| try t.clone(allocator) else null;
+                media.ssrc = tr.sender.ssrc;
+            },
+            else => {},
+        }
 
         if (tr.mid) |mid| @memcpy(media.mid[0..mid.len], mid);
 

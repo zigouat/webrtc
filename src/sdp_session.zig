@@ -52,6 +52,7 @@ pub const SDPMedia = struct {
     rtcp_mux: bool,
     rtcp_rsize: bool,
     track: ?webrtc.MediaStreamTrack,
+    ssrc: ?u32,
 
     pub const empty: SDPMedia = .{
         .kind = .video,
@@ -70,6 +71,7 @@ pub const SDPMedia = struct {
         .rtcp_mux = false,
         .rtcp_rsize = false,
         .track = null,
+        .ssrc = null,
     };
 
     pub fn parse(allocator: std.mem.Allocator, media: sdp.Media, fingerprint: *[32]u8) !SDPMedia {
@@ -162,6 +164,9 @@ pub const SDPMedia = struct {
                 }
                 try sdp_media.track.?.streams.append(allocator, msid.id);
             },
+            .ssrc => |ssrc| if (sdp_media.ssrc == null) {
+                sdp_media.ssrc = ssrc.id;
+            },
             else => {},
         };
 
@@ -210,6 +215,11 @@ pub const SDPMedia = struct {
         if (media.track) |track| for (track.streams.items) |msid| {
             try w.print("a=msid:{s} {s}\r\n", .{ msid, track.id });
         };
+
+        if (media.ssrc) |ssrc| {
+            const msid = if (media.track != null and media.track.?.streams.items.len > 0) media.track.?.streams.items[0] else "-";
+            try w.print("a=ssrc:{} msid:{s} {s}\r\n", .{ ssrc, msid, media.track.?.getId() });
+        }
     }
 
     pub fn setIceCredentials(media: *SDPMedia, credens: ice.Credentials) void {

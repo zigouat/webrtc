@@ -22,6 +22,10 @@ pub fn deinit(demuxer: *Demuxer) void {
 
 pub fn updateMaps(demuxer: *Demuxer, sdp_session: *const SDPSession) !void {
     for (sdp_session.getMedias()) |*media| {
+        if (media.ssrc) |ssrc| {
+            try demuxer.ssrc_to_mid.put(ssrc, media.mid);
+        }
+
         inner: for (media.rtp_codec_parameters) |codec| {
             for (sdp_session.getMedias()) |*m| if (!std.mem.eql(u8, media.getMid(), m.getMid()) and m.hasPayload(codec.payload_type))
                 continue :inner;
@@ -65,6 +69,7 @@ fn testSdpSession(alloc: std.mem.Allocator) !SDPSession {
     var media1_params = try alloc.alloc(RtpCodecParameters, 3);
     medias[0].rtp_codec_parameters = media1_params;
     medias[0].mid = .{ '1', 0, 0 };
+    medias[0].ssrc = 0x10101010;
     media1_params[0] = .{ .payload_type = 96, .clock_rate = 90000, .mime_type = "video/h264" };
     media1_params[1] = .{ .payload_type = 97, .clock_rate = 90000, .mime_type = "video/rtx" };
     media1_params[2] = .{ .payload_type = 98, .clock_rate = 90000, .mime_type = "video/vp8" };
@@ -79,6 +84,7 @@ fn testSdpSession(alloc: std.mem.Allocator) !SDPSession {
     var media3_params = try alloc.alloc(RtpCodecParameters, 3);
     medias[2].rtp_codec_parameters = media3_params;
     medias[2].mid = .{ '3', 0, 0 };
+    medias[2].ssrc = 0x20202020;
     media3_params[0] = .{ .payload_type = 96, .clock_rate = 90000, .mime_type = "video/h265" };
     media3_params[1] = .{ .payload_type = 105, .clock_rate = 90000, .mime_type = "video/rtx" };
     media3_params[2] = .{ .payload_type = 106, .clock_rate = 90000, .mime_type = "video/av1" };
@@ -94,6 +100,10 @@ test "update maps" {
     defer session.deinit(std.testing.allocator);
 
     try demuxer.updateMaps(&session);
+
+    try std.testing.expectEqual(2, demuxer.ssrc_to_mid.count());
+    try std.testing.expectEqualStrings("1\x00\x00", &demuxer.ssrc_to_mid.get(0x10101010).?);
+    try std.testing.expectEqualStrings("3\x00\x00", &demuxer.ssrc_to_mid.get(0x20202020).?);
 
     try std.testing.expectEqual(5, demuxer.pt_to_mid.count());
     var entry = demuxer.pt_to_mid.get(97);
@@ -143,4 +153,8 @@ test "getMid" {
 
     packet.header.payload_type = 96;
     try std.testing.expect(try demuxer.getMid(&packet) == null);
+
+    packet.header.ssrc = 0x10101010;
+    packet.header.payload_type = 10;
+    try std.testing.expect(try demuxer.getMid(&packet) != null);
 }
