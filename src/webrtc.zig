@@ -228,6 +228,19 @@ pub const SessionDescription = struct {
     }
 };
 
+pub const MediaStream = struct {
+    id: []const u8,
+
+    pub fn init(allocator: std.mem.Allocator, id: []const u8) !MediaStream {
+        const id_copy = try allocator.dupe(u8, id);
+        return MediaStream{ .id = id_copy };
+    }
+
+    pub fn deinit(stream: *MediaStream, allocator: std.mem.Allocator) void {
+        allocator.free(stream.id);
+    }
+};
+
 pub const MediaStreamTrack = struct {
     id: [64:0]u8,
     kind: TrackKind,
@@ -275,8 +288,18 @@ pub const MediaStreamTrack = struct {
 
     pub fn clone(track: *const MediaStreamTrack, allocator: std.mem.Allocator) std.mem.Allocator.Error!MediaStreamTrack {
         var new_track = MediaStreamTrack.initWithId(track.getId(), track.kind);
-        new_track.streams = try track.streams.clone(allocator);
+        errdefer new_track.deinit(allocator);
+
+        for (track.streams.items) |stream| {
+            const copy = try allocator.dupe(u8, stream);
+            errdefer allocator.free(copy);
+            try new_track.streams.append(allocator, copy);
+        }
         return new_track;
+    }
+
+    fn addStream(track: *MediaStreamTrack, allocator: std.mem.Allocator, stream: MediaStream) !void {
+        try track.streams.append(allocator, stream.id);
     }
 
     test "init" {
@@ -353,9 +376,10 @@ pub const RtpSender = struct {
         @panic("Not Implemented");
     }
 
-    pub fn addStreams(sender: *RtpSender, allocator: std.mem.Allocator, streams: []const []const u8) !void {
+    pub fn addStream(sender: *RtpSender, allocator: std.mem.Allocator, stream: MediaStream) !void {
         if (sender.track == null) return;
-        for (streams) |stream| try sender.track.?.streams.append(allocator, stream);
+        const track = &sender.track.?;
+        try track.addStream(allocator, stream);
     }
 
     pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) !void {
@@ -505,9 +529,9 @@ pub const RtpReceiver = struct {
         return packet;
     }
 
-    fn processMsids(receiver: *RtpReceiver, allocator: std.mem.Allocator, msids: []const []const u8) !void {
+    fn processMsids(receiver: *RtpReceiver, allocator: std.mem.Allocator, msids: []MediaStream) !void {
         receiver.track.streams.clearAndFree(allocator);
-        for (msids) |msid| try receiver.track.streams.append(allocator, msid);
+        for (msids) |msid| try receiver.track.addStream(allocator, msid);
     }
 };
 
@@ -537,8 +561,8 @@ pub const RtpTransceiver = struct {
         index: u8,
     ) !*RtpTransceiver {
         const tr = try allocator.create(RtpTransceiver);
-        const track = if (sdp_media.track) |track|
-            MediaStreamTrack.initWithId(track.getId(), sdp_media.kind)
+        const track = if (sdp_media.track_id) |track_id|
+            MediaStreamTrack.initWithId(track_id, sdp_media.kind)
         else
             MediaStreamTrack.init(io, sdp_media.kind);
 
@@ -572,14 +596,7 @@ pub const RtpTransceiver = struct {
         media.rtcp_rsize = false;
         media.setIceCredentials(tr.transport.ice_agent.credentials);
 
-        switch (tr.direction) {
-            .sendonly, .sendrecv => {
-                media.track = if (tr.sender.track) |t| try t.clone(allocator) else null;
-                media.ssrc = tr.sender.ssrc;
-            },
-            else => {},
-        }
-
+        try tr.addSenderFields(allocator, &media);
         if (tr.mid) |mid| @memcpy(media.mid[0..mid.len], mid);
 
         return media;
@@ -610,14 +627,7 @@ pub const RtpTransceiver = struct {
         @memcpy(answer.mid[0..tr.mid.?.len], tr.mid.?);
         answer.setIceCredentials(tr.transport.ice_agent.credentials);
 
-        if (codecs.len != 0) switch (answer.direction) {
-            .sendonly, .sendrecv => {
-                answer.track = try tr.sender.track.?.clone(allocator);
-                answer.ssrc = tr.sender.ssrc;
-            },
-            else => {},
-        };
-
+        if (codecs.len != 0) try tr.addSenderFields(allocator, &answer);
         return answer;
     }
 
@@ -675,6 +685,7 @@ pub const RtpTransceiver = struct {
     }
 
     pub inline fn canSend(tr: *const RtpTransceiver) bool {
+        if (tr.isStopped()) return false;
         if (tr.current_direction) |direction| return direction == .sendrecv or direction == .sendonly;
         return false;
     }
@@ -683,7 +694,7 @@ pub const RtpTransceiver = struct {
         tr: *RtpTransceiver,
         allocator: std.mem.Allocator,
         direction: Direction,
-        msids: []const []const u8,
+        msids: []MediaStream,
     ) !?TrackEventInit {
         try tr.receiver.processMsids(allocator, msids);
 
@@ -719,6 +730,23 @@ pub const RtpTransceiver = struct {
             .sendrecv, .sendonly => tr.sender.writeReport(timestamp, buffer),
             else => &.{},
         };
+    }
+
+    fn addSenderFields(tr: *const RtpTransceiver, allocator: std.mem.Allocator, media: *SDPSession.SDPMedia) !void {
+        switch (tr.direction) {
+            .sendonly, .sendrecv => {
+                const track = &tr.sender.track.?;
+                media.msids = try allocator.alloc(MediaStream, track.streams.items.len);
+                errdefer allocator.free(media.msids);
+
+                for (media.msids, track.streams.items) |*msid, stream_id| {
+                    msid.* = .{ .id = stream_id };
+                }
+                media.track_id = try allocator.dupe(u8, track.getId());
+                media.ssrc = tr.sender.ssrc;
+            },
+            else => {},
+        }
     }
 
     fn newTestRtpTransceiver(io: std.Io) RtpTransceiver {
