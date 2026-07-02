@@ -44,6 +44,7 @@ pending_remote_description: ?ParsedSesssionDescription = null,
 last_offer: ParsedSesssionDescription = .empty(.offer),
 last_answer: ParsedSesssionDescription = .empty(.answer),
 
+streams: std.ArrayList(webrtc.MediaStream) = .empty,
 transceivers: std.ArrayList(*webrtc.RtpTransceiver) = .empty,
 dtls_transport: DtlsTransport,
 demuxer: Demuxer,
@@ -115,6 +116,9 @@ pub fn deinit(pc: *PeerConnection) void {
 
     for (pc.transceivers.items) |tr| tr.deinit(pc.allocator);
     pc.transceivers.deinit(pc.allocator);
+
+    for (pc.streams.items) |*stream| stream.deinit(pc.allocator);
+    pc.streams.deinit(pc.allocator);
 
     if (pc.local_description) |*local_desc| local_desc.deinit(pc.allocator);
     if (pc.remote_description) |*remote_desc| remote_desc.deinit(pc.allocator);
@@ -192,6 +196,11 @@ pub fn addTransceiverFromKind(
         .receiver = .init(.init(io, kind)),
         .transport = &pc.dtls_transport,
     };
+
+    for (init_config.streams) |stream_id| {
+        const stream = try getOrAddStream(pc, stream_id);
+        try tr.sender.addStream(pc.allocator, stream);
+    }
     tr.sender.ssrc = try generateSsrc(io, &pc.demuxer);
     try pc.checkNegotiationNeeded();
     return tr;
@@ -224,10 +233,19 @@ fn initTransceiverFromTrack(
         .added_by_add_track = added_by_add_track,
         .transport = &pc.dtls_transport,
     };
-    try tr.sender.addStreams(pc.allocator, streams);
-    tr.sender.ssrc = try generateSsrc(pc.dtls_transport.getIo(), &pc.demuxer);
 
+    for (streams) |stream_id| {
+        const stream = try getOrAddStream(pc, stream_id);
+        try tr.sender.addStream(pc.allocator, stream);
+    }
+    tr.sender.ssrc = try generateSsrc(pc.dtls_transport.getIo(), &pc.demuxer);
     return tr;
+}
+
+fn getOrAddStream(pc: *PeerConnection, stream_id: []const u8) !webrtc.MediaStream {
+    for (pc.streams.items) |stream| if (std.mem.eql(u8, stream.id, stream_id)) return stream;
+    try pc.streams.append(pc.allocator, try .init(pc.allocator, stream_id));
+    return pc.streams.getLast();
 }
 
 /// Creates a new offer.
@@ -262,8 +280,9 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
     for (offer.session.getMedias()) |*media| {
         const tr = pc.findTransceiverByMediaIndex(idx) orelse return error.Unexpected;
         const new_media = sdp_session.medias.addOneAssumeCapacity();
-        new_media.* = if (media.isRejected()) blk: {
+        new_media.* = if (media.isRejected() or tr.isStopped()) blk: {
             var cloned = try media.clone(pc.allocator);
+            cloned.port = 0;
             cloned.bundle_only = false;
             break :blk cloned;
         } else try tr.toSdpMediaAnswer(pc.allocator, media);
@@ -511,25 +530,19 @@ fn isNegotiationNeeded(pc: *const PeerConnection) bool {
     return false;
 }
 
-fn updateState(pc: *PeerConnection) !void {
-    const old_state = pc.connection_state;
-    const ice_state, const dtls_state = pc.dtls_transport.getConnectionState();
-
-    if (ice_state == .closed)
-        pc.connection_state = .closed
+fn nextPeerConnectionState(ice_state: ice.ConnectionState, dtls_state: dtls.ConnectionState) webrtc.ConnectionState {
+    return if (ice_state == .closed)
+        .closed
     else if (ice_state == .failed or dtls_state == .failed)
-        pc.connection_state = .failed
+        .failed
     else if (ice_state == .disconnected)
-        pc.connection_state = .disconnected
+        .disconnected
     else if (ice_state == .new and (dtls_state == .new or dtls_state == .closed))
-        pc.connection_state = .new
+        .new
     else if ((ice_state == .connected or ice_state == .completed) and (dtls_state == .connected or dtls_state == .closed))
-        pc.connection_state = .connected
+        .connected
     else
-        pc.connection_state = .connecting;
-
-    if (pc.connection_state != old_state)
-        try pc.queue.putOne(pc.dtls_transport.getIo(), .{ .connection_state = pc.connection_state });
+        .connecting;
 }
 
 fn writeDescriptionWithCandidates(pc: *PeerConnection, sess_desc: *const ParsedSesssionDescription, w: *Io.Writer) !void {
@@ -661,11 +674,16 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
 
         first_media = first_media orelse media;
 
+        const msids = try pc.allocator.alloc(webrtc.MediaStream, media.msids.len);
+        defer pc.allocator.free(msids);
+
         const direction = media.direction.reverse();
-        const msids = switch (direction) {
-            .recvonly, .sendrecv => if (media.track) |track| track.streams.items else &.{},
-            else => &.{},
-        };
+        switch (direction) {
+            .recvonly, .sendrecv => for (media.msids, msids) |msid, *new_msid| {
+                new_msid.* = try getOrAddStream(pc, msid.id);
+            },
+            else => {},
+        }
         transceiver.current_direction = direction;
 
         if (session_desc.type == .answer) {
@@ -764,10 +782,15 @@ fn pollTransport(pc: *PeerConnection) !void {
     while (pc.dtls_transport.poll()) |event| switch (event) {
         .ice_candidate => |candidate| if (candidate) |c| Logger.debug("candidate:{f}", .{c}),
         .ice_connection_state, .dtls_connection_state => {
-            try pc.updateState();
-            if (pc.connection_state == .closed) {
-                pc.signaling_state = .closed;
-                return;
+            const ice_state, const dtls_state = pc.dtls_transport.getConnectionState();
+            const new_state = nextPeerConnectionState(ice_state, dtls_state);
+            if (new_state != pc.connection_state) {
+                pc.connection_state = new_state;
+                try pc.queue.putOne(io, .{ .connection_state = new_state });
+                if (pc.connection_state == .closed) {
+                    pc.signaling_state = .closed;
+                    return;
+                }
             }
         },
         .rtcp => |data| pc.dtls_transport.ice_agent.destroyPacket(data),
@@ -823,6 +846,7 @@ fn removeTransceivers(pc: *PeerConnection) void {
             remote.getMedias()[tr.sdp_mline_index.?].port == 0))
         {
             _ = pc.transceivers.orderedRemove(idx);
+            tr.deinit(pc.allocator);
             continue;
         }
 
@@ -859,7 +883,7 @@ fn doSendReports(pc: *PeerConnection) !void {
             const tr = pc.transceivers.items[idx];
             if (tr.isStopped() or tr.direction == .inactive) continue;
 
-            Logger.debug("send rtcp report for transceiver: {?s}", .{tr.mid});
+            // Logger.debug("send rtcp report for transceiver: {?s}", .{tr.mid});
             const data = tr.getRtcpReport(timestamp, buffer);
             if (data.len == 0) continue;
             try pc.dtls_transport.sendRtcp(data);
@@ -884,28 +908,16 @@ test {
     _ = @import("pc/demuxer.zig");
 }
 
-test "updateState" {
-    var pc: PeerConnection = try .init(std.testing.io, std.testing.allocator, .{});
-    defer pc.deinit();
-
-    try pc.updateState();
-    try std.testing.expect(pc.connection_state == .new);
-
-    pc.dtls_transport.ice_agent.connection_state = .connected;
-    pc.dtls_transport.session.connection_state = .connected;
-    try pc.updateState();
-    try std.testing.expect(pc.connection_state == .connected);
-
-    pc.dtls_transport.ice_agent.connection_state = .disconnected;
-    try pc.updateState();
-    try std.testing.expect(pc.connection_state == .disconnected);
-
-    pc.dtls_transport.ice_agent.connection_state = .failed;
-    try pc.updateState();
-    try std.testing.expect(pc.connection_state == .failed);
-
-    pc.dtls_transport.ice_agent.connection_state = .closed;
-    try pc.updateState();
-    try std.testing.expect(pc.connection_state == .closed);
+test "nextPeerConnectionState" {
+    try std.testing.expectEqual(.new, nextPeerConnectionState(.new, .new));
+    try std.testing.expectEqual(.new, nextPeerConnectionState(.new, .closed));
+    try std.testing.expectEqual(.connecting, nextPeerConnectionState(.checking, .connecting));
+    try std.testing.expectEqual(.connecting, nextPeerConnectionState(.new, .connecting));
+    try std.testing.expectEqual(.connected, nextPeerConnectionState(.completed, .connected));
+    try std.testing.expectEqual(.connected, nextPeerConnectionState(.connected, .closed));
+    try std.testing.expectEqual(.connected, nextPeerConnectionState(.connected, .connected));
+    try std.testing.expectEqual(.disconnected, nextPeerConnectionState(.disconnected, .connected));
+    try std.testing.expectEqual(.failed, nextPeerConnectionState(.connected, .failed));
+    try std.testing.expectEqual(.failed, nextPeerConnectionState(.failed, .connected));
+    try std.testing.expectEqual(.closed, nextPeerConnectionState(.closed, .connected));
 }
-

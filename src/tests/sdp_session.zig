@@ -252,10 +252,10 @@ test "parse: sdp offer" {
     try testing.expectEqual(12, audio_media.candidates.len);
     try testing.expect(audio_media.end_of_candidates);
 
-    try testing.expect(audio_media.track != null);
-    try testing.expectEqualStrings("audio", audio_media.track.?.getId());
-    try testing.expect(audio_media.track.?.streams.items.len == 1);
-    try testing.expectEqualStrings("dummy", audio_media.track.?.streams.items[0]);
+    try testing.expect(audio_media.track_id != null);
+    try testing.expectEqualStrings("audio", audio_media.track_id.?);
+    try testing.expect(audio_media.msids.len == 1);
+    try testing.expectEqualStrings("dummy", audio_media.msids[0].id);
 
     try testing.expect(audio_media.ssrc != null);
     try testing.expectEqual(3427430813, audio_media.ssrc.?);
@@ -301,10 +301,10 @@ test "parse: sdp offer" {
     try testing.expectEqual(0, video_media.candidates.len);
     try testing.expect(!video_media.end_of_candidates);
 
-    try testing.expect(video_media.track != null);
-    try testing.expectEqualStrings("video", video_media.track.?.getId());
-    try testing.expect(video_media.track.?.streams.items.len == 1);
-    try testing.expectEqualStrings("dummy", video_media.track.?.streams.items[0]);
+    try testing.expect(video_media.track_id != null);
+    try testing.expectEqualStrings("video", video_media.track_id.?);
+    try testing.expect(video_media.msids.len == 1);
+    try testing.expectEqualStrings("dummy", video_media.msids[0].id);
 
     try testing.expect(video_media.ssrc != null);
     try testing.expectEqual(3213490500, video_media.ssrc.?);

@@ -51,7 +51,8 @@ pub const SDPMedia = struct {
     fingerprint: ?[32]u8,
     rtcp_mux: bool,
     rtcp_rsize: bool,
-    track: ?webrtc.MediaStreamTrack,
+    track_id: ?[]const u8,
+    msids: []webrtc.MediaStream,
     ssrc: ?u32,
 
     pub const empty: SDPMedia = .{
@@ -70,7 +71,8 @@ pub const SDPMedia = struct {
         .setup = .actpass,
         .rtcp_mux = false,
         .rtcp_rsize = false,
-        .track = null,
+        .track_id = null,
+        .msids = &.{},
         .ssrc = null,
     };
 
@@ -104,6 +106,9 @@ pub const SDPMedia = struct {
 
         var candidates: std.ArrayList(ice.Candidate) = .empty;
         errdefer candidates.deinit(allocator);
+
+        var msids: std.ArrayList(webrtc.MediaStream) = .empty;
+        errdefer msids.deinit(allocator);
 
         // Hold fmtp lines until rtpmap is encountered
         var fmtps: std.AutoHashMap(u8, []const u8) = .init(allocator);
@@ -158,11 +163,11 @@ pub const SDPMedia = struct {
                 .id = @intCast(extmap.id),
                 .uri = extmap.uri,
             }),
-            .msid => |msid| if (msid.app_data) |track_id| {
-                if (sdp_media.track == null) {
-                    sdp_media.track = .initWithId(track_id, sdp_media.kind);
-                }
-                try sdp_media.track.?.streams.append(allocator, msid.id);
+            .msid => |msid| {
+                try msids.append(allocator, .{ .id = msid.id });
+                if (sdp_media.track_id == null) if (msid.app_data) |track_id| {
+                    sdp_media.track_id = try allocator.dupe(u8, track_id);
+                };
             },
             .ssrc => |ssrc| if (sdp_media.ssrc == null) {
                 sdp_media.ssrc = ssrc.id;
@@ -178,6 +183,7 @@ pub const SDPMedia = struct {
         sdp_media.rtp_codec_parameters = try rtp_codec_parameters.toOwnedSlice(allocator);
         sdp_media.rtp_header_extensions = try rtp_header_extensions.toOwnedSlice(allocator);
         sdp_media.candidates = try candidates.toOwnedSlice(allocator);
+        sdp_media.msids = try msids.toOwnedSlice(allocator);
         return sdp_media;
     }
 
@@ -185,7 +191,8 @@ pub const SDPMedia = struct {
         allocator.free(m.rtp_codec_parameters);
         allocator.free(m.rtp_header_extensions);
         allocator.free(m.candidates);
-        if (m.track) |*track| track.deinit(allocator);
+        allocator.free(m.msids);
+        if (m.track_id) |track_id| allocator.free(track_id);
     }
 
     pub fn hasPayload(media: *const SDPMedia, pt: u8) bool {
@@ -212,13 +219,17 @@ pub const SDPMedia = struct {
 
         for (media.candidates) |candidate| try w.print("a=candidate:{f}\r\n", .{candidate});
         if (media.end_of_candidates) try SDPAttribute.write(.end_of_candidates, w);
-        if (media.track) |track| for (track.streams.items) |msid| {
-            try w.print("a=msid:{s} {s}\r\n", .{ msid, track.getId() });
-        };
+        for (media.msids) |msid| {
+            if (media.track_id) |track_id|
+                try w.print("a=msid:{s} {s}\r\n", .{ msid.id, track_id })
+            else
+                try w.print("a=msid:{s}\r\n", .{msid.id});
+        }
 
         if (media.ssrc) |ssrc| {
-            const msid = if (media.track != null and media.track.?.streams.items.len > 0) media.track.?.streams.items[0] else "-";
-            try w.print("a=ssrc:{} msid:{s} {s}\r\n", .{ ssrc, msid, media.track.?.getId() });
+            const msid = if (media.msids.len > 0) media.msids[0].id else "-";
+            const track_id = if (media.track_id) |track_id| track_id else "";
+            try w.print("a=ssrc:{} msid:{s} {s}\r\n", .{ ssrc, msid, track_id });
         }
     }
 
@@ -238,7 +249,14 @@ pub const SDPMedia = struct {
     pub fn clone(media: *const SDPMedia, allocator: std.mem.Allocator) !SDPMedia {
         var new_media = media.*;
         new_media.rtp_codec_parameters = try allocator.dupe(webrtc.RtpCodecParameters, media.rtp_codec_parameters);
+        errdefer allocator.free(new_media.rtp_codec_parameters);
         new_media.rtp_header_extensions = try allocator.dupe(webrtc.RtpHeaderExtensionParameter, media.rtp_header_extensions);
+        errdefer allocator.free(new_media.rtp_header_extensions);
+        new_media.candidates = try allocator.dupe(ice.Candidate, media.candidates);
+        errdefer allocator.free(new_media.candidates);
+        new_media.msids = try allocator.dupe(webrtc.MediaStream, media.msids);
+        errdefer allocator.free(new_media.msids);
+        if (media.track_id) |track_id| new_media.track_id = try allocator.dupe(u8, track_id);
         return new_media;
     }
 
