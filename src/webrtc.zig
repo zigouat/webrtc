@@ -151,6 +151,7 @@ pub const RtpCodecParameters = struct {
         if (!std.ascii.eqlIgnoreCase(a.mime_type, b.mime_type) or
             a.clock_rate != b.clock_rate or
             a.channels != b.channels) return false;
+        if (std.ascii.eqlIgnoreCase(a.mime_type, MimeType.VP8)) return true;
         if (a.fmtp_params != null and b.fmtp_params == null or a.fmtp_params == null and b.fmtp_params != null) return false;
         if (a.fmtp_params) |a_fmtp| if (b.fmtp_params) |*b_fmtp| return a_fmtp.eql(b_fmtp);
         return true;

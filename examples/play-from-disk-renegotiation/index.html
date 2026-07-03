@@ -1,0 +1,85 @@
+<html>
+<head>
+  <title>play-from-disk-renegotiation</title>
+</head>
+
+<body>
+<button onClick="window.addVideo()"> Add Video</button>
+<br/>
+<button onClick="window.removeVideo()"> Remove Video</button>
+<br/>
+
+
+<h3> Video </h3>
+<div id="remoteVideos"></div>
+<br/>
+
+<h3> Logs </h3>
+<div id="logs"></div>
+</body>
+
+<script>
+  let pc = new RTCPeerConnection({
+    iceServers: [
+      {
+        urls: 'stun:stun.l.google.com:19302'
+      }
+    ]
+  })
+  pc.ontrack = function (event) {
+    var el = document.createElement(event.track.kind)
+    
+    el.srcObject = event.streams[0]
+    el.autoplay = true
+    el.controls = true
+    el.width = 640
+    el.height = 480
+
+    event.track.onmute = function (event) {
+      el.parentNode.removeChild(el);
+    }
+    
+    event.track.onended = function (event) {
+      el.parentNode.removeChild(el);
+    }
+
+    document.getElementById('remoteVideos').appendChild(el)
+  }
+
+  let doSignaling = method => {
+    pc.createOffer()
+            .then(offer => {
+              pc.setLocalDescription(offer)
+
+              return fetch(`/${method}`, {
+                method: 'post',
+                headers: {
+                  'Accept': 'application/json, text/plain, */*',
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(offer)
+              })
+            })
+            .then(res => res.json())
+            .then(res => pc.setRemoteDescription(res))
+            .catch(alert)
+  }
+
+  window.addVideo = () => {
+    // Reuse a transceiver the server previously stopped (inactive) instead of
+    // always allocating a new m-line; only add one when none are free.
+    const reusable = pc.getTransceivers().find(t => t.currentDirection === 'inactive')
+    if (reusable) {
+      reusable.direction = 'recvonly'
+    } else {
+      pc.addTransceiver('video', { direction: 'recvonly' })
+    }
+
+    doSignaling('addVideo')
+  };
+
+  window.removeVideo = () => {
+    doSignaling('removeVideo')
+  };
+</script>
+</html>
