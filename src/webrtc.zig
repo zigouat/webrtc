@@ -571,7 +571,7 @@ pub const RtpTransceiver = struct {
             .kind = sdp_media.kind,
             .receiver = .init(track),
             .sender = .init(null),
-            .mid = &sdp_media.mid,
+            .mid = sdp_media.getMid(),
             .sdp_mline_index = index,
             .transport = undefined,
         };
@@ -611,8 +611,10 @@ pub const RtpTransceiver = struct {
             media.rtp_codec_parameters,
             getCodecCapabilities(tr.kind),
         );
+        defer if (answer.port == 0) allocator.free(codecs);
+
         answer.kind = tr.kind;
-        answer.port = if (codecs.len == 0) 0 else 9;
+        answer.port = if (codecs.len == 0 or tr.isStopped()) 0 else 9;
         answer.rtcp_mux = true;
         answer.rtcp_rsize = false;
         answer.setup = switch (media.setup) {
@@ -625,9 +627,11 @@ pub const RtpTransceiver = struct {
         else
             codecs;
         @memcpy(answer.mid[0..tr.mid.?.len], tr.mid.?);
-        answer.setIceCredentials(tr.transport.ice_agent.credentials);
+        if (answer.direction != .inactive) {
+            answer.setIceCredentials(tr.transport.ice_agent.credentials);
+        }
 
-        if (codecs.len != 0) try tr.addSenderFields(allocator, &answer);
+        if (codecs.len != 0 and !tr.isStopped()) try tr.addSenderFields(allocator, &answer);
         return answer;
     }
 
@@ -644,7 +648,7 @@ pub const RtpTransceiver = struct {
         return (media.direction == .sendrecv or media.direction == .recvonly) and
             tr.kind == media.kind and
             tr.mid == null and
-            !tr.stopped;
+            !tr.stopping;
     }
 
     pub fn setSenderTrack(tr: *RtpTransceiver, track: MediaStreamTrack) void {

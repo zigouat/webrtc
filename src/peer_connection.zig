@@ -278,9 +278,9 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
 
     var idx: usize = 0;
     for (offer.session.getMedias()) |*media| {
-        const tr = pc.findTransceiverByMediaIndex(idx) orelse return error.Unexpected;
+        const tr = pc.findTransceiverByMid(media.getMid()) orelse return error.Unexpected;
         const new_media = sdp_session.medias.addOneAssumeCapacity();
-        new_media.* = if (media.isRejected() or tr.isStopped()) blk: {
+        new_media.* = if (media.isRejected()) blk: {
             var cloned = try media.clone(pc.allocator);
             cloned.port = 0;
             cloned.bundle_only = false;
@@ -546,21 +546,24 @@ fn nextPeerConnectionState(ice_state: ice.ConnectionState, dtls_state: dtls.Conn
 }
 
 fn writeDescriptionWithCandidates(pc: *PeerConnection, sess_desc: *const ParsedSesssionDescription, w: *Io.Writer) !void {
-    const sdp = sess_desc.sdp;
-    var second_pos: ?usize = null;
-    const first_pos = std.mem.find(u8, sdp, "\nm=");
-    if (first_pos) |pos| second_pos = std.mem.findPos(u8, sdp, pos + 3, "\nm=");
+    const session = sess_desc.session;
+    const maybe_media = blk: {
+        for (session.getMedias()) |*media| if (!media.isRejected()) break :blk media;
+        break :blk null;
+    };
 
-    if (second_pos) |pos| {
-        try w.writeAll(sdp[0 .. pos + 1]);
-        try pc.writeIceCandidates(w);
-        try w.writeAll(sdp[pos + 1 ..]);
-    } else if (first_pos != null) {
-        try w.writeAll(sdp);
-        try pc.writeIceCandidates(w);
-    } else {
-        try w.writeAll(sdp);
-    }
+    const ice_agent = &pc.dtls_transport.ice_agent;
+    const io = pc.dtls_transport.getIo();
+
+    if (maybe_media) |media| {
+        ice_agent.mutex.lockUncancelable(io);
+        defer ice_agent.mutex.unlockUncancelable(io);
+
+        media.candidates = ice_agent.candidates.items;
+        defer media.candidates = &.{};
+
+        try sess_desc.session.write(w);
+    } else try w.writeAll(sess_desc.sdp);
 }
 
 fn applyLocalOffer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescription) !void {
@@ -569,7 +572,7 @@ fn applyLocalOffer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescript
     const offer = pc.last_offer.session;
     for (offer.getMedias(), 0..) |*media, idx| {
         const transceiver = pc.findTransceiverByMediaIndex(idx).?;
-        transceiver.mid = &media.mid;
+        transceiver.mid = media.getMid();
     }
 
     if (pc.dtls_transport.ice_agent.gathering_state == .new) {
@@ -593,7 +596,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
 
     var media_exists: bool = false;
     for (sdp_session.getMedias()) |*media| {
-        const tr = pc.findTransceiverByMid(&media.mid).?;
+        const tr = pc.findTransceiverByMid(media.getMid()).?;
         if (media.port == 0) continue;
 
         media_exists = true;
@@ -646,7 +649,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
                     break :blk tr;
                 },
                 .offer => {
-                    if (pc.findTransceiverByMediaIndex(idx)) |tr| break :blk tr;
+                    if (pc.findTransceiverByMid(media.getMid())) |tr| break :blk tr;
                     for (pc.transceivers.items) |tr| if (tr.canAssociateMedia(media)) break :blk tr;
 
                     const tr = try webrtc.RtpTransceiver.initFromSdpMedia(
@@ -664,10 +667,10 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
             }
         };
 
-        transceiver.mid = &media.mid;
+        transceiver.mid = media.getMid();
         transceiver.sdp_mline_index = @intCast(idx);
 
-        if (media.isRejected()) {
+        if (media.isRejected() or transceiver.isStopped()) {
             if (!transceiver.isStopped()) transceiver.stop();
             continue;
         }
@@ -756,15 +759,14 @@ fn updateSignalingStateToStable(pc: *PeerConnection) !void {
 }
 
 fn findTransceiverByMediaIndex(pc: *PeerConnection, index: usize) ?*webrtc.RtpTransceiver {
-    for (pc.transceivers.items) |transceiver| if (transceiver.sdp_mline_index) |tr_index| if (tr_index == index)
-        return transceiver;
-
+    for (pc.transceivers.items) |tr| if (tr.sdp_mline_index) |tr_index| if (tr_index == index) return tr;
     return null;
 }
 
 fn findTransceiverByMid(pc: *PeerConnection, mid: []const u8) ?*webrtc.RtpTransceiver {
-    for (pc.transceivers.items) |transceiver| if (transceiver.mid) |tr_mid| if (std.mem.eql(u8, tr_mid, mid))
-        return transceiver;
+    for (pc.transceivers.items) |tr| {
+        if (tr.mid) |tr_mid| if (std.mem.eql(u8, tr_mid, mid)) return tr;
+    }
 
     return null;
 }

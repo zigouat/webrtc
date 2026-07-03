@@ -175,7 +175,7 @@ pub const SDPMedia = struct {
             else => {},
         };
 
-        if (!sdp_media.rtcp_mux) return error.RtcpMuxRequired;
+        if (sdp_media.port != 0 and !sdp_media.rtcp_mux) return error.RtcpMuxRequired;
         if (sdp_media.mid.len == 0) return error.MidAttributeRequired;
 
         try validateRtpCodecParameters(rtp_codec_parameters);
@@ -211,25 +211,28 @@ pub const SDPMedia = struct {
         try SDPAttribute.write(.{ .setup = media.setup }, w);
         try SDPAttribute.write(.{ .direction = @tagName(media.direction) }, w);
         if (media.getMid().len != 0) try SDPAttribute.write(.{ .mid = media.getMid() }, w);
-        if (media.rtcp_mux) try SDPAttribute.write(.rtcp_mux, w);
-        if (media.rtcp_rsize) try SDPAttribute.write(.rtcp_rsize, w);
 
-        if (media.ice_ufrag.len != 0) try SDPAttribute.write(.{ .ice_ufrag = media.ice_ufrag }, w);
-        if (media.ice_pwd.len != 0) try SDPAttribute.write(.{ .ice_pwd = media.ice_pwd }, w);
+        if (media.port != 0) {
+            if (media.rtcp_mux) try SDPAttribute.write(.rtcp_mux, w);
+            if (media.rtcp_rsize) try SDPAttribute.write(.rtcp_rsize, w);
 
-        for (media.candidates) |candidate| try w.print("a=candidate:{f}\r\n", .{candidate});
-        if (media.end_of_candidates) try SDPAttribute.write(.end_of_candidates, w);
-        for (media.msids) |msid| {
-            if (media.track_id) |track_id|
-                try w.print("a=msid:{s} {s}\r\n", .{ msid.id, track_id })
-            else
-                try w.print("a=msid:{s}\r\n", .{msid.id});
-        }
+            if (media.ice_ufrag.len != 0) try SDPAttribute.write(.{ .ice_ufrag = media.ice_ufrag }, w);
+            if (media.ice_pwd.len != 0) try SDPAttribute.write(.{ .ice_pwd = media.ice_pwd }, w);
+            for (media.candidates) |candidate| try w.print("a=candidate:{f}\r\n", .{candidate});
+            if (media.end_of_candidates) try SDPAttribute.write(.end_of_candidates, w);
 
-        if (media.ssrc) |ssrc| {
-            const msid = if (media.msids.len > 0) media.msids[0].id else "-";
-            const track_id = if (media.track_id) |track_id| track_id else "";
-            try w.print("a=ssrc:{} msid:{s} {s}\r\n", .{ ssrc, msid, track_id });
+            for (media.msids) |msid| {
+                if (media.track_id) |track_id|
+                    try w.print("a=msid:{s} {s}\r\n", .{ msid.id, track_id })
+                else
+                    try w.print("a=msid:{s}\r\n", .{msid.id});
+            }
+
+            if (media.ssrc) |ssrc| {
+                const msid = if (media.msids.len > 0) media.msids[0].id else "-";
+                const track_id = if (media.track_id) |track_id| track_id else "";
+                try w.print("a=ssrc:{} msid:{s} {s}\r\n", .{ ssrc, msid, track_id });
+            }
         }
     }
 
