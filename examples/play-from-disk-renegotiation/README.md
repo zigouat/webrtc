@@ -1,6 +1,6 @@
-# Play from Disk
+# Play from Disk Renegotiation
 
-Play from disk shows how to send an ivf file from your desktop/server to your browser.
+An extension of the play-from-disk example, but demonstrates how you can add/remove video tracks from an already negotiated PeerConnection.
 
 ## Instructions
 
