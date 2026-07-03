@@ -557,7 +557,7 @@ fn writeDescriptionWithCandidates(pc: *PeerConnection, sess_desc: *const ParsedS
 
     if (maybe_media) |media| {
         ice_agent.mutex.lockUncancelable(io);
-        defer ice_agent.mutex.unlockUncancelable(io);
+        defer ice_agent.mutex.unlock(io);
 
         media.candidates = ice_agent.candidates.items;
         defer media.candidates = &.{};

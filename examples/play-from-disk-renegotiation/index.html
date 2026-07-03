@@ -19,7 +19,6 @@
 </body>
 
 <script>
-  let activeVideos = 0
   let pc = new RTCPeerConnection({
     iceServers: [
       {
@@ -29,11 +28,18 @@
   })
   pc.ontrack = function (event) {
     var el = document.createElement(event.track.kind)
+    
     el.srcObject = event.streams[0]
     el.autoplay = true
     el.controls = true
+    el.width = 640
+    el.height = 480
 
     event.track.onmute = function (event) {
+      el.parentNode.removeChild(el);
+    }
+    
+    event.track.onended = function (event) {
       el.parentNode.removeChild(el);
     }
 
@@ -59,15 +65,14 @@
             .catch(alert)
   }
 
-  // Create a noop DataChannel. By default PeerConnections do not connect
-  // if they have no media tracks or DataChannels
-  pc.createDataChannel('noop')
-  doSignaling('createPeerConnection')
-
   window.addVideo = () => {
-    if (pc.getTransceivers().length <= activeVideos) {
-      pc.addTransceiver('video')
-      activeVideos++
+    // Reuse a transceiver the server previously stopped (inactive) instead of
+    // always allocating a new m-line; only add one when none are free.
+    const reusable = pc.getTransceivers().find(t => t.currentDirection === 'inactive')
+    if (reusable) {
+      reusable.direction = 'recvonly'
+    } else {
+      pc.addTransceiver('video', { direction: 'recvonly' })
     }
 
     doSignaling('addVideo')

@@ -103,6 +103,7 @@ pub fn getConnectionState(transport: *const DtlsTransport) struct { ice.Connecti
 }
 
 pub inline fn sendRtp(transport: *DtlsTransport, data: []const u8) !void {
+    if (transport.session.connection_state != .connected) return;
     const buffer = try transport.ice_agent.createPacket();
     defer transport.ice_agent.destroyPacket(buffer);
     const encrypted = try transport.out_srtp_session.?.encryptRtp(data, buffer);
@@ -110,6 +111,7 @@ pub inline fn sendRtp(transport: *DtlsTransport, data: []const u8) !void {
 }
 
 pub fn sendRtcp(transport: *DtlsTransport, data: []const u8) !void {
+    if (transport.session.connection_state != .connected) return;
     const buffer = try transport.ice_agent.createPacket();
     defer transport.ice_agent.destroyPacket(buffer);
     const encrypted = try transport.out_srtp_session.?.encryptRtcp(data, buffer);
