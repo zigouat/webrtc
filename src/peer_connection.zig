@@ -619,12 +619,14 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
     pc.pending_local_description = pc.last_answer;
     try pc.updateSignalingStateToStable();
     pc.removeTransceivers();
-    try pc.startSenderReports();
+    try pc.startSenderReports(renegotiation);
 }
 
 fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.SessionDescription) !void {
     const sdp_text = try pc.allocator.dupe(u8, session_desc.sdp);
     errdefer pc.allocator.free(sdp_text);
+
+    const renegotiation = pc.remote_description != null;
 
     var remote_sdp = try SDPSession.parse(pc.allocator, sdp_text);
     errdefer remote_sdp.deinit(pc.allocator);
@@ -635,7 +637,6 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     }
 
     // TODO: validate rtp header extensions and add them to transceivers
-    // TODO: Add ssrc to demuxer
     // TODO: Add rtcp feedback
 
     var first_media: ?*SDPSession.SDPMedia = null;
@@ -719,7 +720,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
             };
             try pc.updateSignalingStateToStable();
             pc.removeTransceivers();
-            try pc.startSenderReports();
+            try pc.startSenderReports(renegotiation);
         },
         .offer => {
             pc.pending_remote_description = .{
@@ -856,7 +857,8 @@ fn removeTransceivers(pc: *PeerConnection) void {
     }
 }
 
-fn startSenderReports(pc: *PeerConnection) !void {
+fn startSenderReports(pc: *PeerConnection, renegotiation: bool) !void {
+    if (renegotiation) return;
     try pc.group.concurrent(pc.dtls_transport.getIo(), sendReports, .{pc});
 }
 
@@ -876,6 +878,7 @@ fn doSendReports(pc: *PeerConnection) !void {
     while (true) {
         const sleep_ms = r.intRangeAtMost(u16, 500, 1000);
         try io.sleep(.fromMilliseconds(sleep_ms + 500), .awake);
+        if (pc.connection_state != .connected) continue;
 
         const buffer = try pc.dtls_transport.ice_agent.createPacket();
         defer pc.dtls_transport.ice_agent.destroyPacket(buffer);

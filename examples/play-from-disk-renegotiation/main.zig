@@ -48,13 +48,13 @@ const AppState = struct {
         }
     }
 
-    pub fn handleEvents(self: *AppState, io: Io) !void {
+    pub fn eventLoop(self: *AppState, io: Io, allocator: std.mem.Allocator) !void {
         while (self.pc.poll()) |event| switch (event) {
             .connection_state => |state| switch (state) {
                 .connected => {
                     std.log.info("Peer connected", .{});
                     for (self.senders.items) |sender| {
-                        try grp.concurrent(io, sendMediaData, .{ io, std.heap.page_allocator, self.file_path, sender });
+                        try grp.concurrent(io, sendMediaData, .{ io, allocator, self.file_path, sender });
                     }
                 },
                 .disconnected => self.pc.close(),
@@ -148,7 +148,7 @@ pub fn main(init: std.process.Init) !void {
     defer app_state.deinit(allocator);
 
     try grp.concurrent(io, startHttpServer, .{ io, allocator });
-    try app_state.handleEvents(io);
+    try app_state.eventLoop(io, allocator);
 }
 
 fn startHttpServer(io: Io, allocator: std.mem.Allocator) !void {
