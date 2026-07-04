@@ -27,9 +27,7 @@ pub const Event = union(enum) {
     negotiation_needed: void,
     signaling_state: webrtc.SignalingState,
     connection_state: webrtc.ConnectionState,
-    track_event: webrtc.TrackEventInit,
-    rtp: rtp.Packet,
-    rtcp: []const u8,
+    track_event_init: webrtc.TrackEventInit,
 };
 
 allocator: std.mem.Allocator,
@@ -733,7 +731,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     }
 
     for (track_events.items) |event|
-        try pc.queue.putOne(pc.dtls_transport.getIo(), .{ .track_event = event });
+        try pc.queue.putOne(pc.dtls_transport.getIo(), .{ .track_event_init = event });
 }
 
 fn updateSignalingStateToStable(pc: *PeerConnection) !void {

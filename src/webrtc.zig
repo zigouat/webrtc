@@ -244,7 +244,7 @@ pub const MediaStream = struct {
 };
 
 pub const MediaStreamTrack = struct {
-    id: [64:0]u8,
+    id: [64]u8,
     kind: TrackKind,
     streams: std.ArrayList([]const u8),
     muted: bool,

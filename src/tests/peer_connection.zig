@@ -370,7 +370,7 @@ test "negotiation between peers: add/remove tracks" {
 
         event = pc1_collector.popEvent(.track_event, .fromMilliseconds(50));
         try testing.expect(event != null);
-        try testing.expectEqualStrings(&track1.id, &event.?.track_event.track.id);
+        try testing.expectEqualStrings(&track1.id, &event.?.track_event_init.track.id);
 
         try pc1.removeTrack(screen1);
         try pc2.removeTrack(screen2);
