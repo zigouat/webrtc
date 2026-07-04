@@ -36,7 +36,7 @@ pub fn updateMaps(demuxer: *Demuxer, sdp_session: *const SDPSession) !void {
 }
 
 pub fn getMid(demuxer: *Demuxer, packet: *const rtp.Packet) !?[]const u8 {
-    if (demuxer.ssrc_to_mid.get(packet.header.ssrc)) |mid| return &mid;
+    if (demuxer.ssrc_to_mid.getPtr(packet.header.ssrc)) |mid| return std.mem.sliceTo(mid, 0);
 
     if (demuxer.mid_id != null) if (getMidFromPacket(packet, demuxer.mid_id.?) catch return null) |mid| {
         var ssrc_mid: [3]u8 = @splat(0);
@@ -45,7 +45,7 @@ pub fn getMid(demuxer: *Demuxer, packet: *const rtp.Packet) !?[]const u8 {
         return mid;
     };
 
-    return if (demuxer.pt_to_mid.getPtr(packet.header.payload_type)) |value| value else null;
+    return if (demuxer.pt_to_mid.getPtr(packet.header.payload_type)) |value| std.mem.sliceTo(value, 0) else null;
 }
 
 fn getMidFromPacket(packet: *const rtp.Packet, mid_id: u16) !?[]const u8 {

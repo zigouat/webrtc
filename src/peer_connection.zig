@@ -796,28 +796,13 @@ fn pollTransport(pc: *PeerConnection) !void {
         },
         .rtcp => |data| pc.dtls_transport.ice_agent.destroyPacket(data),
         .rtp => |data| {
-            if (pc.handleRtpPacket(data) catch {
-                pc.dtls_transport.ice_agent.destroyPacket(data);
-                continue;
-            }) |rtp_event| {
-                try pc.queue.putOne(io, rtp_event);
-                continue;
-            }
-
-            pc.dtls_transport.ice_agent.destroyPacket(data);
+            errdefer pc.dtls_transport.ice_agent.destroyPacket(data);
+            const packet = try rtp.Packet.parse(data);
+            if (try pc.demuxer.getMid(&packet)) |mid| if (pc.findTransceiverByMid(mid)) |tr| {
+                try tr.receiver.handleRtpPacket(io, packet);
+            };
         },
     } else |err| return err;
-}
-
-fn handleRtpPacket(pc: *PeerConnection, data: []const u8) !?Event {
-    const packet = try rtp.Packet.parse(data);
-    if (try pc.demuxer.getMid(&packet)) |mid| if (pc.findTransceiverByMid(mid)) |tr| {
-        if (try tr.receiver.handleRtpPacket(packet)) |p| {
-            return .{ .rtp = p };
-        }
-    };
-
-    return null;
 }
 
 fn writeIceCandidates(pc: *PeerConnection, w: *Io.Writer) !void {

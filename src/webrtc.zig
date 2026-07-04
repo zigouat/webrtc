@@ -315,6 +315,11 @@ pub const MediaStreamTrack = struct {
     }
 };
 
+/// TrackEvent represents events related to a remote track.
+pub const TrackEvent = union(enum) {
+    rtp: rtp.Packet,
+};
+
 pub const TrackEventInit = struct {
     receiver: *RtpReceiver,
     track: MediaStreamTrack,
@@ -513,10 +518,6 @@ pub const RtpSender = struct {
     }
 };
 
-pub const TrackEvent = union(enum) {
-    rtp: rtp.Packet,
-};
-
 pub const RtpReceiver = struct {
     const queue_size: usize = 16;
 
@@ -545,9 +546,12 @@ pub const RtpReceiver = struct {
         return .{ .codecs = &.{}, .header_extensions = &.{} };
     }
 
-    pub fn handleRtpPacket(receiver: *RtpReceiver, packet: rtp.Packet) !?rtp.Packet {
-        _ = receiver;
-        return packet;
+    pub inline fn poll(receiver: *RtpReceiver, io: Io) !TrackEvent {
+        return receiver.queue.getOne(io);
+    }
+
+    pub inline fn handleRtpPacket(receiver: *RtpReceiver, io: Io, packet: rtp.Packet) !void {
+        try receiver.queue.putOne(io, .{ .rtp = packet });
     }
 
     fn processMsids(receiver: *RtpReceiver, allocator: std.mem.Allocator, msids: []MediaStream) !void {
