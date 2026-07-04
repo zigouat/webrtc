@@ -1,13 +1,14 @@
 pub const PeerConnection = @import("peer_connection.zig");
 pub const SDPSession = @import("sdp_session.zig");
 
+const std = @import("std");
 const sdp = @import("sdp");
 const rtp = @import("rtp");
 const rtcp = @import("rtcp");
 const utils = @import("utils.zig");
-const FmtpParams = sdp.Attribute.Fmtp.Params;
 
-const std = @import("std");
+const Io = std.Io;
+const FmtpParams = sdp.Attribute.Fmtp.Params;
 const DtlsTransport = @import("dtls_transport.zig");
 const testing = std.testing;
 
@@ -109,7 +110,7 @@ pub const RtpHeaderExtensionParameter = struct {
     uri: []const u8,
     id: u16,
 
-    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *Io.Writer) Io.Writer.Error!void {
         const attr = sdp.Attribute.ParsedAttribute{ .extmap = .{ .id = self.id, .uri = self.uri } };
         try attr.write(writer);
     }
@@ -127,7 +128,7 @@ pub const RtpCodecParameters = struct {
     channels: ?u8 = null,
     fmtp_params: ?FmtpParams = null,
 
-    pub fn format(codec_params: @This(), writer: *std.Io.Writer) !void {
+    pub fn format(codec_params: @This(), writer: *Io.Writer) !void {
         try sdp.Attribute.ParsedAttribute.write(.{
             .rtpmap = .{
                 .clock_rate = codec_params.clock_rate,
@@ -251,7 +252,7 @@ pub const MediaStreamTrack = struct {
     /// Init a new track with generated id.
     ///
     /// Th io instance is needed to generate an id
-    pub fn init(io: std.Io, kind: TrackKind) MediaStreamTrack {
+    pub fn init(io: Io, kind: TrackKind) MediaStreamTrack {
         var buf: [16]u8 = undefined;
         io.random(&buf);
 
@@ -398,7 +399,7 @@ pub const RtpSender = struct {
         var buffer = try tr.transport.ice_agent.createPacket();
         defer tr.transport.ice_agent.destroyPacket(buffer);
 
-        const timestamp = std.Io.Timestamp.now(tr.transport.getIo(), .real).toMicroseconds();
+        const timestamp = Io.Timestamp.now(tr.transport.getIo(), .real).toMicroseconds();
 
         const header: rtp.Packet.Header = .{
             .extension = false,
@@ -512,12 +513,31 @@ pub const RtpSender = struct {
     }
 };
 
+pub const TrackEvent = union(enum) {
+    rtp: rtp.Packet,
+};
+
 pub const RtpReceiver = struct {
+    const queue_size: usize = 16;
+
     track: MediaStreamTrack,
     codecs: []const RtpCodecParameters = &.{},
+    queue: Io.Queue(TrackEvent),
+    queue_buffer: []TrackEvent,
 
-    pub fn init(track: MediaStreamTrack) RtpReceiver {
-        return .{ .track = track };
+    pub fn init(track: MediaStreamTrack, allocator: std.mem.Allocator) !RtpReceiver {
+        const queue_buffer = try allocator.alloc(TrackEvent, queue_size);
+
+        return .{
+            .track = track,
+            .queue = .init(queue_buffer),
+            .queue_buffer = queue_buffer,
+        };
+    }
+
+    pub fn deinit(receiver: *RtpReceiver, allocator: std.mem.Allocator) void {
+        receiver.track.deinit(allocator);
+        allocator.free(receiver.queue_buffer);
     }
 
     pub fn getCapabilities(kind: TrackKind) RtpCapabilities {
@@ -557,11 +577,13 @@ pub const RtpTransceiver = struct {
 
     pub fn initFromSdpMedia(
         allocator: std.mem.Allocator,
-        io: std.Io,
+        io: Io,
         sdp_media: *const SDPSession.SDPMedia,
         index: u8,
     ) !*RtpTransceiver {
         const tr = try allocator.create(RtpTransceiver);
+        errdefer allocator.destroy(tr);
+
         const track = if (sdp_media.track_id) |track_id|
             MediaStreamTrack.initWithId(track_id, sdp_media.kind)
         else
@@ -570,7 +592,7 @@ pub const RtpTransceiver = struct {
         tr.* = .{
             .direction = .recvonly,
             .kind = sdp_media.kind,
-            .receiver = .init(track),
+            .receiver = try .init(track, allocator),
             .sender = .init(null),
             .mid = sdp_media.getMid(),
             .sdp_mline_index = index,
@@ -582,7 +604,7 @@ pub const RtpTransceiver = struct {
 
     pub fn deinit(tr: *RtpTransceiver, allocator: std.mem.Allocator) void {
         if (tr.sender.track) |*track| track.deinit(allocator);
-        tr.receiver.track.deinit(allocator);
+        tr.receiver.deinit(allocator);
         allocator.destroy(tr);
     }
 
@@ -754,18 +776,23 @@ pub const RtpTransceiver = struct {
         }
     }
 
-    fn newTestRtpTransceiver(io: std.Io) RtpTransceiver {
-        return .{
+    fn newTestRtpTransceiver(io: Io, allocator: std.mem.Allocator) !*RtpTransceiver {
+        const tr = try allocator.create(RtpTransceiver);
+
+        tr.* = .{
             .sender = .init(null),
-            .receiver = .{ .track = .init(io, .video) },
+            .receiver = try .init(.init(io, .video), allocator),
             .direction = .sendrecv,
             .kind = .video,
             .transport = undefined,
         };
+
+        return tr;
     }
 
     test "canAssocaiteTrack" {
-        var tr: RtpTransceiver = newTestRtpTransceiver(std.testing.io);
+        var tr = try newTestRtpTransceiver(std.testing.io, std.testing.allocator);
+        defer tr.deinit(std.testing.allocator);
         tr.direction = .recvonly;
 
         try std.testing.expect(tr.canAssociateTrack(.video));
@@ -783,7 +810,8 @@ pub const RtpTransceiver = struct {
     }
 
     test "getRtcpReport" {
-        var tr: RtpTransceiver = newTestRtpTransceiver(std.testing.io);
+        var tr = try newTestRtpTransceiver(std.testing.io, std.testing.allocator);
+        defer tr.deinit(std.testing.allocator);
         tr.sender.codecs = getCodecCapabilities(.video);
         var buffer: [64]u8 = @splat(0);
 
@@ -807,11 +835,12 @@ pub const RtpTransceiver = struct {
 
     test "processRemoteTrack" {
         const allocator = std.testing.allocator;
-        var tr = newTestRtpTransceiver(std.testing.io);
+        var tr = try newTestRtpTransceiver(std.testing.io, allocator);
+        defer tr.deinit(allocator);
 
         var maybe_event = try tr.processRemoteTrack(allocator, .sendrecv, &.{});
         try std.testing.expect(maybe_event != null);
-        try std.testing.expect(maybe_event.?.transceiver == &tr);
+        try std.testing.expect(maybe_event.?.transceiver == tr);
         try std.testing.expect(tr.fired_direction == .sendrecv);
 
         maybe_event = try tr.processRemoteTrack(allocator, .recvonly, &.{});

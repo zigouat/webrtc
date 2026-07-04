@@ -186,14 +186,11 @@ pub fn addTransceiverFromKind(
     const tr = try pc.allocator.create(webrtc.RtpTransceiver);
     errdefer pc.allocator.destroy(tr);
 
-    try pc.transceivers.append(pc.allocator, tr);
-    errdefer _ = pc.transceivers.swapRemove(pc.getTransceivers().len - 1);
-
     tr.* = .{
         .kind = kind,
         .direction = init_config.direction,
         .sender = .init(null),
-        .receiver = .init(.init(io, kind)),
+        .receiver = try .init(.init(io, kind), pc.allocator),
         .transport = &pc.dtls_transport,
     };
 
@@ -203,6 +200,7 @@ pub fn addTransceiverFromKind(
     }
     tr.sender.ssrc = try generateSsrc(io, &pc.demuxer);
     try pc.checkNegotiationNeeded();
+    try pc.transceivers.append(pc.allocator, tr);
     return tr;
 }
 
@@ -223,13 +221,12 @@ fn initTransceiverFromTrack(
 ) !*webrtc.RtpTransceiver {
     const tr = try pc.allocator.create(webrtc.RtpTransceiver);
     errdefer tr.deinit(pc.allocator);
-    try pc.transceivers.append(pc.allocator, tr);
 
     tr.* = .{
         .kind = track.kind,
         .direction = .sendrecv,
         .sender = .init(track),
-        .receiver = .init(track),
+        .receiver = try .init(track, pc.allocator),
         .added_by_add_track = added_by_add_track,
         .transport = &pc.dtls_transport,
     };
@@ -239,6 +236,7 @@ fn initTransceiverFromTrack(
         try tr.sender.addStream(pc.allocator, stream);
     }
     tr.sender.ssrc = try generateSsrc(pc.dtls_transport.getIo(), &pc.demuxer);
+    try pc.transceivers.append(pc.allocator, tr);
     return tr;
 }
 
