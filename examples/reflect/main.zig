@@ -30,14 +30,11 @@ pub fn main(init: std.process.Init) !void {
 
     while (pc.poll()) |event| switch (event) {
         .connection_state => |state| switch (state) {
-            .connected => {
-                std.log.info("Connection state: connected", .{});
-            },
             .failed => break,
             else => std.log.info("Connection state: {}", .{state}),
         },
         .track_event_init => |track_event| {
-            std.log.info("Track: {s}", .{track_event.track.id});
+            std.log.info("New remote track({s}): {s}", .{ @tagName(track_event.track.kind), track_event.track.id });
             try grp.concurrent(io, sendBackRtp, .{ io, &pc, track_event.receiver, sender });
         },
         else => {},
