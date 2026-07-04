@@ -1,13 +1,14 @@
 pub const PeerConnection = @import("peer_connection.zig");
 pub const SDPSession = @import("sdp_session.zig");
 
+const std = @import("std");
 const sdp = @import("sdp");
 const rtp = @import("rtp");
 const rtcp = @import("rtcp");
 const utils = @import("utils.zig");
-const FmtpParams = sdp.Attribute.Fmtp.Params;
 
-const std = @import("std");
+const Io = std.Io;
+const FmtpParams = sdp.Attribute.Fmtp.Params;
 const DtlsTransport = @import("dtls_transport.zig");
 const testing = std.testing;
 
@@ -109,7 +110,7 @@ pub const RtpHeaderExtensionParameter = struct {
     uri: []const u8,
     id: u16,
 
-    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *Io.Writer) Io.Writer.Error!void {
         const attr = sdp.Attribute.ParsedAttribute{ .extmap = .{ .id = self.id, .uri = self.uri } };
         try attr.write(writer);
     }
@@ -127,7 +128,7 @@ pub const RtpCodecParameters = struct {
     channels: ?u8 = null,
     fmtp_params: ?FmtpParams = null,
 
-    pub fn format(codec_params: @This(), writer: *std.Io.Writer) !void {
+    pub fn format(codec_params: @This(), writer: *Io.Writer) !void {
         try sdp.Attribute.ParsedAttribute.write(.{
             .rtpmap = .{
                 .clock_rate = codec_params.clock_rate,
@@ -161,7 +162,7 @@ pub const RtpCodecParameters = struct {
         {
             const a: RtpCodecParameters = .{ .payload_type = 96, .mime_type = MimeType.H264, .clock_rate = 9000 };
             const b: RtpCodecParameters = .{ .payload_type = 107, .mime_type = MimeType.H264, .clock_rate = 9000 };
-            try std.testing.expect(a.eql(&b));
+            try testing.expect(a.eql(&b));
         }
     }
 };
@@ -251,7 +252,7 @@ pub const MediaStreamTrack = struct {
     /// Init a new track with generated id.
     ///
     /// Th io instance is needed to generate an id
-    pub fn init(io: std.Io, kind: TrackKind) MediaStreamTrack {
+    pub fn init(io: Io, kind: TrackKind) MediaStreamTrack {
         var buf: [16]u8 = undefined;
         io.random(&buf);
 
@@ -304,14 +305,19 @@ pub const MediaStreamTrack = struct {
     }
 
     test "init" {
-        const track = init(std.testing.io, .video);
-        try std.testing.expect(!std.mem.eql(u8, &.{}, track.getId()));
+        const track = init(testing.io, .video);
+        try testing.expect(!std.mem.eql(u8, &.{}, track.getId()));
     }
 
     test "getId" {
         const track = initWithId("test-track", .audio);
-        try std.testing.expectEqualStrings("test-track", track.getId());
+        try testing.expectEqualStrings("test-track", track.getId());
     }
+};
+
+/// TrackEvent represents events related to a remote track.
+pub const TrackEvent = union(enum) {
+    rtp: rtp.Packet,
 };
 
 pub const TrackEventInit = struct {
@@ -398,7 +404,7 @@ pub const RtpSender = struct {
         var buffer = try tr.transport.ice_agent.createPacket();
         defer tr.transport.ice_agent.destroyPacket(buffer);
 
-        const timestamp = std.Io.Timestamp.now(tr.transport.getIo(), .real).toMicroseconds();
+        const timestamp = Io.Timestamp.now(tr.transport.getIo(), .real).toMicroseconds();
 
         const header: rtp.Packet.Header = .{
             .extension = false,
@@ -470,69 +476,115 @@ pub const RtpSender = struct {
 
         report.recordPacket(&packet, 5000);
 
-        try std.testing.expectEqual(10, report.last_sequence_number);
-        try std.testing.expectEqual(1000, report.rtp_timestamp);
-        try std.testing.expectEqual(5000, report.timestamp);
-        try std.testing.expectEqual(1, report.packet_count);
-        try std.testing.expectEqual(payload.len, report.octet_count);
+        try testing.expectEqual(10, report.last_sequence_number);
+        try testing.expectEqual(1000, report.rtp_timestamp);
+        try testing.expectEqual(5000, report.timestamp);
+        try testing.expectEqual(1, report.packet_count);
+        try testing.expectEqual(payload.len, report.octet_count);
 
         packet.header.timestamp = 2000;
         packet.header.sequence_number = 11;
 
         report.recordPacket(&packet, 6000);
-        try std.testing.expectEqual(11, report.last_sequence_number);
-        try std.testing.expectEqual(2000, report.rtp_timestamp);
-        try std.testing.expectEqual(6000, report.timestamp);
-        try std.testing.expectEqual(2, report.packet_count);
-        try std.testing.expectEqual(payload.len * 2, report.octet_count);
+        try testing.expectEqual(11, report.last_sequence_number);
+        try testing.expectEqual(2000, report.rtp_timestamp);
+        try testing.expectEqual(6000, report.timestamp);
+        try testing.expectEqual(2, report.packet_count);
+        try testing.expectEqual(payload.len * 2, report.octet_count);
 
         packet.header.timestamp = 1500;
         packet.header.sequence_number = 9;
 
         report.recordPacket(&packet, 7000);
 
-        try std.testing.expectEqual(11, report.last_sequence_number);
-        try std.testing.expectEqual(2000, report.rtp_timestamp);
-        try std.testing.expectEqual(6000, report.timestamp);
-        try std.testing.expectEqual(3, report.packet_count);
-        try std.testing.expectEqual(payload.len * 3, report.octet_count);
+        try testing.expectEqual(11, report.last_sequence_number);
+        try testing.expectEqual(2000, report.rtp_timestamp);
+        try testing.expectEqual(6000, report.timestamp);
+        try testing.expectEqual(3, report.packet_count);
+        try testing.expectEqual(payload.len * 3, report.octet_count);
     }
 
     test "convert microseconds to ntp" {
         {
             const ntp = microsecondsToNtp(1782228674132465);
-            try std.testing.expectEqual(0xEDE52542, ntp >> 32);
-            try std.testing.expectEqual(132465, ntp & std.math.maxInt(u32));
+            try testing.expectEqual(0xEDE52542, ntp >> 32);
+            try testing.expectEqual(132465, ntp & std.math.maxInt(u32));
         }
         {
             const ntp = microsecondsToNtp(1782228863900100);
-            try std.testing.expectEqual(0xEDE525FF, ntp >> 32);
-            try std.testing.expectEqual(900100, ntp & std.math.maxInt(u32));
+            try testing.expectEqual(0xEDE525FF, ntp >> 32);
+            try testing.expectEqual(900100, ntp & std.math.maxInt(u32));
         }
     }
 };
 
 pub const RtpReceiver = struct {
+    const queue_size: usize = 16;
+
     track: MediaStreamTrack,
     codecs: []const RtpCodecParameters = &.{},
+    queue: Io.Queue(TrackEvent),
+    queue_buffer: []TrackEvent,
 
-    pub fn init(track: MediaStreamTrack) RtpReceiver {
-        return .{ .track = track };
+    pub fn init(track: MediaStreamTrack, allocator: std.mem.Allocator) !RtpReceiver {
+        const queue_buffer = try allocator.alloc(TrackEvent, queue_size);
+
+        return .{
+            .track = track,
+            .queue = .init(queue_buffer),
+            .queue_buffer = queue_buffer,
+        };
+    }
+
+    pub fn deinit(receiver: *RtpReceiver, allocator: std.mem.Allocator) void {
+        receiver.track.deinit(allocator);
+        allocator.free(receiver.queue_buffer);
     }
 
     pub fn getCapabilities(kind: TrackKind) RtpCapabilities {
         _ = kind;
-        return .{ .codecs = &.{}, .header_extensions = &.{} };
+        @compileError("Not implemented");
     }
 
-    pub fn handleRtpPacket(receiver: *RtpReceiver, packet: rtp.Packet) !?rtp.Packet {
-        _ = receiver;
-        return packet;
+    pub inline fn poll(receiver: *RtpReceiver, io: Io) !TrackEvent {
+        return receiver.queue.getOne(io);
+    }
+
+    pub inline fn handleRtpPacket(receiver: *RtpReceiver, io: Io, packet: rtp.Packet) !void {
+        try receiver.queue.putOne(io, .{ .rtp = packet });
     }
 
     fn processMsids(receiver: *RtpReceiver, allocator: std.mem.Allocator, msids: []MediaStream) !void {
         receiver.track.streams.clearAndFree(allocator);
         for (msids) |msid| try receiver.track.addStream(allocator, msid);
+    }
+
+    test "init" {
+        var receiver = try RtpReceiver.init(.init(testing.io, .video), testing.allocator);
+        defer receiver.deinit(testing.allocator);
+    }
+
+    test "poll" {
+        var receiver = try RtpReceiver.init(.init(testing.io, .video), testing.allocator);
+        defer receiver.deinit(testing.allocator);
+
+        const packet: rtp.Packet = .{
+            .header = .{
+                .ssrc = 0,
+                .timestamp = 1000,
+                .sequence_number = 10,
+                .payload_type = 96,
+                .marker = false,
+                .extension = false,
+                .padding = false,
+            },
+            .payload = "hello",
+        };
+
+        try receiver.handleRtpPacket(testing.io, packet);
+        const event = try receiver.poll(testing.io);
+        try testing.expectEqual(.rtp, std.meta.activeTag(event));
+        try testing.expectEqual(packet.header.ssrc, event.rtp.header.ssrc);
     }
 };
 
@@ -557,11 +609,13 @@ pub const RtpTransceiver = struct {
 
     pub fn initFromSdpMedia(
         allocator: std.mem.Allocator,
-        io: std.Io,
+        io: Io,
         sdp_media: *const SDPSession.SDPMedia,
         index: u8,
     ) !*RtpTransceiver {
         const tr = try allocator.create(RtpTransceiver);
+        errdefer allocator.destroy(tr);
+
         const track = if (sdp_media.track_id) |track_id|
             MediaStreamTrack.initWithId(track_id, sdp_media.kind)
         else
@@ -570,7 +624,7 @@ pub const RtpTransceiver = struct {
         tr.* = .{
             .direction = .recvonly,
             .kind = sdp_media.kind,
-            .receiver = .init(track),
+            .receiver = try .init(track, allocator),
             .sender = .init(null),
             .mid = sdp_media.getMid(),
             .sdp_mline_index = index,
@@ -582,7 +636,7 @@ pub const RtpTransceiver = struct {
 
     pub fn deinit(tr: *RtpTransceiver, allocator: std.mem.Allocator) void {
         if (tr.sender.track) |*track| track.deinit(allocator);
-        tr.receiver.track.deinit(allocator);
+        tr.receiver.deinit(allocator);
         allocator.destroy(tr);
     }
 
@@ -754,36 +808,42 @@ pub const RtpTransceiver = struct {
         }
     }
 
-    fn newTestRtpTransceiver(io: std.Io) RtpTransceiver {
-        return .{
+    fn newTestRtpTransceiver(io: Io, allocator: std.mem.Allocator) !*RtpTransceiver {
+        const tr = try allocator.create(RtpTransceiver);
+
+        tr.* = .{
             .sender = .init(null),
-            .receiver = .{ .track = .init(io, .video) },
+            .receiver = try .init(.init(io, .video), allocator),
             .direction = .sendrecv,
             .kind = .video,
             .transport = undefined,
         };
+
+        return tr;
     }
 
     test "canAssocaiteTrack" {
-        var tr: RtpTransceiver = newTestRtpTransceiver(std.testing.io);
+        var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
+        defer tr.deinit(testing.allocator);
         tr.direction = .recvonly;
 
-        try std.testing.expect(tr.canAssociateTrack(.video));
+        try testing.expect(tr.canAssociateTrack(.video));
 
         tr.kind = .audio;
-        try std.testing.expect(!tr.canAssociateTrack(.video));
+        try testing.expect(!tr.canAssociateTrack(.video));
 
         tr.kind = .video;
-        tr.sender.track = .init(std.testing.io, .video);
-        try std.testing.expect(!tr.canAssociateTrack(.video));
+        tr.sender.track = .init(testing.io, .video);
+        try testing.expect(!tr.canAssociateTrack(.video));
 
         tr.sender.track = null;
         tr.stopping = true;
-        try std.testing.expect(!tr.canAssociateTrack(.video));
+        try testing.expect(!tr.canAssociateTrack(.video));
     }
 
     test "getRtcpReport" {
-        var tr: RtpTransceiver = newTestRtpTransceiver(std.testing.io);
+        var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
+        defer tr.deinit(testing.allocator);
         tr.sender.codecs = getCodecCapabilities(.video);
         var buffer: [64]u8 = @splat(0);
 
@@ -797,32 +857,33 @@ pub const RtpTransceiver = struct {
 
         const data = tr.getRtcpReport(1782239530300000, &buffer);
         const packet = try rtcp.Packet.parse(data);
-        try std.testing.expectEqual(.sender_report, packet.header.payload_type);
-        try std.testing.expectEqual(tr.sender.ssrc, packet.payload.sender_report.ssrc);
-        try std.testing.expectEqual(53700, packet.payload.sender_report.rtp_timestamp);
-        try std.testing.expectEqual(17142195148218995680, packet.payload.sender_report.ntp_timestamp);
-        try std.testing.expectEqual(10000, packet.payload.sender_report.octet_count);
-        try std.testing.expectEqual(100, packet.payload.sender_report.packet_count);
+        try testing.expectEqual(.sender_report, packet.header.payload_type);
+        try testing.expectEqual(tr.sender.ssrc, packet.payload.sender_report.ssrc);
+        try testing.expectEqual(53700, packet.payload.sender_report.rtp_timestamp);
+        try testing.expectEqual(17142195148218995680, packet.payload.sender_report.ntp_timestamp);
+        try testing.expectEqual(10000, packet.payload.sender_report.octet_count);
+        try testing.expectEqual(100, packet.payload.sender_report.packet_count);
     }
 
     test "processRemoteTrack" {
-        const allocator = std.testing.allocator;
-        var tr = newTestRtpTransceiver(std.testing.io);
+        const allocator = testing.allocator;
+        var tr = try newTestRtpTransceiver(testing.io, allocator);
+        defer tr.deinit(allocator);
 
         var maybe_event = try tr.processRemoteTrack(allocator, .sendrecv, &.{});
-        try std.testing.expect(maybe_event != null);
-        try std.testing.expect(maybe_event.?.transceiver == &tr);
-        try std.testing.expect(tr.fired_direction == .sendrecv);
+        try testing.expect(maybe_event != null);
+        try testing.expect(maybe_event.?.transceiver == tr);
+        try testing.expect(tr.fired_direction == .sendrecv);
 
         maybe_event = try tr.processRemoteTrack(allocator, .recvonly, &.{});
-        try std.testing.expect(maybe_event == null);
+        try testing.expect(maybe_event == null);
 
         maybe_event = try tr.processRemoteTrack(allocator, .inactive, &.{});
-        try std.testing.expect(maybe_event == null);
-        try std.testing.expect(tr.receiver.track.muted);
+        try testing.expect(maybe_event == null);
+        try testing.expect(tr.receiver.track.muted);
 
         maybe_event = try tr.processRemoteTrack(allocator, .recvonly, &.{});
-        try std.testing.expect(maybe_event != null);
+        try testing.expect(maybe_event != null);
     }
 };
 
@@ -834,7 +895,7 @@ pub fn getCodecCapabilities(kind: TrackKind) []const RtpCodecParameters {
 }
 
 test {
-    std.testing.refAllDecls(@This());
+    testing.refAllDecls(@This());
     _ = @import("peer_connection.zig");
     _ = @import("sdp_session.zig");
 }

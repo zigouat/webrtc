@@ -186,14 +186,11 @@ pub fn addTransceiverFromKind(
     const tr = try pc.allocator.create(webrtc.RtpTransceiver);
     errdefer pc.allocator.destroy(tr);
 
-    try pc.transceivers.append(pc.allocator, tr);
-    errdefer _ = pc.transceivers.swapRemove(pc.getTransceivers().len - 1);
-
     tr.* = .{
         .kind = kind,
         .direction = init_config.direction,
         .sender = .init(null),
-        .receiver = .init(.init(io, kind)),
+        .receiver = try .init(.init(io, kind), pc.allocator),
         .transport = &pc.dtls_transport,
     };
 
@@ -203,6 +200,7 @@ pub fn addTransceiverFromKind(
     }
     tr.sender.ssrc = try generateSsrc(io, &pc.demuxer);
     try pc.checkNegotiationNeeded();
+    try pc.transceivers.append(pc.allocator, tr);
     return tr;
 }
 
@@ -223,13 +221,12 @@ fn initTransceiverFromTrack(
 ) !*webrtc.RtpTransceiver {
     const tr = try pc.allocator.create(webrtc.RtpTransceiver);
     errdefer tr.deinit(pc.allocator);
-    try pc.transceivers.append(pc.allocator, tr);
 
     tr.* = .{
         .kind = track.kind,
         .direction = .sendrecv,
         .sender = .init(track),
-        .receiver = .init(track),
+        .receiver = try .init(track, pc.allocator),
         .added_by_add_track = added_by_add_track,
         .transport = &pc.dtls_transport,
     };
@@ -239,6 +236,7 @@ fn initTransceiverFromTrack(
         try tr.sender.addStream(pc.allocator, stream);
     }
     tr.sender.ssrc = try generateSsrc(pc.dtls_transport.getIo(), &pc.demuxer);
+    try pc.transceivers.append(pc.allocator, tr);
     return tr;
 }
 
@@ -798,28 +796,13 @@ fn pollTransport(pc: *PeerConnection) !void {
         },
         .rtcp => |data| pc.dtls_transport.ice_agent.destroyPacket(data),
         .rtp => |data| {
-            if (pc.handleRtpPacket(data) catch {
-                pc.dtls_transport.ice_agent.destroyPacket(data);
-                continue;
-            }) |rtp_event| {
-                try pc.queue.putOne(io, rtp_event);
-                continue;
-            }
-
-            pc.dtls_transport.ice_agent.destroyPacket(data);
+            errdefer pc.dtls_transport.ice_agent.destroyPacket(data);
+            const packet = try rtp.Packet.parse(data);
+            if (try pc.demuxer.getMid(&packet)) |mid| if (pc.findTransceiverByMid(mid)) |tr| {
+                try tr.receiver.handleRtpPacket(io, packet);
+            };
         },
     } else |err| return err;
-}
-
-fn handleRtpPacket(pc: *PeerConnection, data: []const u8) !?Event {
-    const packet = try rtp.Packet.parse(data);
-    if (try pc.demuxer.getMid(&packet)) |mid| if (pc.findTransceiverByMid(mid)) |tr| {
-        if (try tr.receiver.handleRtpPacket(packet)) |p| {
-            return .{ .rtp = p };
-        }
-    };
-
-    return null;
 }
 
 fn writeIceCandidates(pc: *PeerConnection, w: *Io.Writer) !void {
