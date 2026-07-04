@@ -1,8 +1,7 @@
 const std = @import("std");
-const Io = std.Io;
-
 const webrtc = @import("webrtc");
-const zio = @import("zio");
+
+const Io = std.Io;
 
 pub const std_options = std.Options{ .log_level = .info };
 
