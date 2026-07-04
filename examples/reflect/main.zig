@@ -4,15 +4,13 @@ const Io = std.Io;
 const webrtc = @import("webrtc");
 const zio = @import("zio");
 
-const html_file = @embedFile("index.html");
-const js_file = @embedFile("pc.js");
-
-var grp: Io.Group = .init;
-
 pub const std_options = std.Options{ .log_level = .info };
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
+
+    var grp: Io.Group = .init;
+    defer grp.cancel(io);
 
     var pc = try webrtc.PeerConnection.init(io, init.gpa, .{});
     defer pc.deinit();
