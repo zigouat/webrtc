@@ -18,6 +18,10 @@ pub fn build(b: *std.Build) void {
             .name = "play_from_disk_renegotiation",
             .root_source_file = b.path("play-from-disk-renegotiation/main.zig"),
         },
+        .{
+            .name = "reflect",
+            .root_source_file = b.path("reflect/main.zig"),
+        },
     };
 
     inline for (apps) |app| {

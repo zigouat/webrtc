@@ -27,9 +27,7 @@ pub const Event = union(enum) {
     negotiation_needed: void,
     signaling_state: webrtc.SignalingState,
     connection_state: webrtc.ConnectionState,
-    track_event: webrtc.TrackEventInit,
-    rtp: rtp.Packet,
-    rtcp: []const u8,
+    track_event_init: webrtc.TrackEventInit,
 };
 
 allocator: std.mem.Allocator,
@@ -733,7 +731,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     }
 
     for (track_events.items) |event|
-        try pc.queue.putOne(pc.dtls_transport.getIo(), .{ .track_event = event });
+        try pc.queue.putOne(pc.dtls_transport.getIo(), .{ .track_event_init = event });
 }
 
 fn updateSignalingStateToStable(pc: *PeerConnection) !void {
@@ -867,7 +865,8 @@ fn doSendReports(pc: *PeerConnection) !void {
         defer pc.dtls_transport.ice_agent.destroyPacket(buffer);
         const timestamp = Io.Timestamp.now(io, .real).toMicroseconds();
 
-        for (0..pc.transceivers.items.len) |idx| {
+        var idx: usize = 0;
+        while (idx < pc.transceivers.items.len) : (idx += 1) {
             const tr = pc.transceivers.items[idx];
             if (tr.isStopped() or tr.direction == .inactive) continue;
 

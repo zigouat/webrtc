@@ -65,6 +65,8 @@ pub const MimeType = struct {
     pub const VP9 = "video/VP9";
     pub const AV1 = "video/AV1";
     pub const Rtx = "video/rtx";
+    pub const Ulpfec = "video/ulpfec";
+    pub const Red = "video/red";
     pub const video_unknown = "video/unknown";
     pub const Opus = "audio/Opus";
     pub const G722 = "audio/G722";
@@ -158,6 +160,11 @@ pub const RtpCodecParameters = struct {
         return true;
     }
 
+    pub fn isUnknown(a: *const RtpCodecParameters) bool {
+        return std.ascii.eqlIgnoreCase(a.mime_type, MimeType.video_unknown) or
+            std.ascii.eqlIgnoreCase(a.mime_type, MimeType.audio_unknown);
+    }
+
     test "eql" {
         {
             const a: RtpCodecParameters = .{ .payload_type = 96, .mime_type = MimeType.H264, .clock_rate = 9000 };
@@ -244,7 +251,7 @@ pub const MediaStream = struct {
 };
 
 pub const MediaStreamTrack = struct {
-    id: [64:0]u8,
+    id: [64]u8,
     kind: TrackKind,
     streams: std.ArrayList([]const u8),
     muted: bool,

@@ -353,11 +353,11 @@ test "negotiation between peers: add/remove tracks" {
     }
 
     // pc2 track events
-    var event = pc2_collector.popEvent(.track_event, .fromMilliseconds(50));
+    var event = pc2_collector.popEvent(.track_event_init, .fromMilliseconds(50));
     try testing.expect(event != null);
-    event = pc2_collector.popEvent(.track_event, .fromMilliseconds(50));
+    event = pc2_collector.popEvent(.track_event_init, .fromMilliseconds(50));
     try testing.expect(event != null);
-    event = pc2_collector.popEvent(.track_event, .fromMilliseconds(50));
+    event = pc2_collector.popEvent(.track_event_init, .fromMilliseconds(50));
     try testing.expect(event == null);
 
     for (0..10) |_| {
@@ -368,22 +368,22 @@ test "negotiation between peers: add/remove tracks" {
         try testing.expectEqual(3, pc1.getTransceivers().len);
         try testing.expectEqual(3, pc2.getTransceivers().len);
 
-        event = pc1_collector.popEvent(.track_event, .fromMilliseconds(50));
+        event = pc1_collector.popEvent(.track_event_init, .fromMilliseconds(50));
         try testing.expect(event != null);
-        try testing.expectEqualStrings(&track1.id, &event.?.track_event.track.id);
+        try testing.expectEqualStrings(&track1.id, &event.?.track_event_init.track.id);
 
         try pc1.removeTrack(screen1);
         try pc2.removeTrack(screen2);
         try negotiate(&pc1, &pc2);
     }
 
-    event = pc1_collector.popEvent(.track_event, .fromMilliseconds(50));
+    event = pc1_collector.popEvent(.track_event_init, .fromMilliseconds(50));
     try testing.expect(event == null);
 
-    event = pc2_collector.popEvent(.track_event, .fromMilliseconds(50));
+    event = pc2_collector.popEvent(.track_event_init, .fromMilliseconds(50));
     try testing.expect(event != null);
 
-    event = pc2_collector.popEvent(.track_event, .fromMilliseconds(50));
+    event = pc2_collector.popEvent(.track_event_init, .fromMilliseconds(50));
     try testing.expect(event == null);
 }
 
