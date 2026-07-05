@@ -65,6 +65,8 @@ pub const MimeType = struct {
     pub const VP9 = "video/VP9";
     pub const AV1 = "video/AV1";
     pub const Rtx = "video/rtx";
+    pub const Ulpfec = "video/ulpfec";
+    pub const Red = "video/red";
     pub const video_unknown = "video/unknown";
     pub const Opus = "audio/Opus";
     pub const G722 = "audio/G722";
@@ -156,6 +158,11 @@ pub const RtpCodecParameters = struct {
         if (a.fmtp_params != null and b.fmtp_params == null or a.fmtp_params == null and b.fmtp_params != null) return false;
         if (a.fmtp_params) |a_fmtp| if (b.fmtp_params) |*b_fmtp| return a_fmtp.eql(b_fmtp);
         return true;
+    }
+
+    pub fn isUnknown(a: *const RtpCodecParameters) bool {
+        return std.ascii.eqlIgnoreCase(a.mime_type, MimeType.video_unknown) or
+            std.ascii.eqlIgnoreCase(a.mime_type, MimeType.audio_unknown);
     }
 
     test "eql" {

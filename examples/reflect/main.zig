@@ -39,8 +39,6 @@ pub fn main(init: std.process.Init) !void {
         },
         else => {},
     } else |_| {}
-
-    pc.deinit();
 }
 
 fn readOfferFromStdin(io: Io, allocator: std.mem.Allocator) ![]const u8 {

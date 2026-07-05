@@ -865,7 +865,8 @@ fn doSendReports(pc: *PeerConnection) !void {
         defer pc.dtls_transport.ice_agent.destroyPacket(buffer);
         const timestamp = Io.Timestamp.now(io, .real).toMicroseconds();
 
-        for (0..pc.transceivers.items.len) |idx| {
+        var idx: usize = 0;
+        while (idx < pc.transceivers.items.len) : (idx += 1) {
             const tr = pc.transceivers.items[idx];
             if (tr.isStopped() or tr.direction == .inactive) continue;
 

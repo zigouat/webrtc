@@ -202,11 +202,14 @@ pub const SDPMedia = struct {
 
     pub fn write(media: *const SDPMedia, w: *std.Io.Writer) !void {
         try w.print("m={s} {} UDP/TLS/RTP/SAVPF", .{ @tagName(media.kind), media.port });
-        for (media.rtp_codec_parameters) |*codec| try w.print(" {}", .{codec.payload_type});
+        for (media.rtp_codec_parameters) |*codec| if (!codec.isUnknown()) {
+            try w.print(" {}", .{codec.payload_type});
+        };
         try w.writeAll("\r\n");
+
         try w.writeAll("c=IN IP4 0.0.0.0\r\n");
         if (media.bundle_only) try SDPAttribute.write(.bundle_only, w);
-        for (media.rtp_codec_parameters) |*codec| try codec.format(w);
+        for (media.rtp_codec_parameters) |*codec| if (!codec.isUnknown()) try codec.format(w);
         for (media.rtp_header_extensions) |*ext| try ext.format(w);
         try SDPAttribute.write(.{ .setup = media.setup }, w);
         try SDPAttribute.write(.{ .direction = @tagName(media.direction) }, w);
