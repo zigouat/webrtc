@@ -381,13 +381,13 @@ pub const RtpSender = struct {
 
     pub fn getCapabilities(kind: TrackKind) RtpCapabilities {
         _ = kind;
-        return .{ .codecs = &.{}, .header_extensions = &.{} };
+        @compileError("Not implemented");
     }
 
     pub fn replaceTrack(sender: *RtpSender, new_track: MediaStreamTrack) !void {
         _ = sender;
         _ = new_track;
-        @panic("Not Implemented");
+        @compileError("Not implemented");
     }
 
     pub fn addStream(sender: *RtpSender, allocator: std.mem.Allocator, stream: MediaStream) !void {
@@ -396,6 +396,9 @@ pub const RtpSender = struct {
         try track.addStream(allocator, stream);
     }
 
+    /// Sends an RTP packet.
+    ///
+    /// The sender will update the ssrc and payload type according to the transceiver's configuration.
     pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) !void {
         if (sender.track == null) {
             @branchHint(.cold);
@@ -429,6 +432,18 @@ pub const RtpSender = struct {
         sender.report.recordPacket(packet, timestamp);
     }
 
+    /// Sends a Picture Loss Indication (PLI) RTCP packet to the remote peer.
+    pub fn sendPli(sender: *RtpSender, media_ssrc: u32) !void {
+        // 4 bytes header + PLI size is 8 bytes
+        var buffer: [12]u8 = undefined;
+        const header: rtcp.Header = .{ .rc = 1, .payload_type = .ps_fb, .length = 2 };
+        std.mem.writeInt(u32, buffer[0..4], @bitCast(header), .big);
+        (rtcp.PLI{ .sender_ssrc = sender.ssrc, .media_ssrc = media_ssrc }).encode(buffer[4..12]);
+
+        const tr: *RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
+        try tr.transport.sendRtcp(&buffer);
+    }
+
     fn writeReport(sender: *const RtpSender, timestamp: i64, buffer: []u8) []const u8 {
         if (sender.report.packet_count == 0) return &.{};
         std.debug.assert(buffer.len >= rtcp.header_size + rtcp.sr_base_size);
@@ -454,7 +469,7 @@ pub const RtpSender = struct {
             .octet_count = report.octet_count,
             .packet_count = report.packet_count,
         };
-        sender_report.write(buffer[rtcp.header_size..][0..rtcp.sr_base_size]);
+        sender_report.encode(buffer[rtcp.header_size..][0..rtcp.sr_base_size]);
 
         return buffer[0..length];
     }
@@ -863,13 +878,13 @@ pub const RtpTransceiver = struct {
         };
 
         const data = tr.getRtcpReport(1782239530300000, &buffer);
-        const packet = try rtcp.Packet.parse(data);
+        const packet = try rtcp.Packet.decode(data);
         try testing.expectEqual(.sender_report, packet.header.payload_type);
-        try testing.expectEqual(tr.sender.ssrc, packet.payload.sender_report.ssrc);
-        try testing.expectEqual(53700, packet.payload.sender_report.rtp_timestamp);
-        try testing.expectEqual(17142195148218995680, packet.payload.sender_report.ntp_timestamp);
-        try testing.expectEqual(10000, packet.payload.sender_report.octet_count);
-        try testing.expectEqual(100, packet.payload.sender_report.packet_count);
+        try testing.expectEqual(tr.sender.ssrc, packet.payload.sr.ssrc);
+        try testing.expectEqual(53700, packet.payload.sr.rtp_timestamp);
+        try testing.expectEqual(17142195148218995680, packet.payload.sr.ntp_timestamp);
+        try testing.expectEqual(10000, packet.payload.sr.octet_count);
+        try testing.expectEqual(100, packet.payload.sr.packet_count);
     }
 
     test "processRemoteTrack" {
