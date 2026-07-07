@@ -11,13 +11,13 @@
             .url = "git+https://github.com/zigouat/media.git#266cff6c13b7b76ec8029434446de85584a97324",
             .hash = "media-0.1.0-qc-dCM72AACZ7ozg1_Xe3GIdpc39rESjHB4cPFPpG_Lp",
         },
+        .protocols = .{
+            .url = "git+https://github.com/zigouat/media-protocols.git#893fdc7a18ab892acb393ea49e69a06a72c0f9a5",
+            .hash = "protocols-0.0.0-nNJdjyulBAA6m-u_cmeBl8DuzrYqkcZxFdZFzwsDpD6C",
+        },
         .media_formats = .{
             .url = "git+https://github.com/zigouat/media-formats.git#22199f7f089aa879a06b836518f7d943a1404a87",
             .hash = "media_formats-0.0.0-7eZgYb_gDwBslSaUIAWoyFt3_gzQ1etK7C3bi9QJKlxJ",
-        },
-        .protocols = .{
-            .url = "git+https://github.com/zigouat/media-protocols.git#ea0783dec9cf148149c581e7e302b1b0160767b3",
-            .hash = "protocols-0.0.0-nNJdj7CiBAC-6j_L-1ynPdwvSLQ1lBsZ7PuPY8fz6BXd",
         },
     },
     .paths = .{

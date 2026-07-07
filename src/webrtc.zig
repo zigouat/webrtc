@@ -339,6 +339,8 @@ pub const RtpSender = struct {
     ssrc: u32,
     report: Report,
 
+    pub const SendError = DtlsTransport.SendError || error{ NoAssociatedTrack, InvalidDirection };
+
     const Report = struct {
         last_sequence_number: ?u16,
         rtp_timestamp: u32,
@@ -399,7 +401,7 @@ pub const RtpSender = struct {
     /// Sends an RTP packet.
     ///
     /// The sender will update the ssrc and payload type according to the transceiver's configuration.
-    pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) !void {
+    pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) SendError!void {
         if (sender.track == null) {
             @branchHint(.cold);
             return error.NoAssociatedTrack;
@@ -430,18 +432,6 @@ pub const RtpSender = struct {
         @memcpy(buffer[12 .. packet.payload.len + 12], packet.payload);
         try tr.transport.sendRtp(buffer[0 .. packet.payload.len + 12]);
         sender.report.recordPacket(packet, timestamp);
-    }
-
-    /// Sends a Picture Loss Indication (PLI) RTCP packet to the remote peer.
-    pub fn sendPli(sender: *RtpSender, media_ssrc: u32) !void {
-        // 4 bytes header + PLI size is 8 bytes
-        var buffer: [12]u8 = undefined;
-        const header: rtcp.Header = .{ .rc = 1, .payload_type = .ps_fb, .length = 2 };
-        std.mem.writeInt(u32, buffer[0..4], @bitCast(header), .big);
-        (rtcp.PLI{ .sender_ssrc = sender.ssrc, .media_ssrc = media_ssrc }).encode(buffer[4..12]);
-
-        const tr: *RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
-        try tr.transport.sendRtcp(&buffer);
     }
 
     fn writeReport(sender: *const RtpSender, timestamp: i64, buffer: []u8) []const u8 {
@@ -545,6 +535,7 @@ pub const RtpReceiver = struct {
 
     track: MediaStreamTrack,
     codecs: []const RtpCodecParameters = &.{},
+    ssrc: u32,
     queue: Io.Queue(TrackEvent),
     queue_buffer: []TrackEvent,
 
@@ -555,6 +546,7 @@ pub const RtpReceiver = struct {
             .track = track,
             .queue = .init(queue_buffer),
             .queue_buffer = queue_buffer,
+            .ssrc = 0,
         };
     }
 
@@ -573,7 +565,23 @@ pub const RtpReceiver = struct {
     }
 
     pub inline fn handleRtpPacket(receiver: *RtpReceiver, io: Io, packet: rtp.Packet) !void {
+        if (receiver.ssrc == 0) {
+            @branchHint(.cold);
+            receiver.ssrc = packet.header.ssrc;
+        }
         try receiver.queue.putOne(io, .{ .rtp = packet });
+    }
+
+    /// Sends a Picture Loss Indication (PLI) RTCP packet to the remote peer.
+    pub fn sendPli(receiver: *RtpReceiver) DtlsTransport.SendError!void {
+        // 4 bytes header + PLI size is 8 bytes
+        var buffer: [12]u8 = undefined;
+        const header: rtcp.Header = .{ .rc = 1, .payload_type = .ps_fb, .length = 2, .padding = false };
+        std.mem.writeInt(u32, buffer[0..4], @bitCast(header), .big);
+        (rtcp.PLI{ .sender_ssrc = 0, .media_ssrc = receiver.ssrc }).encode(buffer[4..12]);
+
+        const tr: *RtpTransceiver = @alignCast(@fieldParentPtr("receiver", receiver));
+        try tr.transport.sendRtcp(&buffer);
     }
 
     fn processMsids(receiver: *RtpReceiver, allocator: std.mem.Allocator, msids: []MediaStream) !void {
