@@ -22,6 +22,8 @@ const Timer = struct {
     };
 };
 
+pub const SendError = srtp.EncryptError || std.Io.net.Socket.SendError;
+
 allocator: std.mem.Allocator,
 ice_agent: ice.Agent,
 session: dtls.Session,
@@ -102,7 +104,7 @@ pub fn getConnectionState(transport: *const DtlsTransport) struct { ice.Connecti
     return .{ transport.ice_agent.connection_state, transport.session.connection_state };
 }
 
-pub inline fn sendRtp(transport: *DtlsTransport, data: []const u8) !void {
+pub inline fn sendRtp(transport: *DtlsTransport, data: []const u8) SendError!void {
     if (transport.session.connection_state != .connected) return;
     const buffer = try transport.ice_agent.createPacket();
     defer transport.ice_agent.destroyPacket(buffer);
@@ -110,7 +112,7 @@ pub inline fn sendRtp(transport: *DtlsTransport, data: []const u8) !void {
     try transport.ice_agent.sendData(encrypted);
 }
 
-pub fn sendRtcp(transport: *DtlsTransport, data: []const u8) !void {
+pub fn sendRtcp(transport: *DtlsTransport, data: []const u8) SendError!void {
     if (transport.session.connection_state != .connected) return;
     const buffer = try transport.ice_agent.createPacket();
     defer transport.ice_agent.destroyPacket(buffer);
