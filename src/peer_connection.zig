@@ -610,11 +610,11 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
         try pc.dtls_transport.gatherCandidates(pc.last_answer.getIceRole());
     }
 
-    try pc.demuxer.updateMaps(&sdp_session);
+    try pc.demuxer.updateMaps(pc.dtls_transport.getIo(), &sdp_session);
 
     pc.pending_local_description = pc.last_answer;
     try pc.updateSignalingStateToStable();
-    pc.removeTransceivers();
+    // pc.removeTransceivers();
     try pc.startSenderReports(renegotiation);
 }
 
@@ -705,14 +705,14 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
 
     switch (session_desc.type) {
         .answer => {
-            try pc.demuxer.updateMaps(&remote_sdp);
+            try pc.demuxer.updateMaps(pc.dtls_transport.getIo(), &remote_sdp);
             pc.pending_remote_description = .{
                 .desc_type = .answer,
                 .sdp = sdp_text,
                 .session = remote_sdp,
             };
             try pc.updateSignalingStateToStable();
-            pc.removeTransceivers();
+            // pc.removeTransceivers();
             try pc.startSenderReports(renegotiation);
         },
         .offer => {
@@ -792,7 +792,7 @@ fn pollTransport(pc: *PeerConnection) !void {
         .rtp => |data| {
             errdefer pc.dtls_transport.ice_agent.destroyPacket(data);
             const packet = try rtp.Packet.parse(data);
-            if (try pc.demuxer.getMid(&packet)) |mid| if (pc.findTransceiverByMid(mid)) |tr| {
+            if (try pc.demuxer.getMid(io, &packet)) |mid| if (pc.findTransceiverByMid(mid)) |tr| {
                 try tr.receiver.handleRtpPacket(io, packet);
             };
         },
