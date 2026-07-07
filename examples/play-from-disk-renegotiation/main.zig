@@ -24,7 +24,7 @@ const AppState = struct {
         io.random(&buf);
         try std.crypto.codecs.hex.encode(&stream, &buf, .lower);
 
-        const sender = try self.pc.addTrack(.init(io, .video), &.{&stream});
+        const sender = try self.pc.addTrack(.init(io, .video), &stream);
         try self.senders.append(allocator, sender);
 
         try self.pc.setRemoteDescription(offer);

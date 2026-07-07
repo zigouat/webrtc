@@ -112,7 +112,7 @@ pub fn deinit(pc: *PeerConnection) void {
     pc.queue.close(io);
     pc.allocator.free(pc.queue_buffer);
 
-    for (pc.transceivers.items) |tr| tr.deinit(pc.allocator);
+    for (pc.transceivers.items) |tr| tr.deinit(io, pc.allocator);
     pc.transceivers.deinit(pc.allocator);
 
     for (pc.streams.items) |*stream| stream.deinit(pc.allocator);
@@ -130,7 +130,7 @@ pub fn deinit(pc: *PeerConnection) void {
     pc.demuxer.deinit();
 }
 
-pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, streams: []const []const u8) Error!*webrtc.RtpSender {
+pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: ?[]const u8) Error!*webrtc.RtpSender {
     try pc.checkNotClosed();
 
     const maybe_transceiver = blk: {
@@ -142,7 +142,7 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, streams: []
         break :blk null;
     };
 
-    const tr = maybe_transceiver orelse try pc.initTransceiverFromTrack(track, streams, true);
+    const tr = maybe_transceiver orelse try pc.initTransceiverFromTrack(track, stream_id, true);
     try pc.checkNegotiationNeeded();
     return &tr.sender;
 }
@@ -150,7 +150,7 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, streams: []
 pub fn removeTrack(pc: *PeerConnection, sender: *webrtc.RtpSender) !void {
     try pc.checkNotClosed();
     const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
-    tr.removeTrack(pc.allocator);
+    tr.removeTrack();
     try pc.checkNegotiationNeeded();
 }
 
@@ -163,9 +163,9 @@ pub fn addTransceiverFromTrack(
     track: webrtc.MediaStreamTrack,
     init_config: webrtc.TransceiverInit,
 ) Error!*webrtc.RtpTransceiver {
-    const tr = try pc.initTransceiverFromTrack(track, init_config.streams, false);
+    const tr = try pc.initTransceiverFromTrack(track, init_config.stream_id, false);
     errdefer {
-        tr.deinit(pc.allocator);
+        tr.deinit(pc.dtls_transport.getIo(), pc.allocator);
         _ = pc.transceivers.swapRemove(pc.getTransceivers().len - 1);
     }
 
@@ -192,9 +192,9 @@ pub fn addTransceiverFromKind(
         .transport = &pc.dtls_transport,
     };
 
-    for (init_config.streams) |stream_id| {
+    if (init_config.stream_id) |stream_id| {
         const stream = try getOrAddStream(pc, stream_id);
-        try tr.sender.addStream(pc.allocator, stream);
+        tr.sender.setStream(stream);
     }
     tr.sender.ssrc = try generateSsrc(io, &pc.demuxer);
     try pc.checkNegotiationNeeded();
@@ -214,11 +214,11 @@ pub fn stopTransceiver(pc: *PeerConnection, transceiver: *webrtc.RtpTransceiver)
 fn initTransceiverFromTrack(
     pc: *PeerConnection,
     track: webrtc.MediaStreamTrack,
-    streams: []const []const u8,
+    stream_id: ?[]const u8,
     added_by_add_track: bool,
 ) !*webrtc.RtpTransceiver {
     const tr = try pc.allocator.create(webrtc.RtpTransceiver);
-    errdefer tr.deinit(pc.allocator);
+    errdefer tr.deinit(pc.dtls_transport.getIo(), pc.allocator);
 
     tr.* = .{
         .kind = track.kind,
@@ -229,9 +229,9 @@ fn initTransceiverFromTrack(
         .transport = &pc.dtls_transport,
     };
 
-    for (streams) |stream_id| {
-        const stream = try getOrAddStream(pc, stream_id);
-        try tr.sender.addStream(pc.allocator, stream);
+    if (stream_id) |sid| {
+        const stream = try getOrAddStream(pc, sid);
+        tr.sender.setStream(stream);
     }
     tr.sender.ssrc = try generateSsrc(pc.dtls_transport.getIo(), &pc.demuxer);
     try pc.transceivers.append(pc.allocator, tr);
@@ -619,6 +619,8 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
 }
 
 fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.SessionDescription) !void {
+    const io = pc.dtls_transport.getIo();
+
     const sdp_text = try pc.allocator.dupe(u8, session_desc.sdp);
     errdefer pc.allocator.free(sdp_text);
 
@@ -651,11 +653,11 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
 
                     const tr = try webrtc.RtpTransceiver.initFromSdpMedia(
                         pc.allocator,
-                        pc.dtls_transport.getIo(),
+                        io,
                         media,
                         @intCast(idx),
                     );
-                    errdefer tr.deinit(pc.allocator);
+                    errdefer tr.deinit(io, pc.allocator);
                     tr.transport = &pc.dtls_transport;
                     try pc.transceivers.append(pc.allocator, tr);
                     break :blk tr;
@@ -674,16 +676,11 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
 
         first_media = first_media orelse media;
 
-        const msids = try pc.allocator.alloc(webrtc.MediaStream, media.msids.len);
-        defer pc.allocator.free(msids);
-
         const direction = media.direction.reverse();
-        switch (direction) {
-            .recvonly, .sendrecv => for (media.msids, msids) |msid, *new_msid| {
-                new_msid.* = try getOrAddStream(pc, msid.id);
-            },
-            else => {},
-        }
+        const msid: ?webrtc.MediaStream = switch (direction) {
+            .recvonly, .sendrecv => if (media.msid) |m| try getOrAddStream(pc, m.id) else null,
+            else => null,
+        };
         transceiver.current_direction = direction;
 
         if (session_desc.type == .answer) {
@@ -696,7 +693,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
             transceiver.receiver.codecs = codecs.@"1";
         }
 
-        if (try transceiver.processRemoteTrack(pc.allocator, direction, msids)) |track_init_event| {
+        if (transceiver.processRemoteTrack(direction, msid)) |track_init_event| {
             try track_events.append(pc.allocator, track_init_event);
         }
     }
@@ -730,8 +727,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
         else => {},
     }
 
-    for (track_events.items) |event|
-        try pc.queue.putOne(pc.dtls_transport.getIo(), .{ .track_event_init = event });
+    for (track_events.items) |event| try pc.queue.putOne(io, .{ .track_event_init = event });
 }
 
 fn updateSignalingStateToStable(pc: *PeerConnection) !void {
@@ -830,7 +826,7 @@ fn removeTransceivers(pc: *PeerConnection) void {
             remote.getMedias()[tr.sdp_mline_index.?].port == 0))
         {
             _ = pc.transceivers.orderedRemove(idx);
-            tr.deinit(pc.allocator);
+            tr.deinit(pc.dtls_transport.getIo(), pc.allocator);
             continue;
         }
 

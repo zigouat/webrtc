@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
     pc = try .init(io, allocator, .{});
     defer pc.deinit();
 
-    const sender = try pc.addTrack(.initWithId("video-track", .video), &.{"video-stream"});
+    const sender = try pc.addTrack(.initWithId("video-track", .video), "video-stream");
     try grp.concurrent(io, startHttpServer, .{ io, allocator });
 
     while (pc.poll()) |event| switch (event) {
