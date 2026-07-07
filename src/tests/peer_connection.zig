@@ -33,8 +33,8 @@ test "setLocalDescription: set offer multiple times" {
     var offer = try pc.createOffer();
     try pc.setLocalDescription(offer);
 
-    _ = try pc.addTrack(.initWithId("video-track", .video), &.{});
-    _ = try pc.addTrack(.initWithId("audio-track", .audio), &.{});
+    _ = try pc.addTrack(.initWithId("video-track", .video), null);
+    _ = try pc.addTrack(.initWithId("audio-track", .audio), null);
 
     offer = try pc.createOffer();
     try pc.setLocalDescription(offer);
@@ -125,13 +125,13 @@ test "addTrack" {
 
     const track: webrtc.MediaStreamTrack = .init(testing.io, .video);
 
-    _ = try pc.addTrack(track, &.{});
+    _ = try pc.addTrack(track, null);
     try std.testing.expectEqual(1, pc.transceivers.items.len);
 
     const tr = try pc.addTransceiverFromKind(.video, .{ .direction = .recvonly });
     try std.testing.expect(tr.sender.track == null);
 
-    const sender = try pc.addTrack(.initWithId("track2", .video), &.{});
+    const sender = try pc.addTrack(.initWithId("track2", .video), null);
     try std.testing.expectEqual(sender, &tr.sender);
     try std.testing.expectEqual(2, pc.transceivers.items.len);
     try std.testing.expect(tr.sender.track != null);
@@ -142,7 +142,7 @@ test "removeTrack" {
     var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
     defer pc.deinit();
 
-    const sender = try pc.addTrack(.initWithId("track1", .video), &.{});
+    const sender = try pc.addTrack(.initWithId("track1", .video), null);
     try pc.removeTrack(sender);
 
     const tr = pc.getTransceivers()[0];
@@ -161,7 +161,7 @@ test "addTransceiver" {
 
         const tr = try pc.addTransceiverFromTrack(track, .{
             .direction = .sendrecv,
-            .streams = &.{ "stream-1", "stream-2" },
+            .stream_id = "stream-1",
         });
         try std.testing.expectEqual(1, pc.transceivers.items.len);
         try std.testing.expectEqual(.sendrecv, tr.direction);
@@ -169,9 +169,7 @@ test "addTransceiver" {
         try std.testing.expect(tr.sender.ssrc != 0);
 
         const sender_track = tr.sender.track.?;
-        try std.testing.expectEqual(2, sender_track.streams.items.len);
-        try std.testing.expectEqualStrings("stream-1", sender_track.streams.items[0]);
-        try std.testing.expectEqualStrings("stream-2", sender_track.streams.items[1]);
+        try std.testing.expectEqualStrings("stream-1", sender_track.stream_id.?);
 
         const tr2 = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
         try std.testing.expectEqual(2, pc.transceivers.items.len);
@@ -217,9 +215,9 @@ test "createOffer: m-lines created for each transceiver" {
     var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
     defer pc.deinit();
 
-    _ = try pc.addTrack(.initWithId("video", .video), &.{});
-    _ = try pc.addTrack(.initWithId("audio", .audio), &.{});
-    _ = try pc.addTrack(.initWithId("video", .video), &.{});
+    _ = try pc.addTrack(.initWithId("video", .video), null);
+    _ = try pc.addTrack(.initWithId("audio", .audio), null);
+    _ = try pc.addTrack(.initWithId("video", .video), null);
 
     const offer = try pc.createOffer();
     try testing.expectEqual(.offer, offer.type);
@@ -244,7 +242,7 @@ test "createOffer: stopped non-associted transceiver is ignored" {
     const tr = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
     tr.stop();
 
-    _ = try pc.addTrack(.initWithId("video", .video), &.{});
+    _ = try pc.addTrack(.initWithId("video", .video), null);
 
     const offer = try pc.createOffer();
     try testing.expectEqual(.offer, offer.type);
@@ -259,8 +257,8 @@ test "createOffer: multiple offers" {
     var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
     defer pc.deinit();
 
-    _ = try pc.addTrack(.initWithId("video", .video), &.{});
-    _ = try pc.addTrack(.initWithId("audio", .audio), &.{});
+    _ = try pc.addTrack(.initWithId("video", .video), null);
+    _ = try pc.addTrack(.initWithId("audio", .audio), null);
 
     var offer = try pc.createOffer();
     try pc.setLocalDescription(offer);
@@ -273,7 +271,7 @@ test "createOffer: multiple offers" {
     const old_mid = sdp_session.getMedias()[1].mid;
 
     try pc.setLocalDescription(offer);
-    _ = try pc.addTrack(.initWithId("video2", .video), &.{});
+    _ = try pc.addTrack(.initWithId("video2", .video), null);
 
     offer = try pc.createOffer();
     sdp_session.deinit(testing.allocator);
@@ -293,8 +291,8 @@ test "negotiation between peers" {
     var pc2: PeerConnection = try .init(io, allocator, .{});
     defer pc2.deinit();
 
-    const sender1 = try pc1.addTrack(.initWithId("track-1", .video), &.{"stream-1"});
-    const sender2 = try pc1.addTrack(.init(testing.io, .video), &.{ "stream-1", "stream-2" });
+    const sender1 = try pc1.addTrack(.initWithId("track-1", .video), "stream-1");
+    const sender2 = try pc1.addTrack(.init(testing.io, .video), "stream-2");
 
     try negotiate(&pc1, &pc2);
 
@@ -302,14 +300,11 @@ test "negotiation between peers" {
     try testing.expectEqual(2, transceivers.len);
     var track = transceivers[0].receiver.track;
     try testing.expectEqualStrings(sender1.track.?.getId(), track.getId());
-    try testing.expectEqual(1, track.streams.items.len);
-    try testing.expectEqualStrings("stream-1", track.streams.items[0]);
+    try testing.expectEqualStrings("stream-1", track.stream_id.?);
 
     track = transceivers[1].receiver.track;
     try testing.expectEqualStrings(sender2.track.?.getId(), track.getId());
-    try testing.expectEqual(2, track.streams.items.len);
-    try testing.expectEqualStrings("stream-1", track.streams.items[0]);
-    try testing.expectEqualStrings("stream-2", track.streams.items[1]);
+    try testing.expectEqualStrings("stream-2", track.stream_id.?);
 }
 
 test "negotiation between peers: add/remove tracks" {
@@ -329,8 +324,8 @@ test "negotiation between peers: add/remove tracks" {
 
     const track1: webrtc.MediaStreamTrack = .init(testing.io, .video);
 
-    _ = try pc1.addTrack(track1, &.{});
-    _ = try pc1.addTrack(.init(testing.io, .video), &.{});
+    _ = try pc1.addTrack(track1, null);
+    _ = try pc1.addTrack(.init(testing.io, .video), null);
 
     try negotiate(&pc1, &pc2);
 
@@ -361,8 +356,8 @@ test "negotiation between peers: add/remove tracks" {
     try testing.expect(event == null);
 
     for (0..10) |_| {
-        const screen1 = try pc1.addTrack(.initWithId("screenshare", .video), &.{});
-        const screen2 = try pc2.addTrack(.initWithId("screenshare", .video), &.{});
+        const screen1 = try pc1.addTrack(.initWithId("screenshare", .video), null);
+        const screen2 = try pc2.addTrack(.initWithId("screenshare", .video), null);
         try negotiate(&pc1, &pc2);
 
         try testing.expectEqual(3, pc1.getTransceivers().len);

@@ -14,7 +14,7 @@ pub fn main(init: std.process.Init) !void {
     var pc = try webrtc.PeerConnection.init(io, init.gpa, .{});
     defer pc.deinit();
 
-    const sender = try pc.addTrack(.initWithId("video", .video), &.{"my-stream"});
+    const sender = try pc.addTrack(.initWithId("video", .video), "my-stream");
 
     const offer = try readOfferFromStdin(io, init.gpa);
     defer init.gpa.free(offer);

@@ -253,7 +253,7 @@ pub const MediaStream = struct {
 pub const MediaStreamTrack = struct {
     id: [64]u8,
     kind: TrackKind,
-    streams: std.ArrayList([]const u8),
+    stream_id: ?[]const u8,
     muted: bool,
 
     /// Init a new track with generated id.
@@ -266,7 +266,7 @@ pub const MediaStreamTrack = struct {
         var track: MediaStreamTrack = .{
             .id = @splat(0),
             .kind = kind,
-            .streams = .empty,
+            .stream_id = null,
             .muted = false,
         };
 
@@ -274,16 +274,12 @@ pub const MediaStreamTrack = struct {
         return track;
     }
 
-    pub fn deinit(track: *MediaStreamTrack, allocator: std.mem.Allocator) void {
-        track.streams.deinit(allocator);
-    }
-
     pub fn initWithId(id: []const u8, kind: TrackKind) MediaStreamTrack {
         std.debug.assert(id.len <= 64);
         var track: MediaStreamTrack = .{
             .id = @splat(0),
             .kind = kind,
-            .streams = .empty,
+            .stream_id = null,
             .muted = false,
         };
 
@@ -295,20 +291,8 @@ pub const MediaStreamTrack = struct {
         return std.mem.sliceTo(&track.id, 0);
     }
 
-    pub fn clone(track: *const MediaStreamTrack, allocator: std.mem.Allocator) std.mem.Allocator.Error!MediaStreamTrack {
-        var new_track = MediaStreamTrack.initWithId(track.getId(), track.kind);
-        errdefer new_track.deinit(allocator);
-
-        for (track.streams.items) |stream| {
-            const copy = try allocator.dupe(u8, stream);
-            errdefer allocator.free(copy);
-            try new_track.streams.append(allocator, copy);
-        }
-        return new_track;
-    }
-
-    fn addStream(track: *MediaStreamTrack, allocator: std.mem.Allocator, stream: MediaStream) !void {
-        try track.streams.append(allocator, stream.id);
+    fn setStream(track: *MediaStreamTrack, stream_id: ?[]const u8) void {
+        track.stream_id = stream_id;
     }
 
     test "init" {
@@ -392,10 +376,8 @@ pub const RtpSender = struct {
         @compileError("Not implemented");
     }
 
-    pub fn addStream(sender: *RtpSender, allocator: std.mem.Allocator, stream: MediaStream) !void {
-        if (sender.track == null) return;
-        const track = &sender.track.?;
-        try track.addStream(allocator, stream);
+    pub fn setStream(sender: *RtpSender, stream: MediaStream) void {
+        if (sender.track) |*track| track.setStream(stream.id);
     }
 
     /// Sends an RTP packet.
@@ -550,8 +532,8 @@ pub const RtpReceiver = struct {
         };
     }
 
-    pub fn deinit(receiver: *RtpReceiver, allocator: std.mem.Allocator) void {
-        receiver.track.deinit(allocator);
+    pub fn deinit(receiver: *RtpReceiver, io: Io, allocator: std.mem.Allocator) void {
+        receiver.queue.close(io);
         allocator.free(receiver.queue_buffer);
     }
 
@@ -584,19 +566,18 @@ pub const RtpReceiver = struct {
         try tr.transport.sendRtcp(&buffer);
     }
 
-    fn processMsids(receiver: *RtpReceiver, allocator: std.mem.Allocator, msids: []MediaStream) !void {
-        receiver.track.streams.clearAndFree(allocator);
-        for (msids) |msid| try receiver.track.addStream(allocator, msid);
+    fn processMsid(receiver: *RtpReceiver, msid: ?MediaStream) void {
+        receiver.track.setStream(if (msid) |m| m.id else null);
     }
 
     test "init" {
         var receiver = try RtpReceiver.init(.init(testing.io, .video), testing.allocator);
-        defer receiver.deinit(testing.allocator);
+        defer receiver.deinit(testing.io, testing.allocator);
     }
 
     test "poll" {
         var receiver = try RtpReceiver.init(.init(testing.io, .video), testing.allocator);
-        defer receiver.deinit(testing.allocator);
+        defer receiver.deinit(testing.io, testing.allocator);
 
         const packet: rtp.Packet = .{
             .header = .{
@@ -620,7 +601,7 @@ pub const RtpReceiver = struct {
 
 pub const TransceiverInit = struct {
     direction: Direction,
-    streams: []const []const u8 = &.{},
+    stream_id: ?[]const u8 = null,
 };
 
 pub const RtpTransceiver = struct {
@@ -664,9 +645,8 @@ pub const RtpTransceiver = struct {
         return tr;
     }
 
-    pub fn deinit(tr: *RtpTransceiver, allocator: std.mem.Allocator) void {
-        if (tr.sender.track) |*track| track.deinit(allocator);
-        tr.receiver.deinit(allocator);
+    pub fn deinit(tr: *RtpTransceiver, io: Io, allocator: std.mem.Allocator) void {
+        tr.receiver.deinit(io, allocator);
         allocator.destroy(tr);
     }
 
@@ -760,10 +740,9 @@ pub const RtpTransceiver = struct {
     }
 
     /// Removes the track from transceiver.
-    pub fn removeTrack(tr: *RtpTransceiver, allocator: std.mem.Allocator) void {
+    pub fn removeTrack(tr: *RtpTransceiver) void {
         if (tr.stopping or tr.sender.track == null) return;
 
-        tr.sender.track.?.deinit(allocator);
         tr.sender.track = null;
 
         switch (tr.direction) {
@@ -779,13 +758,8 @@ pub const RtpTransceiver = struct {
         return false;
     }
 
-    pub fn processRemoteTrack(
-        tr: *RtpTransceiver,
-        allocator: std.mem.Allocator,
-        direction: Direction,
-        msids: []MediaStream,
-    ) !?TrackEventInit {
-        try tr.receiver.processMsids(allocator, msids);
+    pub fn processRemoteTrack(tr: *RtpTransceiver, direction: Direction, msid: ?MediaStream) ?TrackEventInit {
+        tr.receiver.processMsid(msid);
 
         // It's safe to set default value to inactive
         // Since it's not included in the clauses that mute tracks and it's included
@@ -825,12 +799,7 @@ pub const RtpTransceiver = struct {
         switch (tr.direction) {
             .sendonly, .sendrecv => {
                 const track = &tr.sender.track.?;
-                media.msids = try allocator.alloc(MediaStream, track.streams.items.len);
-                errdefer allocator.free(media.msids);
-
-                for (media.msids, track.streams.items) |*msid, stream_id| {
-                    msid.* = .{ .id = stream_id };
-                }
+                if (track.stream_id) |stream_id| media.msid = .{ .id = stream_id };
                 media.track_id = try allocator.dupe(u8, track.getId());
                 media.ssrc = tr.sender.ssrc;
             },
@@ -854,7 +823,7 @@ pub const RtpTransceiver = struct {
 
     test "canAssocaiteTrack" {
         var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
-        defer tr.deinit(testing.allocator);
+        defer tr.deinit(testing.io, testing.allocator);
         tr.direction = .recvonly;
 
         try testing.expect(tr.canAssociateTrack(.video));
@@ -873,7 +842,7 @@ pub const RtpTransceiver = struct {
 
     test "getRtcpReport" {
         var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
-        defer tr.deinit(testing.allocator);
+        defer tr.deinit(testing.io, testing.allocator);
         tr.sender.codecs = getCodecCapabilities(.video);
         var buffer: [64]u8 = @splat(0);
 
@@ -897,22 +866,24 @@ pub const RtpTransceiver = struct {
 
     test "processRemoteTrack" {
         const allocator = testing.allocator;
-        var tr = try newTestRtpTransceiver(testing.io, allocator);
-        defer tr.deinit(allocator);
+        const io = testing.io;
 
-        var maybe_event = try tr.processRemoteTrack(allocator, .sendrecv, &.{});
+        var tr = try newTestRtpTransceiver(testing.io, allocator);
+        defer tr.deinit(io, allocator);
+
+        var maybe_event = tr.processRemoteTrack(.sendrecv, null);
         try testing.expect(maybe_event != null);
         try testing.expect(maybe_event.?.transceiver == tr);
         try testing.expect(tr.fired_direction == .sendrecv);
 
-        maybe_event = try tr.processRemoteTrack(allocator, .recvonly, &.{});
+        maybe_event = tr.processRemoteTrack(.recvonly, null);
         try testing.expect(maybe_event == null);
 
-        maybe_event = try tr.processRemoteTrack(allocator, .inactive, &.{});
+        maybe_event = tr.processRemoteTrack(.inactive, null);
         try testing.expect(maybe_event == null);
         try testing.expect(tr.receiver.track.muted);
 
-        maybe_event = try tr.processRemoteTrack(allocator, .recvonly, &.{});
+        maybe_event = tr.processRemoteTrack(.recvonly, null);
         try testing.expect(maybe_event != null);
     }
 };
