@@ -58,6 +58,13 @@ pub fn getMid(demuxer: *Demuxer, io: std.Io, packet: *const rtp.Packet) !?[]cons
     return if (demuxer.pt_to_mid.getPtr(packet.header.payload_type)) |value| std.mem.sliceTo(value, 0) else null;
 }
 
+pub fn containsSsrc(demuxer: *Demuxer, io: std.Io, ssrc: u32) bool {
+    demuxer.mutex.lockUncancelable(io);
+    defer demuxer.mutex.unlock(io);
+
+    return demuxer.ssrc_to_mid.contains(ssrc);
+}
+
 fn getMidFromPacket(packet: *const rtp.Packet, mid_id: u16) !?[]const u8 {
     if (packet.extension) |extension| {
         var it = try rtp.Packet.Extension.Iterator.init(extension);

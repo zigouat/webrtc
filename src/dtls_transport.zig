@@ -231,6 +231,8 @@ fn handleDtlsData(transport: *DtlsTransport, data: []const u8) !void {
     defer transport.mutex.unlock(transport.getIo());
 
     try transport.session.handleData(data);
+    // TODO: don't set connection state of dtls until we create the whole srtp session.
+    // Otherwise, we might start receiving RTP/RTCP packets before we have the srtp session ready.
     if (transport.in_srtp_session == null) {
         const srtp_profile = try transport.session.exportSrtpKeyingMaterial();
         const profile = switch (srtp_profile.profile) {
