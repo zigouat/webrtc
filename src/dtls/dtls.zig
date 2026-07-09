@@ -74,7 +74,7 @@ pub const Session = struct {
         on_send_data: *const fn (*Session, []const u8) i32,
         on_set_timer: *const fn (*Session, u32, u32) void,
         on_get_timer_state: *const fn (*Session) i32,
-        debug_level: u8 = 0,
+        debug_level: u8 = 1,
     };
 
     pub fn init(io: std.Io, config: Config) !Session {
@@ -123,7 +123,7 @@ pub const Session = struct {
             m.MBEDTLS_SSL_PRESET_DEFAULT,
         ) != 0) return error.SetConfigFailed;
 
-        m.mbedtls_ssl_conf_authmode(&session.ssl_conf, m.MBEDTLS_SSL_VERIFY_OPTIONAL);
+        m.mbedtls_ssl_conf_authmode(&session.ssl_conf, m.MBEDTLS_SSL_VERIFY_NONE);
         m.mbedtls_ssl_conf_dbg(&session.ssl_conf, logDebugMessages, null);
         m.mbedtls_ssl_conf_verify(&session.ssl_conf, verifyCertificateFingerprint, session);
         m.mbedtls_ssl_set_export_keys_cb(&session.ssl, exportSessionKeyDerivation, session);
@@ -255,6 +255,7 @@ pub const Session = struct {
 
         var serial: [16]u8 = @splat(0);
         io.random(&serial);
+        serial[0] = (serial[0] & 0x7F) | 0x01;
         ret = m.mbedtls_x509write_crt_set_serial_raw(&cert, serial[0..].ptr, serial.len);
         try checkError(ret);
 
@@ -368,13 +369,15 @@ pub const Session = struct {
 
     fn logDebugMessages(ctx: ?*anyopaque, level: c_int, file: [*c]const u8, len: c_int, str: [*c]const u8) callconv(.c) void {
         _ = ctx;
-        _ = level;
         _ = len;
 
         const message = std.mem.sliceTo(str, 0);
         var file_path = std.mem.sliceTo(file, 0);
         file_path = if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |idx| file_path[idx + 1 ..] else file_path;
-        Logger.debug("file={s} {s}", .{ file_path, message[0 .. message.len - 1] });
+        switch (level) {
+            1 => Logger.err("file={s} {s}", .{ file_path, message[0 .. message.len - 1] }),
+            else => Logger.debug("file={s} {s}", .{ file_path, message[0 .. message.len - 1] }),
+        }
     }
 
     fn checkError(ret: i32) !void {

@@ -203,5 +203,8 @@ fn mbedtls_config(b: *std.Build) *std.Build.Step.ConfigHeader {
         .MBEDTLS_X509_CREATE_C = {},
         .MBEDTLS_X509_CRT_WRITE_C = {},
         .MBEDTLS_X509_CSR_WRITE_C = {},
+
+        .MBEDTLS_THREADING_C = {},
+        .MBEDTLS_THREADING_PTHREAD = {},
     });
 }
