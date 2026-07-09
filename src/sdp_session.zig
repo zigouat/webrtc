@@ -41,7 +41,7 @@ pub const SDPMedia = struct {
     bundle_only: bool,
     rtp_codec_parameters: []webrtc.RtpCodecParameters,
     rtp_header_extensions: []webrtc.RtpHeaderExtensionParameter,
-    mid: [3]u8,
+    mid: u24,
     direction: webrtc.Direction,
     ice_ufrag: []const u8,
     ice_pwd: []const u8,
@@ -61,7 +61,7 @@ pub const SDPMedia = struct {
         .bundle_only = false,
         .rtp_codec_parameters = &.{},
         .rtp_header_extensions = &.{},
-        .mid = @splat(0),
+        .mid = 0,
         .direction = .sendrecv,
         .ice_ufrag = "",
         .ice_pwd = "",
@@ -116,7 +116,9 @@ pub const SDPMedia = struct {
             .bundle_only => sdp_media.bundle_only = true,
             .mid => |v| {
                 if (v.len > 3) return error.InvalidSDP;
-                @memcpy(sdp_media.mid[0..v.len], v);
+                var mid: [3]u8 = @splat(0);
+                @memcpy(mid[0..v.len], v);
+                sdp_media.mid = @bitCast(mid);
             },
             .setup => |v| sdp_media.setup = v,
             .direction => |v| sdp_media.direction = std.meta.stringToEnum(webrtc.Direction, v) orelse .sendrecv,
@@ -173,7 +175,7 @@ pub const SDPMedia = struct {
         };
 
         if (sdp_media.port != 0 and !sdp_media.rtcp_mux) return error.RtcpMuxRequired;
-        if (sdp_media.mid.len == 0) return error.MidAttributeRequired;
+        if (sdp_media.mid == 0) return error.MidAttributeRequired;
 
         try validateRtpCodecParameters(rtp_codec_parameters);
 
@@ -208,7 +210,10 @@ pub const SDPMedia = struct {
         for (media.rtp_header_extensions) |*ext| try ext.format(w);
         try SDPAttribute.write(.{ .setup = media.setup }, w);
         try SDPAttribute.write(.{ .direction = @tagName(media.direction) }, w);
-        if (media.getMid().len != 0) try SDPAttribute.write(.{ .mid = media.getMid() }, w);
+        if (media.mid != 0) {
+            const mid: [3]u8 = @bitCast(media.mid);
+            try SDPAttribute.write(.{ .mid = std.mem.sliceTo(&mid, 0) }, w);
+        }
 
         if (media.port != 0) {
             if (media.rtcp_mux) try SDPAttribute.write(.rtcp_mux, w);
@@ -235,10 +240,6 @@ pub const SDPMedia = struct {
     pub fn setIceCredentials(media: *SDPMedia, credens: ice.Credentials) void {
         media.ice_ufrag = credens.username;
         media.ice_pwd = credens.password;
-    }
-
-    pub fn getMid(media: *const SDPMedia) []const u8 {
-        return std.mem.sliceTo(&media.mid, 0);
     }
 
     pub fn isRejected(media: *const SDPMedia) bool {
@@ -348,7 +349,9 @@ pub fn write(s: *const SDPSession, w: *std.Io.Writer) !void {
 
     if (bundle) {
         try w.writeAll("a=group:BUNDLE");
-        for (s.getMedias()) |*m| if (m.port != 0) try w.print(" {s}", .{m.getMid()});
+        for (s.getMedias()) |*m| if (m.port != 0) {
+            try w.print(" {s}", .{std.mem.sliceTo(&@as([3]u8, @bitCast(m.mid)), 0)});
+        };
         try w.writeAll("\r\n");
     }
 

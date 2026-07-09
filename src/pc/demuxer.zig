@@ -4,8 +4,8 @@ const rtp = @import("rtp");
 
 const Demuxer = @This();
 
-ssrc_to_mid: std.AutoHashMap(u32, [3]u8),
-pt_to_mid: std.AutoHashMap(u8, [3]u8),
+ssrc_to_mid: std.AutoHashMap(u32, u24),
+pt_to_mid: std.AutoHashMap(u8, u24),
 mid_id: ?u16 = null,
 mutex: std.Io.Mutex = .init,
 
@@ -31,7 +31,7 @@ pub fn updateMaps(demuxer: *Demuxer, io: std.Io, sdp_session: *const SDPSession)
         }
 
         inner: for (media.rtp_codec_parameters) |codec| {
-            for (sdp_session.getMedias()) |*m| if (!std.mem.eql(u8, media.getMid(), m.getMid()) and m.hasPayload(codec.payload_type))
+            for (sdp_session.getMedias()) |*m| if (media.mid != m.mid and m.hasPayload(codec.payload_type))
                 continue :inner;
 
             try demuxer.pt_to_mid.put(codec.payload_type, media.mid);
@@ -39,23 +39,26 @@ pub fn updateMaps(demuxer: *Demuxer, io: std.Io, sdp_session: *const SDPSession)
     }
 }
 
-pub fn getMid(demuxer: *Demuxer, io: std.Io, packet: *const rtp.Packet) !?[]const u8 {
+pub fn getMid(demuxer: *Demuxer, io: std.Io, packet: *const rtp.Packet) !?u24 {
     try demuxer.mutex.lock(io);
     defer demuxer.mutex.unlock(io);
 
-    if (demuxer.ssrc_to_mid.getPtr(packet.header.ssrc)) |mid| {
+    if (demuxer.ssrc_to_mid.get(packet.header.ssrc)) |mid| {
         @branchHint(.likely);
-        return std.mem.sliceTo(mid, 0);
+        return mid;
     }
 
     if (demuxer.mid_id != null) if (getMidFromPacket(packet, demuxer.mid_id.?) catch return null) |mid| {
-        var ssrc_mid: [3]u8 = @splat(0);
-        @memcpy(ssrc_mid[0..mid.len], mid);
-        try demuxer.ssrc_to_mid.put(packet.header.ssrc, ssrc_mid);
-        return mid;
+        if (mid.len <= 3) {
+            var mid_bytes: [3]u8 = @splat(0);
+            @memcpy(mid_bytes[0..mid.len], mid);
+
+            try demuxer.ssrc_to_mid.put(packet.header.ssrc, @bitCast(mid_bytes));
+            return @bitCast(mid_bytes);
+        }
     };
 
-    return if (demuxer.pt_to_mid.getPtr(packet.header.payload_type)) |value| std.mem.sliceTo(value, 0) else null;
+    return if (demuxer.pt_to_mid.get(packet.header.payload_type)) |value| value else null;
 }
 
 pub fn containsSsrc(demuxer: *Demuxer, io: std.Io, ssrc: u32) bool {
@@ -76,6 +79,11 @@ fn getMidFromPacket(packet: *const rtp.Packet, mid_id: u16) !?[]const u8 {
 
 const RtpCodecParameters = @import("../webrtc.zig").RtpCodecParameters;
 
+// MID strings packed into a u24 the same way SDP parsing does (mid[0] in the low byte).
+const mid_1: u24 = @bitCast([3]u8{ '1', 0, 0 });
+const mid_2: u24 = @bitCast([3]u8{ '2', 0, 0 });
+const mid_3: u24 = @bitCast([3]u8{ '3', 0, 0 });
+
 fn testSdpSession(alloc: std.mem.Allocator) !SDPSession {
     var medias = try alloc.alloc(SDPSession.SDPMedia, 3);
     for (medias) |*m| m.* = .empty;
@@ -85,7 +93,7 @@ fn testSdpSession(alloc: std.mem.Allocator) !SDPSession {
 
     var media1_params = try alloc.alloc(RtpCodecParameters, 3);
     medias[0].rtp_codec_parameters = media1_params;
-    medias[0].mid = .{ '1', 0, 0 };
+    medias[0].mid = mid_1;
     medias[0].ssrc = 0x10101010;
     media1_params[0] = .{ .payload_type = 96, .clock_rate = 90000, .mime_type = "video/h264" };
     media1_params[1] = .{ .payload_type = 97, .clock_rate = 90000, .mime_type = "video/rtx" };
@@ -93,14 +101,14 @@ fn testSdpSession(alloc: std.mem.Allocator) !SDPSession {
 
     var media2_params = try alloc.alloc(RtpCodecParameters, 3);
     medias[1].rtp_codec_parameters = media2_params;
-    medias[1].mid = .{ '2', 0, 0 };
+    medias[1].mid = mid_2;
     media2_params[0] = .{ .payload_type = 98, .clock_rate = 90000, .mime_type = "video/h264" };
     media2_params[1] = .{ .payload_type = 99, .clock_rate = 90000, .mime_type = "video/rtx" };
     media2_params[2] = .{ .payload_type = 100, .clock_rate = 90000, .mime_type = "video/vp9" };
 
     var media3_params = try alloc.alloc(RtpCodecParameters, 3);
     medias[2].rtp_codec_parameters = media3_params;
-    medias[2].mid = .{ '3', 0, 0 };
+    medias[2].mid = mid_3;
     medias[2].ssrc = 0x20202020;
     media3_params[0] = .{ .payload_type = 96, .clock_rate = 90000, .mime_type = "video/h265" };
     media3_params[1] = .{ .payload_type = 105, .clock_rate = 90000, .mime_type = "video/rtx" };
@@ -119,29 +127,29 @@ test "update maps" {
     try demuxer.updateMaps(std.testing.io, &session);
 
     try std.testing.expectEqual(2, demuxer.ssrc_to_mid.count());
-    try std.testing.expectEqualStrings("1\x00\x00", &demuxer.ssrc_to_mid.get(0x10101010).?);
-    try std.testing.expectEqualStrings("3\x00\x00", &demuxer.ssrc_to_mid.get(0x20202020).?);
+    try std.testing.expectEqual(mid_1, demuxer.ssrc_to_mid.get(0x10101010).?);
+    try std.testing.expectEqual(mid_3, demuxer.ssrc_to_mid.get(0x20202020).?);
 
     try std.testing.expectEqual(5, demuxer.pt_to_mid.count());
     var entry = demuxer.pt_to_mid.get(97);
     try std.testing.expect(entry != null);
-    try std.testing.expectEqualStrings("1", std.mem.sliceTo(&entry.?, 0));
+    try std.testing.expectEqual(mid_1, entry.?);
 
     entry = demuxer.pt_to_mid.get(99);
     try std.testing.expect(entry != null);
-    try std.testing.expectEqualStrings("2", std.mem.sliceTo(&entry.?, 0));
+    try std.testing.expectEqual(mid_2, entry.?);
 
     entry = demuxer.pt_to_mid.get(100);
     try std.testing.expect(entry != null);
-    try std.testing.expectEqualStrings("2", std.mem.sliceTo(&entry.?, 0));
+    try std.testing.expectEqual(mid_2, entry.?);
 
     entry = demuxer.pt_to_mid.get(105);
     try std.testing.expect(entry != null);
-    try std.testing.expectEqualStrings("3", std.mem.sliceTo(&entry.?, 0));
+    try std.testing.expectEqual(mid_3, entry.?);
 
     entry = demuxer.pt_to_mid.get(106);
     try std.testing.expect(entry != null);
-    try std.testing.expectEqualStrings("3", std.mem.sliceTo(&entry.?, 0));
+    try std.testing.expectEqual(mid_3, entry.?);
 }
 
 test "getMid" {

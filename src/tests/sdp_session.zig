@@ -241,7 +241,7 @@ test "parse: sdp offer" {
     const audio_media = session.getMedias()[0];
     try testing.expectEqual(.audio, audio_media.kind);
     try testing.expectEqual(9, audio_media.port);
-    try testing.expectEqualStrings("0", audio_media.getMid());
+    try testing.expectEqual(0x30, audio_media.mid);
     try testing.expectEqual(.actpass, audio_media.setup);
     try testing.expectEqual(.sendrecv, audio_media.direction);
     try testing.expectEqualStrings("YBvMzurJIEpKGlbQ", audio_media.ice_ufrag);
@@ -290,7 +290,7 @@ test "parse: sdp offer" {
     const video_media = session.getMedias()[1];
     try testing.expectEqual(.video, video_media.kind);
     try testing.expectEqual(9, video_media.port);
-    try testing.expectEqualStrings("1", video_media.getMid());
+    try testing.expectEqual(0x31, video_media.mid);
     try testing.expectEqual(.actpass, audio_media.setup);
     try testing.expectEqual(.sendrecv, video_media.direction);
     try testing.expectEqualStrings("YBvMzurJIEpKGlbQ", video_media.ice_ufrag);
