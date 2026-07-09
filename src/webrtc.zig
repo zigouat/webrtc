@@ -611,7 +611,7 @@ pub const RtpTransceiver = struct {
     direction: Direction,
     current_direction: ?Direction = null,
     fired_direction: ?Direction = null,
-    mid: ?[]const u8 = null,
+    mid: ?u24 = null, // mid is 3 bytes at most
     sdp_mline_index: ?u8 = null,
     stopping: bool = false,
     stopped: bool = false,
@@ -637,7 +637,7 @@ pub const RtpTransceiver = struct {
             .kind = sdp_media.kind,
             .receiver = try .init(track, allocator),
             .sender = .init(null),
-            .mid = sdp_media.getMid(),
+            .mid = sdp_media.mid,
             .sdp_mline_index = index,
             .transport = undefined,
         };
@@ -662,7 +662,7 @@ pub const RtpTransceiver = struct {
         media.setIceCredentials(tr.transport.ice_agent.credentials);
 
         try tr.addSenderFields(allocator, &media);
-        if (tr.mid) |mid| @memcpy(media.mid[0..mid.len], mid);
+        if (tr.mid) |mid| media.mid = mid;
 
         return media;
     }
@@ -682,6 +682,7 @@ pub const RtpTransceiver = struct {
         answer.port = if (codecs.len == 0 or tr.isStopped()) 0 else 9;
         answer.rtcp_mux = true;
         answer.rtcp_rsize = false;
+        answer.mid = tr.mid.?;
         answer.setup = switch (media.setup) {
             .active => .passive,
             else => .active,
@@ -691,7 +692,6 @@ pub const RtpTransceiver = struct {
             try allocator.dupe(RtpCodecParameters, media.rtp_codec_parameters)
         else
             codecs;
-        @memcpy(answer.mid[0..tr.mid.?.len], tr.mid.?);
         if (answer.direction != .inactive) {
             answer.setIceCredentials(tr.transport.ice_agent.credentials);
         }

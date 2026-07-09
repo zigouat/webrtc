@@ -278,7 +278,7 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
 
     var idx: usize = 0;
     for (offer.session.getMedias()) |*media| {
-        const tr = pc.findTransceiverByMid(media.getMid()) orelse return error.Unexpected;
+        const tr = pc.findTransceiverByMid(media.mid) orelse return error.Unexpected;
         const new_media = sdp_session.medias.addOneAssumeCapacity();
         new_media.* = if (media.isRejected()) blk: {
             var cloned = try media.clone(pc.allocator);
@@ -417,8 +417,9 @@ fn createFirstOffer(pc: *PeerConnection) !webrtc.SessionDescription {
         if (tr.stopping and tr.mid == null) continue;
         const media = try medias.addOne(pc.allocator);
         media.* = .empty;
+
         media.* = try tr.toSdpMedia(pc.allocator);
-        _ = try std.fmt.bufPrint(&media.mid, "{}", .{mid});
+        media.mid = try intToMid(mid);
 
         tr.sdp_mline_index = @intCast(medias.items.len - 1);
         mid +%= 1;
@@ -472,7 +473,7 @@ fn createSubsequentOffer(pc: *PeerConnection) !webrtc.SessionDescription {
             break :blk media;
         };
         media.* = try tr.toSdpMedia(pc.allocator);
-        _ = try std.fmt.bufPrint(&media.mid, "{}", .{pc.mid});
+        media.mid = try intToMid(pc.mid);
         pc.mid +%= 1;
     };
 
@@ -493,6 +494,13 @@ fn createSubsequentOffer(pc: *PeerConnection) !webrtc.SessionDescription {
     };
 
     return pc.last_offer.toSessionDescription();
+}
+
+fn intToMid(mid: u16) !u24 {
+    if (mid > 999) return error.MidOverflow;
+    var bytes: [3]u8 = @splat(0);
+    _ = std.fmt.bufPrint(&bytes, "{}", .{mid}) catch unreachable;
+    return @bitCast(bytes);
 }
 
 fn checkNegotiationNeeded(pc: *PeerConnection) !void {
@@ -572,7 +580,7 @@ fn applyLocalOffer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescript
     const offer = pc.last_offer.session;
     for (offer.getMedias(), 0..) |*media, idx| {
         const transceiver = pc.findTransceiverByMediaIndex(idx).?;
-        transceiver.mid = media.getMid();
+        transceiver.mid = media.mid;
     }
 
     if (pc.dtls_transport.ice_agent.gathering_state == .new) {
@@ -596,7 +604,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
 
     var media_exists: bool = false;
     for (sdp_session.getMedias()) |*media| {
-        const tr = pc.findTransceiverByMid(media.getMid()).?;
+        const tr = pc.findTransceiverByMid(media.mid).?;
         if (media.port == 0) continue;
 
         media_exists = true;
@@ -652,7 +660,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
                     break :blk tr;
                 },
                 .offer => {
-                    if (pc.findTransceiverByMid(media.getMid())) |tr| break :blk tr;
+                    if (pc.findTransceiverByMid(media.mid)) |tr| break :blk tr;
                     {
                         pc.mutex.lockUncancelable(io);
                         defer pc.mutex.unlock(io);
@@ -674,7 +682,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
             }
         };
 
-        transceiver.mid = media.getMid();
+        transceiver.mid = media.mid;
         transceiver.sdp_mline_index = @intCast(idx);
 
         if (media.isRejected() or transceiver.isStopped()) {
@@ -773,11 +781,11 @@ fn findTransceiverByMediaIndex(pc: *PeerConnection, index: usize) ?*webrtc.RtpTr
     return null;
 }
 
-fn findTransceiverByMid(pc: *PeerConnection, mid: []const u8) ?*webrtc.RtpTransceiver {
+fn findTransceiverByMid(pc: *PeerConnection, mid: u24) ?*webrtc.RtpTransceiver {
     pc.mutex.lockUncancelable(pc.dtls_transport.getIo());
     defer pc.mutex.unlock(pc.dtls_transport.getIo());
     for (pc.transceivers.items) |tr| {
-        if (tr.mid) |tr_mid| if (std.mem.eql(u8, tr_mid, mid)) return tr;
+        if (tr.mid) |tr_mid| if (tr_mid == mid) return tr;
     }
 
     return null;

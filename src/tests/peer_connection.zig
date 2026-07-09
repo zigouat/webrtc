@@ -231,7 +231,7 @@ test "createOffer: m-lines created for each transceiver" {
     for (transceivers, medias, 0..) |tr, media, idx| {
         try testing.expectEqual(media.kind, tr.kind);
         try testing.expectEqual(idx, tr.sdp_mline_index.?);
-        try testing.expect(media.getMid().len != 0);
+        try testing.expect(media.mid != 0);
     }
 }
 
@@ -281,7 +281,7 @@ test "createOffer: multiple offers" {
     // Test media recycling
     try testing.expectEqual(2, sdp_session.getMedias().len);
     try testing.expect(sdp_session.getMedias()[1].port != 0);
-    try testing.expect(!std.mem.eql(u8, &old_mid, sdp_session.getMedias()[1].getMid()));
+    try testing.expect(old_mid != sdp_session.getMedias()[1].mid);
 }
 
 test "negotiation between peers" {
