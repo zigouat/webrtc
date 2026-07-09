@@ -167,18 +167,16 @@ pub const Session = struct {
                 const ret = m.mbedtls_ssl_read(&session.ssl, (&buffer).ptr, buffer.len);
                 if (ret > 0) {
                     // Received answer
-                } else {
-                    switch (ret) {
-                        m.MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY => {
-                            Logger.warn("Peer closed connection", .{});
-                            session.connection_state = .closed;
-                        },
-                        m.MBEDTLS_ERR_SSL_WANT_READ, m.MBEDTLS_ERR_SSL_WANT_WRITE => {},
-                        else => |err_code| {
-                            m.mbedtls_strerror(err_code, buffer[0..].ptr, buffer.len);
-                            Logger.err("Error: {s}", .{buffer});
-                        },
-                    }
+                } else switch (ret) {
+                    m.MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY => {
+                        Logger.warn("Peer closed connection", .{});
+                        session.connection_state = .closed;
+                    },
+                    m.MBEDTLS_ERR_SSL_WANT_READ, m.MBEDTLS_ERR_SSL_WANT_WRITE => {},
+                    else => |err_code| {
+                        m.mbedtls_strerror(err_code, buffer[0..].ptr, buffer.len);
+                        Logger.err("Error: {s}", .{buffer});
+                    },
                 }
             },
             else => return error.InvalidState,

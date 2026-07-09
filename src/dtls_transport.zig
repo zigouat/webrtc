@@ -30,6 +30,7 @@ session: dtls.Session,
 in_srtp_session: ?srtp.Session = null,
 out_srtp_session: ?srtp.Session = null,
 timer: Timer = .empty,
+mutex: std.Io.Mutex = .init,
 
 pub const Event = union(enum) {
     ice_connection_state: ice.ConnectionState,
@@ -124,7 +125,11 @@ pub fn poll(transport: *DtlsTransport) !Event {
     while (transport.ice_agent.poll()) |ice_event| switch (ice_event) {
         .candidate => |candidate| return .{ .ice_candidate = candidate },
         .connection_state => |ice_connection_state| {
-            if (ice_connection_state == .connected) transport.session.handleData(null) catch {};
+            if (ice_connection_state == .connected) {
+                try transport.mutex.lock(transport.getIo());
+                defer transport.mutex.unlock(transport.getIo());
+                transport.session.handleData(null) catch {};
+            }
             return .{ .ice_connection_state = ice_connection_state };
         },
         .data => |ice_data| {
@@ -212,13 +217,22 @@ fn handleIntTimeout(transport: *DtlsTransport, time_ms: u32) !void {
 }
 
 fn handleFinTimeout(transport: *DtlsTransport, time_ms: u32) !void {
-    try transport.getIo().sleep(.fromMilliseconds(time_ms), .awake);
+    const io = transport.getIo();
+    try io.sleep(.fromMilliseconds(time_ms), .awake);
+
+    try transport.mutex.lock(io);
+    defer transport.mutex.unlock(io);
     transport.timer.final_timer_expired = true;
     transport.session.handleData(null) catch return;
 }
 
 fn handleDtlsData(transport: *DtlsTransport, data: []const u8) !void {
+    try transport.mutex.lock(transport.getIo());
+    defer transport.mutex.unlock(transport.getIo());
+
     try transport.session.handleData(data);
+    // TODO: don't set connection state of dtls until we create the whole srtp session.
+    // Otherwise, we might start receiving RTP/RTCP packets before we have the srtp session ready.
     if (transport.in_srtp_session == null) {
         const srtp_profile = try transport.session.exportSrtpKeyingMaterial();
         const profile = switch (srtp_profile.profile) {

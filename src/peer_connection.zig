@@ -53,6 +53,7 @@ mid: u16 = 0,
 queue_buffer: []Event,
 queue: Io.Queue(Event),
 group: std.Io.Group = .init,
+mutex: std.Io.Mutex = .init,
 
 pub const Config = struct {
     inner_queue_size: u8 = 5,
@@ -134,6 +135,8 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: 
     try pc.checkNotClosed();
 
     const maybe_transceiver = blk: {
+        pc.mutex.lockUncancelable(pc.dtls_transport.getIo());
+        defer pc.mutex.unlock(pc.dtls_transport.getIo());
         for (pc.transceivers.items) |tr| if (tr.canAssociateTrack(track.kind)) {
             tr.setSenderTrack(track);
             break :blk tr;
@@ -154,7 +157,7 @@ pub fn removeTrack(pc: *PeerConnection, sender: *webrtc.RtpSender) !void {
     try pc.checkNegotiationNeeded();
 }
 
-pub inline fn getTransceivers(pc: *const PeerConnection) []*webrtc.RtpTransceiver {
+pub fn getTransceivers(pc: *const PeerConnection) []*webrtc.RtpTransceiver {
     return pc.transceivers.items;
 }
 
@@ -198,7 +201,7 @@ pub fn addTransceiverFromKind(
     }
     tr.sender.ssrc = try generateSsrc(io, &pc.demuxer);
     try pc.checkNegotiationNeeded();
-    try pc.transceivers.append(pc.allocator, tr);
+    try pc.appendTransceiver(tr);
     return tr;
 }
 
@@ -234,7 +237,8 @@ fn initTransceiverFromTrack(
         tr.sender.setStream(stream);
     }
     tr.sender.ssrc = try generateSsrc(pc.dtls_transport.getIo(), &pc.demuxer);
-    try pc.transceivers.append(pc.allocator, tr);
+
+    try pc.appendTransceiver(tr);
     return tr;
 }
 
@@ -610,11 +614,11 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
         try pc.dtls_transport.gatherCandidates(pc.last_answer.getIceRole());
     }
 
-    try pc.demuxer.updateMaps(&sdp_session);
+    try pc.demuxer.updateMaps(pc.dtls_transport.getIo(), &sdp_session);
 
     pc.pending_local_description = pc.last_answer;
     try pc.updateSignalingStateToStable();
-    pc.removeTransceivers();
+    // pc.removeTransceivers();
     try pc.startSenderReports(renegotiation);
 }
 
@@ -649,7 +653,11 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
                 },
                 .offer => {
                     if (pc.findTransceiverByMid(media.getMid())) |tr| break :blk tr;
-                    for (pc.transceivers.items) |tr| if (tr.canAssociateMedia(media)) break :blk tr;
+                    {
+                        pc.mutex.lockUncancelable(io);
+                        defer pc.mutex.unlock(io);
+                        for (pc.transceivers.items) |tr| if (tr.canAssociateMedia(media)) break :blk tr;
+                    }
 
                     const tr = try webrtc.RtpTransceiver.initFromSdpMedia(
                         pc.allocator,
@@ -659,7 +667,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
                     );
                     errdefer tr.deinit(io, pc.allocator);
                     tr.transport = &pc.dtls_transport;
-                    try pc.transceivers.append(pc.allocator, tr);
+                    try pc.appendTransceiver(tr);
                     break :blk tr;
                 },
                 else => unreachable,
@@ -705,14 +713,14 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
 
     switch (session_desc.type) {
         .answer => {
-            try pc.demuxer.updateMaps(&remote_sdp);
+            try pc.demuxer.updateMaps(pc.dtls_transport.getIo(), &remote_sdp);
             pc.pending_remote_description = .{
                 .desc_type = .answer,
                 .sdp = sdp_text,
                 .session = remote_sdp,
             };
             try pc.updateSignalingStateToStable();
-            pc.removeTransceivers();
+            // pc.removeTransceivers();
             try pc.startSenderReports(renegotiation);
         },
         .offer => {
@@ -728,6 +736,13 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     }
 
     for (track_events.items) |event| try pc.queue.putOne(io, .{ .track_event_init = event });
+}
+
+fn appendTransceiver(pc: *PeerConnection, tr: *webrtc.RtpTransceiver) !void {
+    const io = pc.dtls_transport.getIo();
+    pc.mutex.lockUncancelable(io);
+    defer pc.mutex.unlock(io);
+    try pc.transceivers.append(pc.allocator, tr);
 }
 
 fn updateSignalingStateToStable(pc: *PeerConnection) !void {
@@ -752,11 +767,15 @@ fn updateSignalingStateToStable(pc: *PeerConnection) !void {
 }
 
 fn findTransceiverByMediaIndex(pc: *PeerConnection, index: usize) ?*webrtc.RtpTransceiver {
+    pc.mutex.lockUncancelable(pc.dtls_transport.getIo());
+    defer pc.mutex.unlock(pc.dtls_transport.getIo());
     for (pc.transceivers.items) |tr| if (tr.sdp_mline_index) |tr_index| if (tr_index == index) return tr;
     return null;
 }
 
 fn findTransceiverByMid(pc: *PeerConnection, mid: []const u8) ?*webrtc.RtpTransceiver {
+    pc.mutex.lockUncancelable(pc.dtls_transport.getIo());
+    defer pc.mutex.unlock(pc.dtls_transport.getIo());
     for (pc.transceivers.items) |tr| {
         if (tr.mid) |tr_mid| if (std.mem.eql(u8, tr_mid, mid)) return tr;
     }
@@ -792,7 +811,7 @@ fn pollTransport(pc: *PeerConnection) !void {
         .rtp => |data| {
             errdefer pc.dtls_transport.ice_agent.destroyPacket(data);
             const packet = try rtp.Packet.parse(data);
-            if (try pc.demuxer.getMid(&packet)) |mid| if (pc.findTransceiverByMid(mid)) |tr| {
+            if (try pc.demuxer.getMid(io, &packet)) |mid| if (pc.findTransceiverByMid(mid)) |tr| {
                 try tr.receiver.handleRtpPacket(io, packet);
             };
         },
@@ -818,6 +837,9 @@ fn removeTransceivers(pc: *PeerConnection) void {
     if (pc.local_description == null or pc.remote_description == null) return;
     const local = pc.local_description.?.session;
     const remote = pc.remote_description.?.session;
+
+    pc.mutex.lockUncancelable(pc.dtls_transport.getIo());
+    defer pc.mutex.unlock(pc.dtls_transport.getIo());
 
     var idx: usize = 0;
     while (idx < pc.transceivers.items.len) {
@@ -861,9 +883,9 @@ fn doSendReports(pc: *PeerConnection) !void {
         defer pc.dtls_transport.ice_agent.destroyPacket(buffer);
         const timestamp = Io.Timestamp.now(io, .real).toMicroseconds();
 
-        var idx: usize = 0;
-        while (idx < pc.transceivers.items.len) : (idx += 1) {
-            const tr = pc.transceivers.items[idx];
+        try pc.mutex.lock(io);
+        defer pc.mutex.unlock(io);
+        for (pc.getTransceivers()) |tr| {
             if (tr.isStopped() or tr.direction == .inactive) continue;
 
             // Logger.debug("send rtcp report for transceiver: {?s}", .{tr.mid});
@@ -874,13 +896,12 @@ fn doSendReports(pc: *PeerConnection) !void {
     }
 }
 
-fn generateSsrc(io: Io, demuxer: *const Demuxer) !u32 {
+fn generateSsrc(io: Io, demuxer: *Demuxer) !u32 {
     var max_retries: usize = 100;
-    var buf: [4]u8 = @splat(0);
+    var ssrc: u32 = 0;
     while (max_retries > 0) : (max_retries -= 1) {
-        io.random(&buf);
-        const ssrc = std.mem.readInt(u32, &buf, .big);
-        if (!demuxer.ssrc_to_mid.contains(ssrc)) return ssrc;
+        io.random(std.mem.asBytes(&ssrc));
+        if (!demuxer.containsSsrc(io, ssrc)) return ssrc;
     }
 
     return error.SsrcUnavailable;

@@ -7,6 +7,7 @@ const Demuxer = @This();
 ssrc_to_mid: std.AutoHashMap(u32, [3]u8),
 pt_to_mid: std.AutoHashMap(u8, [3]u8),
 mid_id: ?u16 = null,
+mutex: std.Io.Mutex = .init,
 
 pub fn init(allocator: std.mem.Allocator) Demuxer {
     return .{
@@ -20,7 +21,10 @@ pub fn deinit(demuxer: *Demuxer) void {
     demuxer.ssrc_to_mid.deinit();
 }
 
-pub fn updateMaps(demuxer: *Demuxer, sdp_session: *const SDPSession) !void {
+pub fn updateMaps(demuxer: *Demuxer, io: std.Io, sdp_session: *const SDPSession) !void {
+    try demuxer.mutex.lock(io);
+    defer demuxer.mutex.unlock(io);
+
     for (sdp_session.getMedias()) |*media| {
         if (media.ssrc) |ssrc| {
             try demuxer.ssrc_to_mid.put(ssrc, media.mid);
@@ -35,8 +39,14 @@ pub fn updateMaps(demuxer: *Demuxer, sdp_session: *const SDPSession) !void {
     }
 }
 
-pub fn getMid(demuxer: *Demuxer, packet: *const rtp.Packet) !?[]const u8 {
-    if (demuxer.ssrc_to_mid.getPtr(packet.header.ssrc)) |mid| return std.mem.sliceTo(mid, 0);
+pub fn getMid(demuxer: *Demuxer, io: std.Io, packet: *const rtp.Packet) !?[]const u8 {
+    try demuxer.mutex.lock(io);
+    defer demuxer.mutex.unlock(io);
+
+    if (demuxer.ssrc_to_mid.getPtr(packet.header.ssrc)) |mid| {
+        @branchHint(.likely);
+        return std.mem.sliceTo(mid, 0);
+    }
 
     if (demuxer.mid_id != null) if (getMidFromPacket(packet, demuxer.mid_id.?) catch return null) |mid| {
         var ssrc_mid: [3]u8 = @splat(0);
@@ -46,6 +56,13 @@ pub fn getMid(demuxer: *Demuxer, packet: *const rtp.Packet) !?[]const u8 {
     };
 
     return if (demuxer.pt_to_mid.getPtr(packet.header.payload_type)) |value| std.mem.sliceTo(value, 0) else null;
+}
+
+pub fn containsSsrc(demuxer: *Demuxer, io: std.Io, ssrc: u32) bool {
+    demuxer.mutex.lockUncancelable(io);
+    defer demuxer.mutex.unlock(io);
+
+    return demuxer.ssrc_to_mid.contains(ssrc);
 }
 
 fn getMidFromPacket(packet: *const rtp.Packet, mid_id: u16) !?[]const u8 {
@@ -99,7 +116,7 @@ test "update maps" {
     var session = try testSdpSession(std.testing.allocator);
     defer session.deinit(std.testing.allocator);
 
-    try demuxer.updateMaps(&session);
+    try demuxer.updateMaps(std.testing.io, &session);
 
     try std.testing.expectEqual(2, demuxer.ssrc_to_mid.count());
     try std.testing.expectEqualStrings("1\x00\x00", &demuxer.ssrc_to_mid.get(0x10101010).?);
@@ -128,13 +145,15 @@ test "update maps" {
 }
 
 test "getMid" {
+    const io = std.testing.io;
+
     var demuxer = init(std.testing.allocator);
     defer demuxer.deinit();
 
     var session = try testSdpSession(std.testing.allocator);
     defer session.deinit(std.testing.allocator);
 
-    try demuxer.updateMaps(&session);
+    try demuxer.updateMaps(io, &session);
 
     var packet: rtp.Packet = .{
         .header = .{
@@ -148,13 +167,13 @@ test "getMid" {
         },
         .payload = &.{},
     };
-    const mid = try demuxer.getMid(&packet);
+    const mid = try demuxer.getMid(io, &packet);
     try std.testing.expect(mid != null);
 
     packet.header.payload_type = 96;
-    try std.testing.expect(try demuxer.getMid(&packet) == null);
+    try std.testing.expect(try demuxer.getMid(io, &packet) == null);
 
     packet.header.ssrc = 0x10101010;
     packet.header.payload_type = 10;
-    try std.testing.expect(try demuxer.getMid(&packet) != null);
+    try std.testing.expect(try demuxer.getMid(io, &packet) != null);
 }
