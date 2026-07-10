@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const m = @import("c.zig").mtls;
 
 const P256 = std.crypto.ecc.P256;
@@ -49,7 +50,6 @@ pub const Session = struct {
     io: std.Io,
     connection_state: ConnectionState,
     key: m.mbedtls_pk_context,
-    entropy: m.mbedtls_entropy_context,
     ssl: m.mbedtls_ssl_context,
     ssl_conf: m.mbedtls_ssl_config,
     crt: m.mbedtls_x509_crt,
@@ -63,6 +63,19 @@ pub const Session = struct {
     on_set_timer: *const fn (*Session, u32, u32) void,
     on_get_timer_state: *const fn (*Session) i32,
 
+    pub const HandshakeError = error{
+        /// The handshake is not complete yet, more data is needed.
+        WantData,
+        /// The handshake failed due to an error.
+        Timeout,
+        /// The handshake failed due to a certificate error.
+        X509Error,
+        /// The handshake failed due to an unknown error.
+        HandshakeFailed,
+    };
+
+    pub const HandleDataError = error{InvalidState} || HandshakeError;
+
     const SessionKeys = struct {
         tls_profile: u32,
         master_secret: []const u8,
@@ -74,7 +87,7 @@ pub const Session = struct {
         on_send_data: *const fn (*Session, []const u8) i32,
         on_set_timer: *const fn (*Session, u32, u32) void,
         on_get_timer_state: *const fn (*Session) i32,
-        debug_level: u8 = 1,
+        debug_level: u8 = 0,
     };
 
     pub fn init(io: std.Io, config: Config) !Session {
@@ -91,7 +104,6 @@ pub const Session = struct {
         session.peer_fingerprint = @splat(0);
 
         m.mbedtls_pk_init(&session.key);
-        m.mbedtls_entropy_init(&session.entropy);
         m.mbedtls_ssl_init(&session.ssl);
         m.mbedtls_ssl_config_init(&session.ssl_conf);
         m.mbedtls_x509_crt_init(&session.crt);
@@ -123,7 +135,8 @@ pub const Session = struct {
             m.MBEDTLS_SSL_PRESET_DEFAULT,
         ) != 0) return error.SetConfigFailed;
 
-        m.mbedtls_ssl_conf_authmode(&session.ssl_conf, m.MBEDTLS_SSL_VERIFY_NONE);
+        _ = m.mbedtls_ssl_set_hostname(&session.ssl, null);
+        m.mbedtls_ssl_conf_authmode(&session.ssl_conf, m.MBEDTLS_SSL_VERIFY_OPTIONAL);
         m.mbedtls_ssl_conf_dbg(&session.ssl_conf, logDebugMessages, null);
         m.mbedtls_ssl_conf_verify(&session.ssl_conf, verifyCertificateFingerprint, session);
         m.mbedtls_ssl_set_export_keys_cb(&session.ssl, exportSessionKeyDerivation, session);
@@ -139,7 +152,6 @@ pub const Session = struct {
 
     pub fn deinit(session: *Session) void {
         m.mbedtls_pk_free(&session.key);
-        m.mbedtls_entropy_free(&session.entropy);
         m.mbedtls_ssl_free(&session.ssl);
         m.mbedtls_ssl_config_free(&session.ssl_conf);
         m.mbedtls_x509_crt_free(&session.crt);
@@ -149,7 +161,7 @@ pub const Session = struct {
         @memcpy(&session.peer_fingerprint, fingerprint);
     }
 
-    pub fn handleData(session: *Session, data: ?[]const u8) !void {
+    pub fn handleData(session: *Session, data: ?[]const u8) HandleDataError!void {
         switch (session.connection_state) {
             .new => {
                 session.connection_state = .connecting;
@@ -183,7 +195,7 @@ pub const Session = struct {
         }
     }
 
-    pub fn handleTimeout(session: *Session) !void {
+    pub fn handleTimeout(session: *Session) HandshakeError!void {
         try session.handshake();
     }
 
@@ -238,6 +250,7 @@ pub const Session = struct {
 
     pub fn close(session: *Session) void {
         _ = m.mbedtls_ssl_close_notify(&session.ssl);
+        session.connection_state = .closed;
     }
 
     fn createCertificate(session: *Session, io: std.Io) !void {
@@ -274,17 +287,25 @@ pub const Session = struct {
         try checkError(ret);
     }
 
-    fn handshake(session: *Session) !void {
+    fn handshake(session: *Session) HandshakeError!void {
         const result = switch (m.mbedtls_ssl_handshake(&session.ssl)) {
             0 => session.connection_state = .connected,
             m.MBEDTLS_ERR_SSL_WANT_READ, m.MBEDTLS_ERR_SSL_WANT_WRITE => error.WantData,
             else => |err_code| {
                 var error_buffer: [1024]u8 = undefined;
                 m.mbedtls_strerror(err_code, error_buffer[0..].ptr, error_buffer.len);
-                Logger.err("Handshake failed: {s}", .{error_buffer});
+                if (builtin.is_test) {
+                    Logger.debug("Handshake failed: {s}", .{error_buffer});
+                } else {
+                    Logger.err("Handshake failed: {s}", .{error_buffer});
+                }
 
                 session.connection_state = .failed;
-                return if (err_code == m.MBEDTLS_ERR_SSL_TIMEOUT) error.Timeout else error.HandshakeFailed;
+                return switch (err_code) {
+                    m.MBEDTLS_ERR_SSL_TIMEOUT => error.Timeout,
+                    m.MBEDTLS_ERR_X509_FATAL_ERROR => error.X509Error,
+                    else => error.HandshakeFailed,
+                };
             },
         };
 
@@ -374,6 +395,7 @@ pub const Session = struct {
         const message = std.mem.sliceTo(str, 0);
         var file_path = std.mem.sliceTo(file, 0);
         file_path = if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |idx| file_path[idx + 1 ..] else file_path;
+
         switch (level) {
             1 => Logger.err("file={s} {s}", .{ file_path, message[0 .. message.len - 1] }),
             else => Logger.debug("file={s} {s}", .{ file_path, message[0 .. message.len - 1] }),
@@ -389,3 +411,212 @@ pub const Session = struct {
         }
     }
 };
+
+const testing = std.testing;
+const WriteEvent = struct { *Session, []const u8 };
+const EventQueue = std.Io.Queue(WriteEvent);
+
+const WrappedSession = struct {
+    io: std.Io,
+    session: Session,
+    queue: *EventQueue,
+
+    fn init(io: std.Io, queue: *EventQueue) !WrappedSession {
+        var key_pair = try P256KeyPair.init(io);
+        var buffer: [4096]u8 = @splat(0);
+        const der_key = try P256KeyPair.toDer(&key_pair, &buffer);
+
+        const session = try Session.init(io, .{
+            .key_pair = der_key,
+            .on_get_timer_state = getTimerState,
+            .on_send_data = sendData,
+            .on_set_timer = setTimer,
+        });
+
+        return .{ .io = io, .session = session, .queue = queue };
+    }
+
+    fn deinit(self: *WrappedSession) void {
+        self.session.deinit();
+    }
+
+    fn getTimerState(session: *Session) i32 {
+        _ = session;
+        return 0;
+    }
+
+    fn sendData(session: *Session, data: []const u8) i32 {
+        const wrapped_session: *WrappedSession = @alignCast(@fieldParentPtr("session", session));
+        wrapped_session.queue.putOneUncancelable(wrapped_session.io, .{ session, data }) catch @panic("Failed");
+        return @intCast(data.len);
+    }
+
+    fn setTimer(session: *Session, int_ms: u32, fin_ms: u32) void {
+        _ = session;
+        _ = int_ms;
+        _ = fin_ms;
+    }
+};
+
+fn createPeers(peer1: *WrappedSession, peer2: *WrappedSession, queue: *EventQueue) !void {
+    peer1.* = try WrappedSession.init(testing.io, queue);
+    peer2.* = try WrappedSession.init(testing.io, queue);
+
+    try peer1.session.setRole(true);
+    try peer2.session.setRole(false);
+
+    var fingerprint: [32]u8 = @splat(0);
+    peer1.session.getFingerprint(&fingerprint);
+    peer2.session.setPeerFingerprint(&fingerprint);
+
+    peer2.session.getFingerprint(&fingerprint);
+    peer1.session.setPeerFingerprint(&fingerprint);
+}
+
+fn handleHandshake(peer1: *WrappedSession, peer2: *WrappedSession, queue: *EventQueue) !void {
+    const resp = peer2.session.handleData(null);
+    try testing.expectError(error.WantData, resp);
+
+    while (queue.getOne(testing.io)) |write_event| {
+        const session, const data = write_event;
+        if (session == &peer1.session) {
+            peer2.session.handleData(data) catch |err| switch (err) {
+                error.WantData => continue,
+                else => return err,
+            };
+        } else if (session == &peer2.session) {
+            peer1.session.handleData(data) catch |err| switch (err) {
+                error.WantData => continue,
+                else => return err,
+            };
+        }
+
+        if (peer1.session.connection_state == .connected and peer2.session.connection_state == .connected) {
+            break;
+        }
+    } else |err| return err;
+}
+
+test "dtls session: handshake" {
+    var buffer: [1]WriteEvent = undefined;
+    var queue = std.Io.Queue(WriteEvent).init(&buffer);
+    defer queue.close(testing.io);
+
+    var peer1: WrappedSession = undefined;
+    var peer2: WrappedSession = undefined;
+    try createPeers(&peer1, &peer2, &queue);
+    defer peer1.deinit();
+    defer peer2.deinit();
+
+    const resp = peer2.session.handleData(null);
+    try testing.expectError(error.WantData, resp);
+
+    while (queue.getOne(testing.io)) |write_event| {
+        const session, const data = write_event;
+        if (session == &peer1.session) {
+            peer2.session.handleData(data) catch |err| switch (err) {
+                error.WantData => continue,
+                else => return err,
+            };
+            try testing.expect(peer2.session.connection_state == .connected);
+        } else if (session == &peer2.session) {
+            peer1.session.handleData(data) catch |err| switch (err) {
+                error.WantData => continue,
+                else => return err,
+            };
+            try testing.expect(peer1.session.connection_state == .connected);
+        }
+
+        if (peer1.session.connection_state == .connected and peer2.session.connection_state == .connected) {
+            break;
+        }
+    } else |err| return err;
+}
+
+test "dtls session: handshake failed (wrong fingerprint)" {
+    var buffer: [1]WriteEvent = undefined;
+    var queue = std.Io.Queue(WriteEvent).init(&buffer);
+    defer queue.close(testing.io);
+
+    var peer1: WrappedSession = undefined;
+    var peer2: WrappedSession = undefined;
+    try createPeers(&peer1, &peer2, &queue);
+    defer peer1.deinit();
+    defer peer2.deinit();
+
+    var fingerprint: [32]u8 = @splat(0);
+    testing.io.random(&fingerprint);
+    peer1.session.setPeerFingerprint(&fingerprint);
+
+    var resp = peer2.session.handleData(null);
+    try testing.expectError(error.WantData, resp);
+
+    while (queue.getOne(testing.io)) |write_event| {
+        const session, const data = write_event;
+        if (session == &peer1.session) {
+            resp = peer2.session.handleData(data);
+            if (resp == error.WantData) continue;
+
+            try testing.expectError(error.X509Error, resp);
+            try testing.expect(peer2.session.connection_state == .failed);
+        } else if (session == &peer2.session) {
+            resp = peer1.session.handleData(data);
+            if (resp == error.WantData) continue;
+
+            try testing.expectError(error.X509Error, resp);
+            try testing.expect(peer1.session.connection_state == .failed);
+        }
+
+        break;
+    } else |err| return err;
+}
+
+test "dtls session: export srtp keying material" {
+    var buffer: [1]WriteEvent = undefined;
+    var queue = std.Io.Queue(WriteEvent).init(&buffer);
+    defer queue.close(testing.io);
+
+    var peer1: WrappedSession = undefined;
+    var peer2: WrappedSession = undefined;
+    try createPeers(&peer1, &peer2, &queue);
+    defer peer1.deinit();
+    defer peer2.deinit();
+
+    try handleHandshake(&peer1, &peer2, &queue);
+
+    const peer1_keying_material = try peer1.session.exportSrtpKeyingMaterial();
+    const peer2_keying_material = try peer2.session.exportSrtpKeyingMaterial();
+
+    try testing.expect(peer1_keying_material.profile == peer2_keying_material.profile);
+    try testing.expectEqualSlices(
+        u8,
+        &peer1_keying_material.local_keying_material,
+        &peer2_keying_material.remote_keying_material,
+    );
+    try testing.expectEqualSlices(
+        u8,
+        &peer1_keying_material.remote_keying_material,
+        &peer2_keying_material.local_keying_material,
+    );
+}
+
+test "dtls session: close connection" {
+    var buffer: [1]WriteEvent = undefined;
+    var queue = std.Io.Queue(WriteEvent).init(&buffer);
+    defer queue.close(testing.io);
+
+    var peer1: WrappedSession = undefined;
+    var peer2: WrappedSession = undefined;
+    try createPeers(&peer1, &peer2, &queue);
+    defer peer1.deinit();
+    defer peer2.deinit();
+
+    try handleHandshake(&peer1, &peer2, &queue);
+
+    peer1.session.close();
+    try testing.expect(peer1.session.connection_state == .closed);
+
+    const event = try queue.getOne(testing.io);
+    try peer2.session.handleData(event.@"1");
+    try testing.expect(peer2.session.connection_state == .closed);
+}

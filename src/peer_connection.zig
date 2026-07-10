@@ -918,6 +918,7 @@ fn generateSsrc(io: Io, demuxer: *Demuxer) !u32 {
 test {
     _ = @import("tests/peer_connection.zig");
     _ = @import("pc/demuxer.zig");
+    _ = @import("dtls/dtls.zig");
 }
 
 test "nextPeerConnectionState" {
