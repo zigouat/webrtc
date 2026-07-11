@@ -603,7 +603,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
 
         media_exists = true;
 
-        tr.sender.codecs = media.rtp_codec_parameters;
+        tr.sender.setCodecs(pc.dtls_transport.getIo(), media.rtp_codec_parameters);
         tr.receiver.codecs = media.rtp_codec_parameters;
         // TODO: track removal
         tr.current_direction = media.direction;
@@ -699,7 +699,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
             const remote_codecs = media.rtp_codec_parameters;
             const codecs = try utils.intersectCodecs(remote_codecs, local_codecs);
 
-            transceiver.sender.codecs = codecs.@"0";
+            transceiver.sender.setCodecs(io, codecs.@"0");
             transceiver.receiver.codecs = codecs.@"1";
         }
 

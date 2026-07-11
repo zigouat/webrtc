@@ -4,6 +4,10 @@
     .fingerprint = 0xaf856b418fb19f23,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
+        .media = .{
+            .url = "git+https://github.com/zigouat/media.git#d3cdb8229f45484365796982c923e176a3f72670",
+            .hash = "media-0.1.0-qc-dCI_6AADJliB0X1WVXfGbO7z5MWti4-BxqJZoEYur",
+        },
         .protocols = .{
             .url = "git+https://github.com/zigouat/media-protocols.git#b5d842ae965615a436f58a94eace0f28c2bf9ab3",
             .hash = "protocols-0.0.0-nNJdj4KuBABEcyRvIOCIEEKkaWoRIgJ8e39r4k06qbc3",
