@@ -89,7 +89,6 @@ fn sendBackRtp(io: Io, receiver: *webrtc.RtpReceiver, sender: *webrtc.RtpSender)
     while (receiver.poll(io)) |event| switch (event) {
         .rtp => |*rtp| {
             defer receiver.deinitEvent(&event);
-            // defer pc.destroyPacket(rtp);
             sender.sendRtp(rtp) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 else => |e| std.log.err("Error while polling rtp: {}", .{e}),
