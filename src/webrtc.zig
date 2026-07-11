@@ -37,6 +37,7 @@ pub const default_video_codecs = &[_]RtpCodecParameters{
     },
 };
 
+/// Default audio codecs used for sending and receiving audio tracks.
 pub const default_audio_codecs = &[_]RtpCodecParameters{
     .{
         .payload_type = 111,
