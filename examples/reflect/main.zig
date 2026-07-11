@@ -15,6 +15,7 @@ pub fn main(init: std.process.Init) !void {
     defer pc.deinit();
 
     const sender = try pc.addTrack(.initWithId("video", .video), "my-stream");
+    const audio_sender = try pc.addTrack(.initWithId("audio", .audio), "my-stream");
 
     const offer = try readOfferFromStdin(io, init.gpa);
     defer init.gpa.free(offer);
@@ -35,7 +36,11 @@ pub fn main(init: std.process.Init) !void {
         },
         .track_event_init => |track_event| {
             std.log.info("New remote track({s}): {s}", .{ @tagName(track_event.track.kind), track_event.track.id });
-            try grp.concurrent(io, sendBackRtp, .{ io, &pc, track_event.receiver, sender });
+            const s = switch (track_event.track.kind) {
+                .video => sender,
+                .audio => audio_sender,
+            };
+            try grp.concurrent(io, sendBackRtp, .{ io, track_event.receiver, s });
         },
         else => {},
     } else |_| {}
@@ -80,10 +85,11 @@ fn writeAnswerToStdout(io: Io, allocator: std.mem.Allocator, pc: *webrtc.PeerCon
     try stdout.interface.writeAll("\n");
 }
 
-fn sendBackRtp(io: Io, pc: *webrtc.PeerConnection, receiver: *webrtc.RtpReceiver, sender: *webrtc.RtpSender) !void {
+fn sendBackRtp(io: Io, receiver: *webrtc.RtpReceiver, sender: *webrtc.RtpSender) !void {
     while (receiver.poll(io)) |event| switch (event) {
         .rtp => |*rtp| {
-            defer pc.destroyPacket(rtp);
+            defer receiver.deinitEvent(&event);
+            // defer pc.destroyPacket(rtp);
             sender.sendRtp(rtp) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 else => |e| std.log.err("Error while polling rtp: {}", .{e}),

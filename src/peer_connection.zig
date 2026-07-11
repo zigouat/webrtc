@@ -386,12 +386,6 @@ pub fn poll(pc: *PeerConnection) !Event {
     } else |err| return err;
 }
 
-pub fn destroyPacket(pc: *PeerConnection, rtp_packet: *const rtp.Packet) void {
-    const header_size: u8 = @intCast(rtp_packet.size() - rtp_packet.payload.len);
-    const beg = rtp_packet.payload.ptr - header_size;
-    pc.dtls_transport.ice_agent.destroyPacket(beg[0..1]);
-}
-
 pub fn close(pc: *PeerConnection) void {
     pc.dtls_transport.close();
 }

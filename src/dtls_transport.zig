@@ -223,7 +223,10 @@ fn handleFinTimeout(transport: *DtlsTransport, time_ms: u32) !void {
     try transport.mutex.lock(io);
     defer transport.mutex.unlock(io);
     transport.timer.final_timer_expired = true;
-    transport.session.handleData(null) catch return;
+    transport.session.handleData(null) catch |err| switch (err) {
+        error.WantData => {},
+        else => |e| Logger.err("Error occurred while handling dtls message: {}", .{e}),
+    };
 }
 
 fn handleDtlsData(transport: *DtlsTransport, data: []const u8) !void {
