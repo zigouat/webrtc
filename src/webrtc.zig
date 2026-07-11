@@ -17,7 +17,7 @@ const ntp_unix_epoch_diff = 2_208_988_800;
 /// Default video codecs used for sending and receiving video tracks.
 ///
 /// This can be overridden by the user to only include the codecs they want to support.
-pub var default_video_codecs: []const RtpCodecParameters = &[_]RtpCodecParameters{
+pub const default_video_codecs = &[_]RtpCodecParameters{
     .{
         .payload_type = 96,
         .mime_type = MimeType.VP8,
@@ -34,6 +34,16 @@ pub var default_video_codecs: []const RtpCodecParameters = &[_]RtpCodecParameter
                 .packetization_mode = 1,
             },
         },
+    },
+};
+
+/// Default audio codecs used for sending and receiving audio tracks.
+pub const default_audio_codecs = &[_]RtpCodecParameters{
+    .{
+        .payload_type = 111,
+        .mime_type = MimeType.Opus,
+        .clock_rate = 48_000,
+        .channels = 2,
     },
 };
 
@@ -154,7 +164,9 @@ pub const RtpCodecParameters = struct {
         if (!std.ascii.eqlIgnoreCase(a.mime_type, b.mime_type) or
             a.clock_rate != b.clock_rate or
             a.channels != b.channels) return false;
-        if (std.ascii.eqlIgnoreCase(a.mime_type, MimeType.VP8)) return true;
+        if (std.ascii.eqlIgnoreCase(a.mime_type, MimeType.VP8) or
+            std.ascii.eqlIgnoreCase(a.mime_type, MimeType.Opus)) return true;
+
         if (a.fmtp_params != null and b.fmtp_params == null or a.fmtp_params == null and b.fmtp_params != null) return false;
         if (a.fmtp_params) |a_fmtp| if (b.fmtp_params) |*b_fmtp| return a_fmtp.eql(b_fmtp);
         return true;
@@ -542,11 +554,23 @@ pub const RtpReceiver = struct {
         @compileError("Not implemented");
     }
 
-    pub inline fn poll(receiver: *RtpReceiver, io: Io) !TrackEvent {
+    pub fn poll(receiver: *RtpReceiver, io: Io) !TrackEvent {
         return receiver.queue.getOne(io);
     }
 
-    pub inline fn handleRtpPacket(receiver: *RtpReceiver, io: Io, packet: rtp.Packet) !void {
+    /// Deinitializes the event and frees any resources associated with it.
+    pub fn deinitEvent(reciever: *RtpReceiver, event: *const TrackEvent) void {
+        const tr: *RtpTransceiver = @alignCast(@fieldParentPtr("receiver", reciever));
+        switch (event.*) {
+            .rtp => |rtp_packet| {
+                const header_size: u8 = @intCast(rtp_packet.size() - rtp_packet.payload.len);
+                const beg = rtp_packet.payload.ptr - header_size;
+                tr.transport.ice_agent.destroyPacket(beg[0..1]);
+            },
+        }
+    }
+
+    pub fn handleRtpPacket(receiver: *RtpReceiver, io: Io, packet: rtp.Packet) !void {
         if (receiver.ssrc == 0) {
             @branchHint(.cold);
             receiver.ssrc = packet.header.ssrc;
@@ -890,7 +914,7 @@ pub const RtpTransceiver = struct {
 
 pub fn getCodecCapabilities(kind: TrackKind) []const RtpCodecParameters {
     return switch (kind) {
-        .audio => &.{},
+        .audio => default_audio_codecs,
         .video => default_video_codecs,
     };
 }
