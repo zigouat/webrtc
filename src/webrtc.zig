@@ -333,16 +333,6 @@ pub const MediaStreamTrack = struct {
     }
 };
 
-/// MediaSample represents a media sample (a complete video frame or audio sample).
-pub const MediaSample = struct {
-    /// The raw media data of the sample.
-    data: []const u8,
-    /// The clock timestamp of the sample in microseconds.
-    timestamp: i64,
-    /// The RTP timestamp of the sample in the track's clock rate.
-    rtp_timestamp: u16,
-};
-
 /// TrackEvent represents events related to a remote track.
 pub const TrackEvent = union(enum) {
     rtp: rtp.Packet,
