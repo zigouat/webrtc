@@ -4,6 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const media = b.dependency("media", .{ .target = target, .optimize = optimize });
     const protocols = b.dependency("protocols", .{ .target = target, .optimize = optimize });
     const mbedtls = b.dependency("mbedtls", .{ .target = target, .optimize = optimize });
 
@@ -18,6 +19,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
+            .{ .name = "media", .module = media.module("media") },
             .{ .name = "sdp", .module = protocols.module("sdp") },
             .{ .name = "ice", .module = protocols.module("ice") },
             .{ .name = "rtp", .module = protocols.module("rtp") },
