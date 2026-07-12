@@ -21,6 +21,8 @@ pub const Error = error{
     /// Returned when an ssrc cannot be
     /// generated for a sender
     SsrcUnavailable,
+    /// Too many transceivers have been added to the PeerConnection and the mid counter has overflowed.
+    MidOverflow,
 } || std.mem.Allocator.Error;
 
 pub const Event = union(enum) {
@@ -131,6 +133,7 @@ pub fn deinit(pc: *PeerConnection) void {
     pc.demuxer.deinit();
 }
 
+/// Adds a new track to the PeerConnection and optionally associates it with a stream.
 pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: ?[]const u8) Error!*webrtc.RtpSender {
     try pc.checkNotClosed();
 
@@ -150,6 +153,9 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: 
     return &tr.sender;
 }
 
+/// Removes a track from the PeerConnection.
+///
+/// Removing a track will update the transceiver's direction and stop sending media.
 pub fn removeTrack(pc: *PeerConnection, sender: *webrtc.RtpSender) !void {
     try pc.checkNotClosed();
     const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
@@ -161,6 +167,7 @@ pub fn getTransceivers(pc: *const PeerConnection) []*webrtc.RtpTransceiver {
     return pc.transceivers.items;
 }
 
+/// Creates a new transceiver to the PeerConnection from an existing track.
 pub fn addTransceiverFromTrack(
     pc: *PeerConnection,
     track: webrtc.MediaStreamTrack,
@@ -178,6 +185,9 @@ pub fn addTransceiverFromTrack(
     return tr;
 }
 
+/// Creates a new transceiver to the PeerConnection from a specified kind of media (audio or video).
+///
+/// The transceive will initialize a sender without a track. Pair this with `addTrack` to add a track to the sender later.
 pub fn addTransceiverFromKind(
     pc: *PeerConnection,
     kind: webrtc.TrackKind,
@@ -208,44 +218,10 @@ pub fn addTransceiverFromKind(
 /// Stops the transceiver.
 ///
 /// Prefer calling this instead of `RtpTransceiver.stop()` directly, as this will also check if negotiation is needed.
-pub fn stopTransceiver(pc: *PeerConnection, transceiver: *webrtc.RtpTransceiver) !void {
+pub fn stopTransceiver(pc: *PeerConnection, transceiver: *webrtc.RtpTransceiver) Error!void {
     try pc.checkNotClosed();
     transceiver.stop();
     try pc.checkNegotiationNeeded();
-}
-
-fn initTransceiverFromTrack(
-    pc: *PeerConnection,
-    track: webrtc.MediaStreamTrack,
-    stream_id: ?[]const u8,
-    added_by_add_track: bool,
-) !*webrtc.RtpTransceiver {
-    const tr = try pc.allocator.create(webrtc.RtpTransceiver);
-    errdefer tr.deinit(pc.dtls_transport.getIo(), pc.allocator);
-
-    tr.* = .{
-        .kind = track.kind,
-        .direction = .sendrecv,
-        .sender = .init(track),
-        .receiver = try .init(track, pc.allocator),
-        .added_by_add_track = added_by_add_track,
-        .transport = &pc.dtls_transport,
-    };
-
-    if (stream_id) |sid| {
-        const stream = try getOrAddStream(pc, sid);
-        tr.sender.setStream(stream);
-    }
-    tr.sender.ssrc = try generateSsrc(pc.dtls_transport.getIo(), &pc.demuxer);
-
-    try pc.appendTransceiver(tr);
-    return tr;
-}
-
-fn getOrAddStream(pc: *PeerConnection, stream_id: []const u8) !webrtc.MediaStream {
-    for (pc.streams.items) |stream| if (std.mem.eql(u8, stream.id, stream_id)) return stream;
-    try pc.streams.append(pc.allocator, try .init(pc.allocator, stream_id));
-    return pc.streams.getLast();
 }
 
 /// Creates a new offer.
@@ -324,7 +300,7 @@ pub fn getLocalDescription(pc: *PeerConnection) !?webrtc.SessionDescription {
 /// Get remote description.
 ///
 /// The buffer is owned by this object and must not be freed.
-pub fn getRemoteDescription(pc: *PeerConnection) !?webrtc.SessionDescription {
+pub fn getRemoteDescription(pc: *PeerConnection) Error!?webrtc.SessionDescription {
     const sess_desc = pc.pending_remote_description orelse pc.remote_description;
     return if (sess_desc) |*desc| desc.toSessionDescription() else null;
 }
@@ -348,6 +324,7 @@ pub fn setLocalDescription(pc: *PeerConnection, session_desc: webrtc.SessionDesc
     }
 }
 
+/// Apply a remote description received from the remote peer.
 pub fn setRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescription) !void {
     try pc.checkNotClosed();
 
@@ -364,6 +341,9 @@ pub fn setRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDes
     }
 }
 
+/// Write the local description to a writer.
+///
+/// This will include the ICE candidates if they have been gathered.
 pub fn writeLocalDescription(pc: *PeerConnection, w: *Io.Writer) !void {
     try pc.checkNotClosed();
     const sess_desc = pc.pending_local_description orelse pc.local_description;
@@ -394,7 +374,41 @@ fn checkNotClosed(pc: *const PeerConnection) !void {
     if (pc.connection_state == .closed) return error.InvalidState;
 }
 
-fn createFirstOffer(pc: *PeerConnection) !webrtc.SessionDescription {
+fn initTransceiverFromTrack(
+    pc: *PeerConnection,
+    track: webrtc.MediaStreamTrack,
+    stream_id: ?[]const u8,
+    added_by_add_track: bool,
+) !*webrtc.RtpTransceiver {
+    const tr = try pc.allocator.create(webrtc.RtpTransceiver);
+    errdefer tr.deinit(pc.dtls_transport.getIo(), pc.allocator);
+
+    tr.* = .{
+        .kind = track.kind,
+        .direction = .sendrecv,
+        .sender = .init(track),
+        .receiver = try .init(track, pc.allocator),
+        .added_by_add_track = added_by_add_track,
+        .transport = &pc.dtls_transport,
+    };
+
+    if (stream_id) |sid| {
+        const stream = try getOrAddStream(pc, sid);
+        tr.sender.setStream(stream);
+    }
+    tr.sender.ssrc = try generateSsrc(pc.dtls_transport.getIo(), &pc.demuxer);
+
+    try pc.appendTransceiver(tr);
+    return tr;
+}
+
+fn getOrAddStream(pc: *PeerConnection, stream_id: []const u8) !webrtc.MediaStream {
+    for (pc.streams.items) |stream| if (std.mem.eql(u8, stream.id, stream_id)) return stream;
+    try pc.streams.append(pc.allocator, try .init(pc.allocator, stream_id));
+    return pc.streams.getLast();
+}
+
+fn createFirstOffer(pc: *PeerConnection) Error!webrtc.SessionDescription {
     var w = std.Io.Writer.Allocating.init(pc.allocator);
     errdefer w.deinit();
 
@@ -419,7 +433,7 @@ fn createFirstOffer(pc: *PeerConnection) !webrtc.SessionDescription {
         mid +%= 1;
     }
 
-    try sdp_session.write(&w.writer);
+    sdp_session.write(&w.writer) catch return error.OutOfMemory;
 
     pc.last_offer.deinit(pc.allocator);
     pc.last_offer = .{
@@ -603,7 +617,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
 
         media_exists = true;
 
-        tr.sender.codecs = media.rtp_codec_parameters;
+        tr.sender.setCodecs(pc.dtls_transport.getIo(), media.rtp_codec_parameters);
         tr.receiver.codecs = media.rtp_codec_parameters;
         // TODO: track removal
         tr.current_direction = media.direction;
@@ -699,7 +713,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
             const remote_codecs = media.rtp_codec_parameters;
             const codecs = try utils.intersectCodecs(remote_codecs, local_codecs);
 
-            transceiver.sender.codecs = codecs.@"0";
+            transceiver.sender.setCodecs(io, codecs.@"0");
             transceiver.receiver.codecs = codecs.@"1";
         }
 

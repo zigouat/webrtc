@@ -81,13 +81,13 @@ const AppState = struct {
         defer file.close(io);
 
         var buffer: [1024]u8 = @splat(0);
-        var reader = file.readerStreaming(io, &buffer);
-        var ivf_reader = try ivf.Reader.init(&reader.interface);
+        var reader = file.reader(io, &buffer);
+        var ivf_reader = ivf.Reader.init(&reader.interface) catch |err| switch (err) {
+            error.ReadFailed => return reader.err.?,
+            else => |e| return e,
+        };
 
         const video_stream = &ivf_reader.stream;
-
-        var vp8_pack = rtp.packetizer.VP8.init(.init(io));
-        var rtp_buffer: [1300]u8 = @splat(0);
 
         const start_timestamp = Io.Clock.now(.awake, io).toMilliseconds();
         const clock_rate = sender.codecs[0].clock_rate;
@@ -111,18 +111,13 @@ const AppState = struct {
                 p.dts = @intCast(@divTrunc(@as(i128, p.dts) * time_base.num * clock_rate, @as(i128, time_base.den)));
                 p.pts = @intCast(@divTrunc(@as(i128, p.pts) * time_base.num * clock_rate, @as(i128, time_base.den)));
 
-                var it = vp8_pack.packetize(&p);
-                while (it.next(&rtp_buffer)) |rtp_packet| {
-                    try sender.sendRtp(&rtp_packet);
-                }
+                try sender.sendSample(&p);
 
                 curr_packet = try ivf_reader.next(allocator);
             }
 
             try io.sleep(.fromMilliseconds(10), .awake);
         }
-
-        // TODO: close peer connection
     }
 };
 

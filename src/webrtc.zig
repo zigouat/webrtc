@@ -7,6 +7,7 @@ const rtp = @import("rtp");
 const rtcp = @import("rtcp");
 const utils = @import("utils.zig");
 
+const MediaPacket = @import("media").Packet;
 const Io = std.Io;
 const FmtpParams = sdp.Attribute.Fmtp.Params;
 const DtlsTransport = @import("dtls_transport.zig");
@@ -197,12 +198,18 @@ pub const RtpCapabilities = struct {
     header_extensions: []RtpHeaderExtensionParameter,
 };
 
+/// A struct describing the possible direction of transceivers.
 pub const Direction = enum {
+    /// Used to indicate send and receive capabilities.
     sendrecv,
+    /// Used to indicate send-only capabilities.
     sendonly,
+    /// Used to indicate receive-only capabilities.
     recvonly,
+    /// Used to indicate that the transceiver is neither sending nor receiving media.
     inactive,
 
+    /// Returns the reverse of the given direction.
     pub fn reverse(direction: Direction) Direction {
         return switch (direction) {
             .sendonly => .recvonly,
@@ -211,6 +218,7 @@ pub const Direction = enum {
         };
     }
 
+    /// Returns the intersection of two directions.
     pub fn intersect(a: Direction, b: Direction) Direction {
         if (a == b) return a;
         if (a == .inactive or b == .inactive) return .inactive;
@@ -236,9 +244,20 @@ pub const Direction = enum {
     }
 };
 
+/// TrackKind represents the kind of media track, either audio or video.
 pub const TrackKind = enum { audio, video };
 
-pub const SessionDescriptionType = enum { offer, pranswer, answer, rollback };
+/// SessionDescriptionType represents the type of session description.
+pub const SessionDescriptionType = enum {
+    /// The session description is an offer.
+    offer,
+    /// The session description is an provisional answer.
+    pranswer,
+    /// The session description is a final answer.
+    answer,
+    /// The session description is a rollback of the previous description.
+    rollback,
+};
 
 pub const SessionDescription = struct {
     type: SessionDescriptionType,
@@ -303,10 +322,6 @@ pub const MediaStreamTrack = struct {
         return std.mem.sliceTo(&track.id, 0);
     }
 
-    fn setStream(track: *MediaStreamTrack, stream_id: ?[]const u8) void {
-        track.stream_id = stream_id;
-    }
-
     test "init" {
         const track = init(testing.io, .video);
         try testing.expect(!std.mem.eql(u8, &.{}, track.getId()));
@@ -330,12 +345,20 @@ pub const TrackEventInit = struct {
 };
 
 pub const RtpSender = struct {
+    const rtp_header_size = 12; // No header extension are sent for now.
+
     track: ?MediaStreamTrack,
     codecs: []const RtpCodecParameters,
     ssrc: u32,
     report: Report,
+    packetizer: union(enum) {
+        vp8: rtp.packetizer.VP8,
+        h264: rtp.packetizer.H264,
+        opus: rtp.packetizer.Opus,
+        none: void,
+    },
 
-    pub const SendError = DtlsTransport.SendError || error{ NoAssociatedTrack, InvalidDirection };
+    pub const SendError = DtlsTransport.SendError || Io.Reader.Error || error{ NoAssociatedTrack, InvalidDirection };
 
     const Report = struct {
         last_sequence_number: ?u16,
@@ -352,7 +375,7 @@ pub const RtpSender = struct {
             .octet_count = 0,
         };
 
-        inline fn recordPacket(report: *Report, packet: *const rtp.Packet, timestamp: i64) void {
+        fn recordPacket(report: *Report, packet: *const rtp.Packet, timestamp: i64) void {
             const last_seq_number = report.last_sequence_number orelse packet.header.sequence_number -% 1;
             const diff = @as(i16, @bitCast(packet.header.sequence_number)) -% @as(i16, @bitCast(last_seq_number));
 
@@ -374,6 +397,7 @@ pub const RtpSender = struct {
             .codecs = &.{},
             .ssrc = 0,
             .report = .empty,
+            .packetizer = .none,
         };
     }
 
@@ -383,29 +407,76 @@ pub const RtpSender = struct {
     }
 
     pub fn replaceTrack(sender: *RtpSender, new_track: MediaStreamTrack) !void {
-        _ = sender;
-        _ = new_track;
-        @compileError("Not implemented");
+        sender.track = new_track;
     }
 
     pub fn setStream(sender: *RtpSender, stream: MediaStream) void {
-        if (sender.track) |*track| track.setStream(stream.id);
+        if (sender.track) |*track| track.stream_id = stream.id;
+    }
+
+    pub fn setCodecs(sender: *RtpSender, io: std.Io, codecs: []const RtpCodecParameters) void {
+        if (sender.codecs.len != 0) {
+            // TODO: Handle this use case better. What if the codec is changed?
+            // For now do not allow changing codecs after they have been set
+            return;
+        }
+
+        sender.codecs = codecs;
+        sender.packetizer = .none;
+
+        if (codecs.len > 0) {
+            const codec = codecs[0];
+            var rtp_config = rtp.packetizer.RtpConfig.init(io);
+            rtp_config.payload_type = @intCast(codec.payload_type);
+            rtp_config.ssrc = sender.ssrc;
+
+            if (std.mem.eql(u8, codec.mime_type, MimeType.VP8)) {
+                sender.packetizer = .{ .vp8 = .init(rtp_config) };
+            } else if (std.mem.eql(u8, codec.mime_type, MimeType.H264)) {
+                sender.packetizer = .{ .h264 = .init(rtp_config) };
+            } else if (std.mem.eql(u8, codec.mime_type, MimeType.Opus)) {
+                sender.packetizer = .{ .opus = .init(rtp_config) };
+            }
+        }
+    }
+
+    /// Sends a media sample to the remote peer.
+    pub fn sendSample(sender: *RtpSender, sample: *const MediaPacket) SendError!void {
+        const tr = try checkAndGetTransceiver(sender);
+
+        var buffer = try tr.transport.ice_agent.createPacket();
+        defer tr.transport.ice_agent.destroyPacket(buffer);
+
+        buffer = buffer[0 .. rtp_header_size + 1200];
+
+        const timestamp = Io.Timestamp.now(tr.transport.getIo(), .real).toMicroseconds();
+
+        //TODO: refactor this mess
+        switch (sender.packetizer) {
+            .vp8 => |*p| {
+                var it = p.packetize(sample);
+                while (it.next(buffer[rtp_header_size..])) |packet|
+                    try sendAndRecord(tr, &packet, buffer, timestamp);
+            },
+            .h264 => |*p| {
+                var it = p.packetize(sample);
+                while (try it.next(buffer[rtp_header_size..])) |packet|
+                    try sendAndRecord(tr, &packet, buffer, timestamp);
+            },
+            .opus => |*p| {
+                var it = p.packetize(sample);
+                while (it.next(buffer[rtp_header_size..])) |packet|
+                    try sendAndRecord(tr, &packet, buffer, timestamp);
+            },
+            else => return,
+        }
     }
 
     /// Sends an RTP packet.
     ///
     /// The sender will update the ssrc and payload type according to the transceiver's configuration.
     pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) SendError!void {
-        if (sender.track == null) {
-            @branchHint(.cold);
-            return error.NoAssociatedTrack;
-        }
-
-        const tr: *RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
-        if (!tr.canSend()) {
-            @branchHint(.unlikely);
-            return error.InvalidDirection;
-        }
+        const tr = try checkAndGetTransceiver(sender);
 
         var buffer = try tr.transport.ice_agent.createPacket();
         defer tr.transport.ice_agent.destroyPacket(buffer);
@@ -422,10 +493,32 @@ pub const RtpSender = struct {
             .timestamp = packet.header.timestamp,
         };
 
-        std.mem.writeInt(u96, buffer[0..12], @bitCast(header), .big);
-        @memcpy(buffer[12 .. packet.payload.len + 12], packet.payload);
-        try tr.transport.sendRtp(buffer[0 .. packet.payload.len + 12]);
+        @memcpy(buffer[rtp_header_size .. packet.payload.len + rtp_header_size], packet.payload);
+        std.mem.writeInt(u96, buffer[0..rtp_header_size], @bitCast(header), .big);
+        try tr.transport.sendRtp(buffer[0 .. packet.payload.len + rtp_header_size]);
         sender.report.recordPacket(packet, timestamp);
+    }
+
+    fn checkAndGetTransceiver(sender: *RtpSender) !*RtpTransceiver {
+        if (sender.track == null) {
+            @branchHint(.cold);
+            return error.NoAssociatedTrack;
+        }
+
+        const tr: *RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
+        if (!tr.canSend()) {
+            @branchHint(.unlikely);
+            return error.InvalidDirection;
+        }
+
+        return tr;
+    }
+
+    fn sendAndRecord(tr: *RtpTransceiver, rtp_packet: *const rtp.Packet, buffer: []u8, timestamp: i64) !void {
+        const payload_len = rtp_packet.payload.len;
+        std.mem.writeInt(u96, buffer[0..rtp_header_size], @bitCast(rtp_packet.header), .big);
+        try tr.transport.sendRtp(buffer[0 .. rtp_header_size + payload_len]);
+        tr.sender.report.recordPacket(rtp_packet, timestamp);
     }
 
     fn writeReport(sender: *const RtpSender, timestamp: i64, buffer: []u8) []const u8 {
@@ -591,7 +684,7 @@ pub const RtpReceiver = struct {
     }
 
     fn processMsid(receiver: *RtpReceiver, msid: ?MediaStream) void {
-        receiver.track.setStream(if (msid) |m| m.id else null);
+        receiver.track.stream_id = if (msid) |m| m.id else null;
     }
 
     test "init" {
