@@ -244,8 +244,8 @@ fn handleDtlsData(transport: *DtlsTransport, data: []const u8) !void {
             else => unreachable,
         };
 
-        transport.in_srtp_session = try srtp.Session.init(transport.allocator, &srtp_profile.remote_keying_material, profile);
-        transport.out_srtp_session = try srtp.Session.init(transport.allocator, &srtp_profile.local_keying_material, profile);
+        transport.in_srtp_session = try srtp.Session.init(transport.getIo(), transport.allocator, &srtp_profile.remote_keying_material, profile);
+        transport.out_srtp_session = try srtp.Session.init(transport.getIo(), transport.allocator, &srtp_profile.local_keying_material, profile);
     }
 }
 

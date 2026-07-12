@@ -26,8 +26,11 @@ pub fn main(init: std.process.Init) !void {
     defer file.close(io);
 
     var buffer: [1024]u8 = @splat(0);
-    var reader = file.readerStreaming(io, &buffer);
-    var ivf_reader = try ivf.Reader.init(&reader.interface);
+    var reader = file.reader(io, &buffer);
+    var ivf_reader = ivf.Reader.init(&reader.interface) catch |err| switch (err) {
+        error.ReadFailed => return reader.err.?,
+        else => |e| return e,
+    };
 
     pc = try .init(io, allocator, .{});
     defer pc.deinit();
@@ -129,17 +132,14 @@ fn sendMediaData(io: Io, allocator: std.mem.Allocator, reader: *ivf.Reader, send
 
 fn doSendMediaData(io: Io, allocator: std.mem.Allocator, reader: *ivf.Reader, sender: *webrtc.RtpSender) !void {
     const video_stream = &reader.stream;
-
-    var vp8_pack = rtp.packetizer.VP8.init(.init(io));
-    var rtp_buffer: [1300]u8 = @splat(0);
-
     const start_timestamp = Io.Clock.now(.awake, io).toMilliseconds();
 
     var curr_packet = try reader.next(allocator);
     defer if (curr_packet) |*p| p.deinit(allocator);
 
     outer: while (true) {
-        const elapsed: u64 = @intCast(std.Io.Clock.now(.awake, io).toMilliseconds() - start_timestamp);
+        const timestamp = std.Io.Clock.now(.awake, io).toMilliseconds();
+        const elapsed: u64 = @intCast(timestamp - start_timestamp);
 
         while (true) {
             if (curr_packet == null) break :outer;
@@ -149,19 +149,10 @@ fn doSendMediaData(io: Io, allocator: std.mem.Allocator, reader: *ivf.Reader, se
             var p = curr_packet.?;
             defer p.deinit(allocator);
 
-            // ignore other streams
-            if (p.stream_id != video_stream.id) {
-                curr_packet = try reader.next(allocator);
-                continue;
-            }
-
             p.dts = @intCast(@divTrunc(@as(i128, p.dts) * video_stream.time_base.num * 90_000, @as(i128, video_stream.time_base.den)));
             p.pts = @intCast(@divTrunc(@as(i128, p.pts) * video_stream.time_base.num * 90_000, @as(i128, video_stream.time_base.den)));
 
-            var it = vp8_pack.packetize(&p);
-            while (it.next(&rtp_buffer)) |rtp_packet| {
-                try sender.sendRtp(&rtp_packet);
-            }
+            try sender.sendSample(&p);
 
             curr_packet = try reader.next(allocator);
         }

@@ -284,6 +284,58 @@ test "createOffer: multiple offers" {
     try testing.expect(old_mid != sdp_session.getMedias()[1].mid);
 }
 
+test "createAnswer: answer to offer" {
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    defer pc.deinit();
+
+    var pc2 = try PeerConnection.init(testing.io, testing.allocator, .{});
+    defer pc2.deinit();
+
+    _ = try pc.addTrack(.initWithId("video", .video), null);
+    _ = try pc.addTrack(.initWithId("audio", .audio), null);
+
+    const offer = try pc.createOffer();
+    try pc.setLocalDescription(offer);
+    try pc2.setRemoteDescription(offer);
+
+    const answer = try pc2.createAnswer();
+    try testing.expectEqual(.answer, answer.type);
+
+    var sdp_session = try SDPSession.parse(testing.allocator, answer.sdp);
+    defer sdp_session.deinit(testing.allocator);
+
+    try testing.expectEqual(2, sdp_session.getMedias().len);
+    try testing.expect(sdp_session.getMedias()[0].port != 0);
+    try testing.expect(sdp_session.getMedias()[1].port != 0);
+}
+
+test "createAnswer: reject media in offer" {
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    defer pc.deinit();
+
+    var pc2 = try PeerConnection.init(testing.io, testing.allocator, .{});
+    defer pc2.deinit();
+
+    _ = try pc.addTrack(.initWithId("video", .video), null);
+    _ = try pc.addTrack(.initWithId("audio", .audio), null);
+
+    const offer = try pc.createOffer();
+    try pc.setLocalDescription(offer);
+    try pc2.setRemoteDescription(offer);
+
+    pc2.getTransceivers()[1].stop();
+
+    const answer = try pc2.createAnswer();
+    try testing.expectEqual(.answer, answer.type);
+
+    var sdp_session = try SDPSession.parse(testing.allocator, answer.sdp);
+    defer sdp_session.deinit(testing.allocator);
+
+    try testing.expectEqual(2, sdp_session.getMedias().len);
+    try testing.expect(sdp_session.getMedias()[0].port != 0);
+    try testing.expect(sdp_session.getMedias()[1].port == 0);
+}
+
 test "negotiation between peers" {
     var pc1: PeerConnection = try .init(io, allocator, .{});
     defer pc1.deinit();

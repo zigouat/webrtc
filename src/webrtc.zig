@@ -355,6 +355,8 @@ pub const TrackEventInit = struct {
 };
 
 pub const RtpSender = struct {
+    const rtp_header_size = 12; // No header extension are sent for now.
+
     track: ?MediaStreamTrack,
     codecs: []const RtpCodecParameters,
     ssrc: u32,
@@ -423,6 +425,12 @@ pub const RtpSender = struct {
     }
 
     pub fn setCodecs(sender: *RtpSender, io: std.Io, codecs: []const RtpCodecParameters) void {
+        if (sender.codecs.len != 0) {
+            // TODO: Handle this use case better. What if the codec is changed?
+            // For now do not allow changing codecs after they have been set
+            return;
+        }
+
         sender.codecs = codecs;
         sender.packetizer = .none;
 
@@ -449,7 +457,6 @@ pub const RtpSender = struct {
         var buffer = try tr.transport.ice_agent.createPacket();
         defer tr.transport.ice_agent.destroyPacket(buffer);
 
-        const rtp_header_size = 12;
         buffer = buffer[0 .. rtp_header_size + 1200];
 
         const timestamp = Io.Timestamp.now(tr.transport.getIo(), .real).toMicroseconds();
@@ -496,9 +503,9 @@ pub const RtpSender = struct {
             .timestamp = packet.header.timestamp,
         };
 
-        std.mem.writeInt(u96, buffer[0..12], @bitCast(header), .big);
-        @memcpy(buffer[12 .. packet.payload.len + 12], packet.payload);
-        try tr.transport.sendRtp(buffer[0 .. packet.payload.len + 12]);
+        @memcpy(buffer[rtp_header_size .. packet.payload.len + rtp_header_size], packet.payload);
+        std.mem.writeInt(u96, buffer[0..rtp_header_size], @bitCast(header), .big);
+        try tr.transport.sendRtp(buffer[0 .. packet.payload.len + rtp_header_size]);
         sender.report.recordPacket(packet, timestamp);
     }
 
@@ -518,8 +525,9 @@ pub const RtpSender = struct {
     }
 
     fn sendAndRecord(tr: *RtpTransceiver, rtp_packet: *const rtp.Packet, buffer: []u8, timestamp: i64) !void {
-        std.mem.writeInt(u96, buffer[0..12], @bitCast(rtp_packet.header), .big);
-        try tr.transport.sendRtp(buffer);
+        const payload_len = rtp_packet.payload.len;
+        std.mem.writeInt(u96, buffer[0..rtp_header_size], @bitCast(rtp_packet.header), .big);
+        try tr.transport.sendRtp(buffer[0 .. rtp_header_size + payload_len]);
         tr.sender.report.recordPacket(rtp_packet, timestamp);
     }
 
