@@ -4,6 +4,7 @@ const utils = @import("utils.zig");
 const DtlsTransport = @import("dtls_transport.zig");
 const SDPSession = @import("sdp_session.zig");
 const RtpSender = @import("rtp_sender.zig");
+const RtpReceiver = @import("rtp_receiver.zig");
 
 const Io = std.Io;
 const RtpTransceiver = @This();
@@ -62,8 +63,14 @@ pub const Init = struct {
     stream_id: ?[]const u8 = null,
 };
 
+pub const TrackEventInit = struct {
+    receiver: *RtpReceiver,
+    track: MediaStreamTrack,
+    transceiver: *RtpTransceiver,
+};
+
 sender: RtpSender,
-receiver: webrtc.RtpReceiver,
+receiver: RtpReceiver,
 kind: TrackKind,
 direction: Direction,
 current_direction: ?Direction = null,
@@ -210,7 +217,7 @@ pub inline fn canSend(tr: *const RtpTransceiver) bool {
     return false;
 }
 
-pub fn processRemoteTrack(tr: *RtpTransceiver, direction: Direction, msid: ?MediaStream) ?webrtc.TrackEventInit {
+pub fn processRemoteTrack(tr: *RtpTransceiver, direction: Direction, msid: ?MediaStream) ?TrackEventInit {
     tr.receiver.track.stream_id = if (msid) |m| m.id else null;
 
     // It's safe to set default value to inactive
@@ -226,7 +233,7 @@ pub fn processRemoteTrack(tr: *RtpTransceiver, direction: Direction, msid: ?Medi
         },
         .sendrecv, .recvonly => switch (fired_direction) {
             .sendrecv, .recvonly => {},
-            else => return webrtc.TrackEventInit{
+            else => return TrackEventInit{
                 .receiver = &tr.receiver,
                 .track = tr.receiver.track,
                 .transceiver = tr,

@@ -68,7 +68,7 @@ pub const Event = union(enum) {
     negotiation_needed: void,
     signaling_state: SignalingState,
     connection_state: ConnectionState,
-    track_event_init: webrtc.TrackEventInit,
+    track_event_init: RtpTransceiver.TrackEventInit,
 };
 
 allocator: std.mem.Allocator,
@@ -702,7 +702,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     // TODO: Add rtcp feedback
 
     var first_media: ?*SDPSession.SDPMedia = null;
-    var track_events: std.ArrayList(webrtc.TrackEventInit) = .empty;
+    var track_events: std.ArrayList(RtpTransceiver.TrackEventInit) = .empty;
     defer track_events.deinit(pc.allocator);
     for (remote_sdp.getMedias(), 0..) |*media, idx| {
         var transceiver = blk: {
