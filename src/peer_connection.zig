@@ -2,14 +2,16 @@ const std = @import("std");
 const ice = @import("ice");
 const rtp = @import("rtp");
 const rtcp = @import("rtcp");
-const utils = @import("utils.zig");
 const SDPAttribute = @import("sdp").Attribute.ParsedAttribute;
 
-const dtls = @import("dtls/dtls.zig");
-const DtlsTransport = @import("dtls_transport.zig");
 const webrtc = @import("webrtc.zig");
+const dtls = @import("dtls/dtls.zig");
+const utils = @import("utils.zig");
+
+const DtlsTransport = @import("dtls_transport.zig");
 const SDPSession = @import("sdp_session.zig");
 const Demuxer = @import("pc/demuxer.zig");
+const RtpTransceiver = @import("rtp_transceiver.zig");
 
 const Io = std.Io;
 const PeerConnection = @This();
@@ -25,16 +27,52 @@ pub const Error = error{
     MidOverflow,
 } || std.mem.Allocator.Error;
 
+/// SignalingState represents the signaling state of the PeerConnection.
+pub const SignalingState = enum {
+    /// In the stable state there is no offer/answer exchange in progress.
+    /// This is also the initial state, in which case the local and remote descriptions are empty.
+    stable,
+    /// A local description, of type "offer", has been successfully applied.
+    have_local_offer,
+    /// A remote description, of type "offer", has been successfully applied.
+    have_remote_offer,
+    /// A remote description of type "offer" has been successfully applied and a local description of
+    /// type "pranswer" has been successfully applied.
+    have_local_pranswer,
+    /// A local description of type "offer" has been successfully applied and a remote description of
+    /// type "pranswer" has been successfully applied.
+    have_remote_pranswer,
+    /// The PeerConnection has been closed.
+    closed,
+};
+
+/// ConnectionState represents the state of the PeerConnection.
+pub const ConnectionState = enum {
+    /// The connection has been closed.
+    closed,
+    /// The PeerConnection transition to this state if either the ice connection is in failed
+    /// state or the dtls connection is in failed state.
+    failed,
+    /// The ice connection of is the disconnected state.
+    disconnected,
+    /// The initial state of the PeerConnection.
+    new,
+    /// The ice connection is connected and the dtls connection either is connected or closed.
+    connected,
+    /// If none of the other states apply, the PeerConnection is in the connecting state.
+    connecting,
+};
+
 pub const Event = union(enum) {
     negotiation_needed: void,
-    signaling_state: webrtc.SignalingState,
-    connection_state: webrtc.ConnectionState,
+    signaling_state: SignalingState,
+    connection_state: ConnectionState,
     track_event_init: webrtc.TrackEventInit,
 };
 
 allocator: std.mem.Allocator,
-signaling_state: webrtc.SignalingState,
-connection_state: webrtc.ConnectionState,
+signaling_state: SignalingState,
+connection_state: ConnectionState,
 negotiation_needed: bool = false,
 
 local_description: ?ParsedSesssionDescription = null,
@@ -77,6 +115,7 @@ const ParsedSesssionDescription = struct {
     fn deinit(sess_desc: *ParsedSesssionDescription, allocator: std.mem.Allocator) void {
         allocator.free(sess_desc.sdp);
         sess_desc.session.deinit(allocator);
+        sess_desc.* = .empty(sess_desc.desc_type);
     }
 
     fn toSessionDescription(sess_desc: *const ParsedSesssionDescription) webrtc.SessionDescription {
@@ -171,8 +210,8 @@ pub fn getTransceivers(pc: *const PeerConnection) []*webrtc.RtpTransceiver {
 pub fn addTransceiverFromTrack(
     pc: *PeerConnection,
     track: webrtc.MediaStreamTrack,
-    init_config: webrtc.TransceiverInit,
-) Error!*webrtc.RtpTransceiver {
+    init_config: RtpTransceiver.Init,
+) Error!*RtpTransceiver {
     const tr = try pc.initTransceiverFromTrack(track, init_config.stream_id, false);
     errdefer {
         tr.deinit(pc.dtls_transport.getIo(), pc.allocator);
@@ -191,8 +230,8 @@ pub fn addTransceiverFromTrack(
 pub fn addTransceiverFromKind(
     pc: *PeerConnection,
     kind: webrtc.TrackKind,
-    init_config: webrtc.TransceiverInit,
-) Error!*webrtc.RtpTransceiver {
+    init_config: RtpTransceiver.Init,
+) Error!*RtpTransceiver {
     const io = pc.dtls_transport.getIo();
     const tr = try pc.allocator.create(webrtc.RtpTransceiver);
     errdefer pc.allocator.destroy(tr);
@@ -218,7 +257,7 @@ pub fn addTransceiverFromKind(
 /// Stops the transceiver.
 ///
 /// Prefer calling this instead of `RtpTransceiver.stop()` directly, as this will also check if negotiation is needed.
-pub fn stopTransceiver(pc: *PeerConnection, transceiver: *webrtc.RtpTransceiver) Error!void {
+pub fn stopTransceiver(pc: *PeerConnection, transceiver: *RtpTransceiver) Error!void {
     try pc.checkNotClosed();
     transceiver.stop();
     try pc.checkNegotiationNeeded();
@@ -546,7 +585,7 @@ fn isNegotiationNeeded(pc: *const PeerConnection) bool {
     return false;
 }
 
-fn nextPeerConnectionState(ice_state: ice.ConnectionState, dtls_state: dtls.ConnectionState) webrtc.ConnectionState {
+fn nextPeerConnectionState(ice_state: ice.ConnectionState, dtls_state: dtls.ConnectionState) ConnectionState {
     return if (ice_state == .closed)
         .closed
     else if (ice_state == .failed or dtls_state == .failed)
@@ -597,9 +636,12 @@ fn applyLocalOffer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescript
     }
 
     if (pc.pending_local_description) |*desc| desc.deinit(pc.allocator);
-    pc.signaling_state = .have_local_offer;
+
+    pc.last_answer.deinit(pc.allocator);
     pc.pending_local_description = pc.last_offer;
     pc.last_offer = .empty(.offer);
+
+    pc.signaling_state = .have_local_offer;
     pc.mid +%= @intCast(offer.getMedias().len);
 
     try pc.queue.putOne(pc.dtls_transport.getIo(), .{ .signaling_state = pc.signaling_state });
@@ -632,6 +674,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
 
     try pc.demuxer.updateMaps(pc.dtls_transport.getIo(), &sdp_session);
 
+    pc.last_offer.deinit(pc.allocator);
     pc.pending_local_description = pc.last_answer;
     try pc.updateSignalingStateToStable();
     // pc.removeTransceivers();
