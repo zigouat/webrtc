@@ -1,8 +1,9 @@
 const std = @import("std");
 const webrtc = @import("webrtc.zig");
+const utils = @import("utils.zig");
 const DtlsTransport = @import("dtls_transport.zig");
 const SDPSession = @import("sdp_session.zig");
-const utils = @import("utils.zig");
+const RtpSender = @import("rtp_sender.zig");
 
 const Io = std.Io;
 const RtpTransceiver = @This();
@@ -61,7 +62,7 @@ pub const Init = struct {
     stream_id: ?[]const u8 = null,
 };
 
-sender: webrtc.RtpSender,
+sender: RtpSender,
 receiver: webrtc.RtpReceiver,
 kind: TrackKind,
 direction: Direction,

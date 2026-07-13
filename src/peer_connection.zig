@@ -12,6 +12,7 @@ const DtlsTransport = @import("dtls_transport.zig");
 const SDPSession = @import("sdp_session.zig");
 const Demuxer = @import("pc/demuxer.zig");
 const RtpTransceiver = @import("rtp_transceiver.zig");
+const RtpSender = @import("rtp_sender.zig");
 
 const Io = std.Io;
 const PeerConnection = @This();
@@ -173,7 +174,7 @@ pub fn deinit(pc: *PeerConnection) void {
 }
 
 /// Adds a new track to the PeerConnection and optionally associates it with a stream.
-pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: ?[]const u8) Error!*webrtc.RtpSender {
+pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: ?[]const u8) Error!*RtpSender {
     try pc.checkNotClosed();
 
     const maybe_transceiver = blk: {
@@ -195,14 +196,14 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: 
 /// Removes a track from the PeerConnection.
 ///
 /// Removing a track will update the transceiver's direction and stop sending media.
-pub fn removeTrack(pc: *PeerConnection, sender: *webrtc.RtpSender) !void {
+pub fn removeTrack(pc: *PeerConnection, sender: *RtpSender) !void {
     try pc.checkNotClosed();
     const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
     tr.removeTrack();
     try pc.checkNegotiationNeeded();
 }
 
-pub fn getTransceivers(pc: *const PeerConnection) []*webrtc.RtpTransceiver {
+pub fn getTransceivers(pc: *const PeerConnection) []*RtpTransceiver {
     return pc.transceivers.items;
 }
 
@@ -233,7 +234,7 @@ pub fn addTransceiverFromKind(
     init_config: RtpTransceiver.Init,
 ) Error!*RtpTransceiver {
     const io = pc.dtls_transport.getIo();
-    const tr = try pc.allocator.create(webrtc.RtpTransceiver);
+    const tr = try pc.allocator.create(RtpTransceiver);
     errdefer pc.allocator.destroy(tr);
 
     tr.* = .{
@@ -418,8 +419,8 @@ fn initTransceiverFromTrack(
     track: webrtc.MediaStreamTrack,
     stream_id: ?[]const u8,
     added_by_add_track: bool,
-) !*webrtc.RtpTransceiver {
-    const tr = try pc.allocator.create(webrtc.RtpTransceiver);
+) !*RtpTransceiver {
+    const tr = try pc.allocator.create(RtpTransceiver);
     errdefer tr.deinit(pc.dtls_transport.getIo(), pc.allocator);
 
     tr.* = .{
@@ -718,7 +719,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
                         for (pc.transceivers.items) |tr| if (tr.canAssociateMedia(media)) break :blk tr;
                     }
 
-                    const tr = try webrtc.RtpTransceiver.initFromSdpMedia(
+                    const tr = try RtpTransceiver.initFromSdpMedia(
                         pc.allocator,
                         io,
                         media,
@@ -797,7 +798,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     for (track_events.items) |event| try pc.queue.putOne(io, .{ .track_event_init = event });
 }
 
-fn appendTransceiver(pc: *PeerConnection, tr: *webrtc.RtpTransceiver) !void {
+fn appendTransceiver(pc: *PeerConnection, tr: *RtpTransceiver) !void {
     const io = pc.dtls_transport.getIo();
     pc.mutex.lockUncancelable(io);
     defer pc.mutex.unlock(io);
@@ -825,14 +826,14 @@ fn updateSignalingStateToStable(pc: *PeerConnection) !void {
     try pc.checkNegotiationNeeded();
 }
 
-fn findTransceiverByMediaIndex(pc: *PeerConnection, index: usize) ?*webrtc.RtpTransceiver {
+fn findTransceiverByMediaIndex(pc: *PeerConnection, index: usize) ?*RtpTransceiver {
     pc.mutex.lockUncancelable(pc.dtls_transport.getIo());
     defer pc.mutex.unlock(pc.dtls_transport.getIo());
     for (pc.transceivers.items) |tr| if (tr.sdp_mline_index) |tr_index| if (tr_index == index) return tr;
     return null;
 }
 
-fn findTransceiverByMid(pc: *PeerConnection, mid: u24) ?*webrtc.RtpTransceiver {
+fn findTransceiverByMid(pc: *PeerConnection, mid: u24) ?*RtpTransceiver {
     pc.mutex.lockUncancelable(pc.dtls_transport.getIo());
     defer pc.mutex.unlock(pc.dtls_transport.getIo());
     for (pc.transceivers.items) |tr| {
