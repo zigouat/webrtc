@@ -4,6 +4,7 @@ const ice = @import("ice");
 const webrtc = @import("webrtc.zig");
 
 const SDPSession = @This();
+const Direction = @import("rtp_transceiver.zig").Direction;
 const SDPAttribute = sdp.Attribute.ParsedAttribute;
 
 const sdp_header =
@@ -42,7 +43,7 @@ pub const SDPMedia = struct {
     rtp_codec_parameters: []webrtc.RtpCodecParameters,
     rtp_header_extensions: []webrtc.RtpHeaderExtensionParameter,
     mid: u24,
-    direction: webrtc.Direction,
+    direction: Direction,
     ice_ufrag: []const u8,
     ice_pwd: []const u8,
     candidates: []ice.Candidate,
@@ -121,7 +122,7 @@ pub const SDPMedia = struct {
                 sdp_media.mid = @bitCast(mid);
             },
             .setup => |v| sdp_media.setup = v,
-            .direction => |v| sdp_media.direction = std.meta.stringToEnum(webrtc.Direction, v) orelse .sendrecv,
+            .direction => |v| sdp_media.direction = std.meta.stringToEnum(Direction, v) orelse .sendrecv,
             .ice_ufrag => |v| sdp_media.ice_ufrag = v,
             .ice_pwd => |v| sdp_media.ice_pwd = v,
             .candidate => |v| {

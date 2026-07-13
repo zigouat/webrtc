@@ -40,6 +40,23 @@ test "setLocalDescription: set offer multiple times" {
     try pc.setLocalDescription(offer);
 }
 
+test "setLocalDescription: invalid state" {
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    defer pc.deinit();
+
+    try testing.expectError(error.NotImplemented, pc.setLocalDescription(.{ .type = .pranswer, .sdp = "" }));
+    try testing.expectError(error.NotImplemented, pc.setLocalDescription(.{ .type = .rollback, .sdp = "" }));
+    try testing.expectError(error.InvalidState, pc.setLocalDescription(.{ .type = .answer, .sdp = "" }));
+
+    const sdp = (try pc.createOffer()).sdp;
+    try pc.setLocalDescription(.{ .type = .offer, .sdp = sdp });
+    try testing.expectError(error.InvalidState, pc.setLocalDescription(.{ .type = .answer, .sdp = sdp }));
+
+    try pc.setRemoteDescription(.{ .type = .answer, .sdp = sdp });
+    try pc.setRemoteDescription(.{ .type = .offer, .sdp = sdp });
+    try testing.expectError(error.InvalidState, pc.setLocalDescription(.{ .type = .offer, .sdp = sdp }));
+}
+
 test "setRemoteDescription: set offer" {
     var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
     defer pc.deinit();
@@ -117,6 +134,26 @@ test "setRemoteDescription: set offer - do not reject bundle only m-lines" {
         try std.testing.expectEqual(.video, tr.kind);
         try std.testing.expect(!tr.isStopped());
     }
+}
+
+test "setRemoteDescription: invalid state" {
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    defer pc.deinit();
+
+    try testing.expectError(error.NotImplemented, pc.setRemoteDescription(.{ .type = .pranswer, .sdp = "" }));
+    try testing.expectError(error.NotImplemented, pc.setRemoteDescription(.{ .type = .rollback, .sdp = "" }));
+    try testing.expectError(error.InvalidState, pc.setRemoteDescription(.{ .type = .answer, .sdp = "" }));
+
+    var sdp = (try pc.createOffer()).sdp;
+    try pc.setRemoteDescription(.{ .type = .offer, .sdp = sdp });
+    try testing.expectError(error.InvalidState, pc.setRemoteDescription(.{ .type = .answer, .sdp = sdp }));
+
+    const answer = try pc.createAnswer();
+    try pc.setLocalDescription(answer);
+
+    sdp = (try pc.createOffer()).sdp;
+    try pc.setLocalDescription(.{ .type = .offer, .sdp = sdp });
+    try testing.expectError(error.InvalidState, pc.setRemoteDescription(.{ .type = .offer, .sdp = sdp }));
 }
 
 test "addTrack" {

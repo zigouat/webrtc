@@ -2,14 +2,17 @@ const std = @import("std");
 const ice = @import("ice");
 const rtp = @import("rtp");
 const rtcp = @import("rtcp");
-const utils = @import("utils.zig");
 const SDPAttribute = @import("sdp").Attribute.ParsedAttribute;
 
-const dtls = @import("dtls/dtls.zig");
-const DtlsTransport = @import("dtls_transport.zig");
 const webrtc = @import("webrtc.zig");
+const dtls = @import("dtls/dtls.zig");
+const utils = @import("utils.zig");
+
+const DtlsTransport = @import("dtls_transport.zig");
 const SDPSession = @import("sdp_session.zig");
 const Demuxer = @import("pc/demuxer.zig");
+const RtpTransceiver = @import("rtp_transceiver.zig");
+const RtpSender = @import("rtp_sender.zig");
 
 const Io = std.Io;
 const PeerConnection = @This();
@@ -25,16 +28,52 @@ pub const Error = error{
     MidOverflow,
 } || std.mem.Allocator.Error;
 
+/// SignalingState represents the signaling state of the PeerConnection.
+pub const SignalingState = enum {
+    /// In the stable state there is no offer/answer exchange in progress.
+    /// This is also the initial state, in which case the local and remote descriptions are empty.
+    stable,
+    /// A local description, of type "offer", has been successfully applied.
+    have_local_offer,
+    /// A remote description, of type "offer", has been successfully applied.
+    have_remote_offer,
+    /// A remote description of type "offer" has been successfully applied and a local description of
+    /// type "pranswer" has been successfully applied.
+    have_local_pranswer,
+    /// A local description of type "offer" has been successfully applied and a remote description of
+    /// type "pranswer" has been successfully applied.
+    have_remote_pranswer,
+    /// The PeerConnection has been closed.
+    closed,
+};
+
+/// ConnectionState represents the state of the PeerConnection.
+pub const ConnectionState = enum {
+    /// The connection has been closed.
+    closed,
+    /// The PeerConnection transition to this state if either the ice connection is in failed
+    /// state or the dtls connection is in failed state.
+    failed,
+    /// The ice connection of is the disconnected state.
+    disconnected,
+    /// The initial state of the PeerConnection.
+    new,
+    /// The ice connection is connected and the dtls connection either is connected or closed.
+    connected,
+    /// If none of the other states apply, the PeerConnection is in the connecting state.
+    connecting,
+};
+
 pub const Event = union(enum) {
     negotiation_needed: void,
-    signaling_state: webrtc.SignalingState,
-    connection_state: webrtc.ConnectionState,
-    track_event_init: webrtc.TrackEventInit,
+    signaling_state: SignalingState,
+    connection_state: ConnectionState,
+    track_event_init: RtpTransceiver.TrackEventInit,
 };
 
 allocator: std.mem.Allocator,
-signaling_state: webrtc.SignalingState,
-connection_state: webrtc.ConnectionState,
+signaling_state: SignalingState,
+connection_state: ConnectionState,
 negotiation_needed: bool = false,
 
 local_description: ?ParsedSesssionDescription = null,
@@ -77,6 +116,7 @@ const ParsedSesssionDescription = struct {
     fn deinit(sess_desc: *ParsedSesssionDescription, allocator: std.mem.Allocator) void {
         allocator.free(sess_desc.sdp);
         sess_desc.session.deinit(allocator);
+        sess_desc.* = .empty(sess_desc.desc_type);
     }
 
     fn toSessionDescription(sess_desc: *const ParsedSesssionDescription) webrtc.SessionDescription {
@@ -134,7 +174,7 @@ pub fn deinit(pc: *PeerConnection) void {
 }
 
 /// Adds a new track to the PeerConnection and optionally associates it with a stream.
-pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: ?[]const u8) Error!*webrtc.RtpSender {
+pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: ?[]const u8) Error!*RtpSender {
     try pc.checkNotClosed();
 
     const maybe_transceiver = blk: {
@@ -156,14 +196,14 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: 
 /// Removes a track from the PeerConnection.
 ///
 /// Removing a track will update the transceiver's direction and stop sending media.
-pub fn removeTrack(pc: *PeerConnection, sender: *webrtc.RtpSender) !void {
+pub fn removeTrack(pc: *PeerConnection, sender: *RtpSender) !void {
     try pc.checkNotClosed();
     const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
     tr.removeTrack();
     try pc.checkNegotiationNeeded();
 }
 
-pub fn getTransceivers(pc: *const PeerConnection) []*webrtc.RtpTransceiver {
+pub fn getTransceivers(pc: *const PeerConnection) []*RtpTransceiver {
     return pc.transceivers.items;
 }
 
@@ -171,8 +211,8 @@ pub fn getTransceivers(pc: *const PeerConnection) []*webrtc.RtpTransceiver {
 pub fn addTransceiverFromTrack(
     pc: *PeerConnection,
     track: webrtc.MediaStreamTrack,
-    init_config: webrtc.TransceiverInit,
-) Error!*webrtc.RtpTransceiver {
+    init_config: RtpTransceiver.Init,
+) Error!*RtpTransceiver {
     const tr = try pc.initTransceiverFromTrack(track, init_config.stream_id, false);
     errdefer {
         tr.deinit(pc.dtls_transport.getIo(), pc.allocator);
@@ -191,10 +231,10 @@ pub fn addTransceiverFromTrack(
 pub fn addTransceiverFromKind(
     pc: *PeerConnection,
     kind: webrtc.TrackKind,
-    init_config: webrtc.TransceiverInit,
-) Error!*webrtc.RtpTransceiver {
+    init_config: RtpTransceiver.Init,
+) Error!*RtpTransceiver {
     const io = pc.dtls_transport.getIo();
-    const tr = try pc.allocator.create(webrtc.RtpTransceiver);
+    const tr = try pc.allocator.create(RtpTransceiver);
     errdefer pc.allocator.destroy(tr);
 
     tr.* = .{
@@ -218,7 +258,7 @@ pub fn addTransceiverFromKind(
 /// Stops the transceiver.
 ///
 /// Prefer calling this instead of `RtpTransceiver.stop()` directly, as this will also check if negotiation is needed.
-pub fn stopTransceiver(pc: *PeerConnection, transceiver: *webrtc.RtpTransceiver) Error!void {
+pub fn stopTransceiver(pc: *PeerConnection, transceiver: *RtpTransceiver) Error!void {
     try pc.checkNotClosed();
     transceiver.stop();
     try pc.checkNegotiationNeeded();
@@ -379,8 +419,8 @@ fn initTransceiverFromTrack(
     track: webrtc.MediaStreamTrack,
     stream_id: ?[]const u8,
     added_by_add_track: bool,
-) !*webrtc.RtpTransceiver {
-    const tr = try pc.allocator.create(webrtc.RtpTransceiver);
+) !*RtpTransceiver {
+    const tr = try pc.allocator.create(RtpTransceiver);
     errdefer tr.deinit(pc.dtls_transport.getIo(), pc.allocator);
 
     tr.* = .{
@@ -546,7 +586,7 @@ fn isNegotiationNeeded(pc: *const PeerConnection) bool {
     return false;
 }
 
-fn nextPeerConnectionState(ice_state: ice.ConnectionState, dtls_state: dtls.ConnectionState) webrtc.ConnectionState {
+fn nextPeerConnectionState(ice_state: ice.ConnectionState, dtls_state: dtls.ConnectionState) ConnectionState {
     return if (ice_state == .closed)
         .closed
     else if (ice_state == .failed or dtls_state == .failed)
@@ -597,9 +637,12 @@ fn applyLocalOffer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescript
     }
 
     if (pc.pending_local_description) |*desc| desc.deinit(pc.allocator);
-    pc.signaling_state = .have_local_offer;
+
+    pc.last_answer.deinit(pc.allocator);
     pc.pending_local_description = pc.last_offer;
     pc.last_offer = .empty(.offer);
+
+    pc.signaling_state = .have_local_offer;
     pc.mid +%= @intCast(offer.getMedias().len);
 
     try pc.queue.putOne(pc.dtls_transport.getIo(), .{ .signaling_state = pc.signaling_state });
@@ -632,6 +675,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
 
     try pc.demuxer.updateMaps(pc.dtls_transport.getIo(), &sdp_session);
 
+    pc.last_offer.deinit(pc.allocator);
     pc.pending_local_description = pc.last_answer;
     try pc.updateSignalingStateToStable();
     // pc.removeTransceivers();
@@ -658,7 +702,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     // TODO: Add rtcp feedback
 
     var first_media: ?*SDPSession.SDPMedia = null;
-    var track_events: std.ArrayList(webrtc.TrackEventInit) = .empty;
+    var track_events: std.ArrayList(RtpTransceiver.TrackEventInit) = .empty;
     defer track_events.deinit(pc.allocator);
     for (remote_sdp.getMedias(), 0..) |*media, idx| {
         var transceiver = blk: {
@@ -675,7 +719,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
                         for (pc.transceivers.items) |tr| if (tr.canAssociateMedia(media)) break :blk tr;
                     }
 
-                    const tr = try webrtc.RtpTransceiver.initFromSdpMedia(
+                    const tr = try RtpTransceiver.initFromSdpMedia(
                         pc.allocator,
                         io,
                         media,
@@ -754,7 +798,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     for (track_events.items) |event| try pc.queue.putOne(io, .{ .track_event_init = event });
 }
 
-fn appendTransceiver(pc: *PeerConnection, tr: *webrtc.RtpTransceiver) !void {
+fn appendTransceiver(pc: *PeerConnection, tr: *RtpTransceiver) !void {
     const io = pc.dtls_transport.getIo();
     pc.mutex.lockUncancelable(io);
     defer pc.mutex.unlock(io);
@@ -782,14 +826,14 @@ fn updateSignalingStateToStable(pc: *PeerConnection) !void {
     try pc.checkNegotiationNeeded();
 }
 
-fn findTransceiverByMediaIndex(pc: *PeerConnection, index: usize) ?*webrtc.RtpTransceiver {
+fn findTransceiverByMediaIndex(pc: *PeerConnection, index: usize) ?*RtpTransceiver {
     pc.mutex.lockUncancelable(pc.dtls_transport.getIo());
     defer pc.mutex.unlock(pc.dtls_transport.getIo());
     for (pc.transceivers.items) |tr| if (tr.sdp_mline_index) |tr_index| if (tr_index == index) return tr;
     return null;
 }
 
-fn findTransceiverByMid(pc: *PeerConnection, mid: u24) ?*webrtc.RtpTransceiver {
+fn findTransceiverByMid(pc: *PeerConnection, mid: u24) ?*RtpTransceiver {
     pc.mutex.lockUncancelable(pc.dtls_transport.getIo());
     defer pc.mutex.unlock(pc.dtls_transport.getIo());
     for (pc.transceivers.items) |tr| {
