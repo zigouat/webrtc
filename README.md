@@ -39,6 +39,56 @@ exe.root_module.addImportPath("webrtc", webrtc.module("webrtc"));
 ```
 
 ## Usage
+```zig
+const std = @import("std");
+const webrtc = @import("webrtc");
+
+const Io = std.Io;
+
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.gpa;
+
+    var pc1 = try webrtc.PeerConnection.init(io, allocator, .{});
+    defer pc1.deinit();
+
+    var pc2 = try webrtc.PeerConnection.init(io, allocator, .{});
+    defer pc2.deinit();
+
+    _ = try pc1.addTrack(.initWithId("video-track", .video), "stream");
+
+    const offer = try pc1.createOffer();
+    try pc1.setLocalDescription(offer);
+
+    var offer_with_candidates = (try pc1.getLocalDescription()).?;
+    defer offer_with_candidates.deinit(allocator);
+    try pc2.setRemoteDescription(offer_with_candidates);
+
+    const answer = try pc2.createAnswer();
+    try pc2.setLocalDescription(answer);
+    try pc1.setRemoteDescription(answer);
+
+    var grp: Io.Group = .init;
+    try grp.concurrent(io, listenForEvents, .{ io, &pc1 });
+    try grp.concurrent(io, listenForEvents, .{ io, &pc2 });
+    try grp.await(io);
+}
+
+fn listenForEvents(io: std.Io, pc: *webrtc.PeerConnection) !void {
+    _ = io;
+
+    // Start listening for events from the PeerConnection...
+    while (pc.poll()) |event| {
+        _ = event;
+    } else |_| {}
+}
+```
+
+For more complete examples, check [examples](./examples) folder.
+
+### Note For Windows Users
+Currently the examples are not working on Windows because `std.Io.net.Socket.receiveTimeout` is not implemented. You can still run 
+the examples by depending on third party package like [zio](https://github.com/lalinsky/zio).
 
 ## Other related projects
 
