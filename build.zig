@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
 
     const media = b.dependency("media", .{ .target = target, .optimize = optimize });
     const protocols = b.dependency("protocols", .{ .target = target, .optimize = optimize });
-    const mbedtls = b.dependency("mbedtls", .{ .target = target, .optimize = optimize });
+    const mbedtls = b.dependency("mbedtls", .{ .target = target, .optimize = .ReleaseFast });
 
     const config_header = mbedtls_config(b);
 

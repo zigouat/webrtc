@@ -109,7 +109,10 @@ pub fn deinit(tr: *RtpTransceiver, io: Io, allocator: std.mem.Allocator) void {
     allocator.destroy(tr);
 }
 
-pub fn toSdpMedia(tr: *RtpTransceiver, allocator: std.mem.Allocator) !SDPSession.SDPMedia {
+/// Creates an SDP media description from the transceiver.
+///
+/// Called when creating offers.
+pub fn toSdpMedia(tr: *RtpTransceiver, allocator: std.mem.Allocator) std.mem.Allocator.Error!SDPSession.SDPMedia {
     var media: SDPSession.SDPMedia = .empty;
 
     media.kind = tr.kind;
@@ -126,7 +129,12 @@ pub fn toSdpMedia(tr: *RtpTransceiver, allocator: std.mem.Allocator) !SDPSession
     return media;
 }
 
-pub fn toSdpMediaAnswer(tr: *const RtpTransceiver, allocator: std.mem.Allocator, media: *const SDPSession.SDPMedia) !SDPSession.SDPMedia {
+/// Creates an answer SDP media description from the transceiver.
+pub fn toSdpMediaAnswer(
+    tr: *const RtpTransceiver,
+    allocator: std.mem.Allocator,
+    media: *const SDPSession.SDPMedia,
+) std.mem.Allocator.Error!SDPSession.SDPMedia {
     var answer: SDPSession.SDPMedia = .empty;
     errdefer answer.deinit(allocator);
 
@@ -137,8 +145,10 @@ pub fn toSdpMediaAnswer(tr: *const RtpTransceiver, allocator: std.mem.Allocator,
     );
     defer if (answer.port == 0) allocator.free(codecs);
 
+    const rejected = codecs.len == 0 or tr.isStopped() or media.isRejected();
+
     answer.kind = tr.kind;
-    answer.port = if (codecs.len == 0 or tr.isStopped()) 0 else 9;
+    answer.port = if (rejected) 0 else 9;
     answer.rtcp_mux = true;
     answer.rtcp_rsize = false;
     answer.mid = tr.mid.?;
@@ -151,11 +161,11 @@ pub fn toSdpMediaAnswer(tr: *const RtpTransceiver, allocator: std.mem.Allocator,
         try allocator.dupe(webrtc.RtpCodecParameters, media.rtp_codec_parameters)
     else
         codecs;
-    if (answer.direction != .inactive) {
+    if (!rejected and answer.direction != .inactive) {
         answer.setIceCredentials(tr.transport.ice_agent.credentials);
     }
 
-    if (codecs.len != 0 and !tr.isStopped()) try tr.addSenderFields(allocator, &answer);
+    if (!rejected) try tr.addSenderFields(allocator, &answer);
     return answer;
 }
 
@@ -168,6 +178,7 @@ pub fn canAssociateTrack(tr: *const RtpTransceiver, kind: TrackKind) bool {
         tr.direction != .sendrecv;
 }
 
+/// Check if a remote media description can be associated with this transceiver.
 pub fn canAssociateMedia(tr: *const RtpTransceiver, media: *const SDPSession.SDPMedia) bool {
     return (media.direction == .sendrecv or media.direction == .recvonly) and
         tr.kind == media.kind and
@@ -176,6 +187,7 @@ pub fn canAssociateMedia(tr: *const RtpTransceiver, media: *const SDPSession.SDP
 }
 
 pub fn setSenderTrack(tr: *RtpTransceiver, track: MediaStreamTrack) void {
+    std.debug.assert(tr.sender.track == null);
     tr.sender.track = track;
     tr.direction = switch (tr.direction) {
         .recvonly => .sendrecv,
@@ -184,6 +196,9 @@ pub fn setSenderTrack(tr: *RtpTransceiver, track: MediaStreamTrack) void {
     };
 }
 
+/// Stops a transceiver.
+///
+/// Prefer calling PeerConnection `stopTransceiver` instead of calling this directly.
 pub fn stop(tr: *RtpTransceiver) void {
     if (!tr.stopping) {
         tr.stopping = true;
@@ -203,7 +218,6 @@ pub fn removeTrack(tr: *RtpTransceiver) void {
     if (tr.stopping or tr.sender.track == null) return;
 
     tr.sender.track = null;
-
     switch (tr.direction) {
         .sendrecv => tr.direction = .recvonly,
         .sendonly => tr.direction = .inactive,
@@ -211,7 +225,7 @@ pub fn removeTrack(tr: *RtpTransceiver) void {
     }
 }
 
-pub inline fn canSend(tr: *const RtpTransceiver) bool {
+pub fn canSend(tr: *const RtpTransceiver) bool {
     if (tr.isStopped()) return false;
     if (tr.current_direction) |direction| return direction == .sendrecv or direction == .sendonly;
     return false;
@@ -270,7 +284,7 @@ fn newTestRtpTransceiver(io: Io, allocator: std.mem.Allocator) !*RtpTransceiver 
     const tr = try allocator.create(RtpTransceiver);
 
     tr.* = .{
-        .sender = .init(null),
+        .sender = .init(.init(io, .video)),
         .receiver = try .init(.init(io, .video), allocator),
         .direction = .sendrecv,
         .kind = .video,
@@ -283,10 +297,127 @@ fn newTestRtpTransceiver(io: Io, allocator: std.mem.Allocator) !*RtpTransceiver 
 const testing = std.testing;
 const rtcp = @import("rtcp");
 
-test "canAssocaiteTrack" {
+test "initFromSdpMedia" {
+    var sdp_media = SDPSession.SDPMedia.empty;
+    sdp_media.mid = 1;
+
+    var tr = try RtpTransceiver.initFromSdpMedia(testing.allocator, testing.io, &sdp_media, 0);
+    defer tr.deinit(testing.io, testing.allocator);
+
+    try testing.expectEqual(.video, tr.kind);
+    try testing.expectEqual(.recvonly, tr.direction);
+    try testing.expectEqual(1, tr.mid);
+    try testing.expectEqual(0, tr.sdp_mline_index.?);
+    try testing.expect(tr.sender.track == null);
+    try testing.expect(!std.mem.eql(u8, &.{}, tr.receiver.track.getId()));
+
+    sdp_media.track_id = "track1";
+    var tr2 = try RtpTransceiver.initFromSdpMedia(testing.allocator, testing.io, &sdp_media, 1);
+    defer tr2.deinit(testing.io, testing.allocator);
+
+    try testing.expectEqualStrings("track1", tr2.receiver.track.getId());
+}
+
+test "toSdpMedia" {
+    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    defer transport.deinit();
+
+    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
+    defer tr.deinit(testing.io, testing.allocator);
+    tr.transport = &transport;
+
+    var media = try tr.toSdpMedia(testing.allocator);
+
+    try testing.expectEqual(.video, media.kind);
+    try testing.expectEqual(9, media.port);
+    try testing.expectEqual(.sendrecv, media.direction);
+    try testing.expect(media.mid == 0);
+    try testing.expect(media.rtp_codec_parameters.len > 0);
+    try testing.expect(media.track_id != null);
+    try testing.expectEqualStrings(media.track_id.?, tr.sender.track.?.getId());
+
+    const ice_credentials = transport.ice_agent.credentials;
+    try testing.expectEqualStrings(ice_credentials.username, media.ice_ufrag);
+    try testing.expectEqualStrings(ice_credentials.password, media.ice_pwd);
+
+    tr.direction = .recvonly;
+    tr.sender.track = null;
+
+    media.deinit(testing.allocator);
+    media = try tr.toSdpMedia(testing.allocator);
+    defer media.deinit(testing.allocator);
+
+    try testing.expectEqual(.recvonly, media.direction);
+    try testing.expect(media.track_id == null);
+}
+
+test "toSdpMediaAnswer: answer to offer" {
+    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    defer transport.deinit();
+
+    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
+    defer tr.deinit(testing.io, testing.allocator);
+    tr.mid = 0x30;
+    tr.transport = &transport;
+
+    var offer_media = SDPSession.SDPMedia.empty;
+    offer_media.kind = .video;
+    offer_media.direction = .sendrecv;
+    offer_media.port = 9;
+    offer_media.rtp_codec_parameters = try testing.allocator.dupe(webrtc.RtpCodecParameters, webrtc.getCodecCapabilities(.video));
+    defer offer_media.deinit(testing.allocator);
+
+    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media);
+    defer answer_media.deinit(testing.allocator);
+
+    try testing.expectEqual(.video, answer_media.kind);
+    try testing.expectEqual(9, answer_media.port);
+    try testing.expectEqual(.sendrecv, answer_media.direction);
+    try testing.expectEqual(0x30, answer_media.mid);
+    try testing.expect(answer_media.rtp_codec_parameters.len == offer_media.rtp_codec_parameters.len);
+
+    const ice_credentials = transport.ice_agent.credentials;
+    try testing.expectEqualStrings(ice_credentials.username, answer_media.ice_ufrag);
+    try testing.expectEqualStrings(ice_credentials.password, answer_media.ice_pwd);
+}
+
+test "toSdpMediaAnswer: reject offer" {
+    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
+    defer tr.deinit(testing.io, testing.allocator);
+    tr.mid = 0x30;
+
+    var offer_media = SDPSession.SDPMedia.empty;
+
+    // Offer port == 0
+    {
+        offer_media.port = 0;
+        var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media);
+        defer answer_media.deinit(testing.allocator);
+        try testing.expectEqual(.video, answer_media.kind);
+        try testing.expectEqual(0, answer_media.port);
+        try testing.expect(answer_media.ice_pwd.len == 0);
+        try testing.expect(answer_media.ice_ufrag.len == 0);
+    }
+
+    // No common codecs
+    {
+        offer_media.port = 9;
+        offer_media.rtp_codec_parameters = &.{};
+
+        var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media);
+        defer answer_media.deinit(testing.allocator);
+        try testing.expectEqual(.video, answer_media.kind);
+        try testing.expectEqual(0, answer_media.port);
+        try testing.expect(answer_media.ice_pwd.len == 0);
+        try testing.expect(answer_media.ice_ufrag.len == 0);
+    }
+}
+
+test "canAssociateTrack" {
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
     defer tr.deinit(testing.io, testing.allocator);
     tr.direction = .recvonly;
+    tr.sender.track = null;
 
     try testing.expect(tr.canAssociateTrack(.video));
 
@@ -300,6 +431,47 @@ test "canAssocaiteTrack" {
     tr.sender.track = null;
     tr.stopping = true;
     try testing.expect(!tr.canAssociateTrack(.video));
+}
+
+test "setSenderTrack" {
+    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
+    defer tr.deinit(testing.io, testing.allocator);
+    tr.direction = .recvonly;
+    tr.sender.track = null;
+
+    const track = MediaStreamTrack.init(testing.io, .video);
+    tr.setSenderTrack(track);
+
+    try testing.expectEqualStrings(track.getId(), tr.sender.track.?.getId());
+    try testing.expectEqual(.sendrecv, tr.direction);
+}
+
+test "stopTransceiver" {
+    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
+    defer tr.deinit(testing.io, testing.allocator);
+    tr.direction = .sendrecv;
+    tr.sender.track = .init(testing.io, .video);
+
+    tr.stop();
+
+    try testing.expect(tr.isStopped());
+    try testing.expectEqual(.inactive, tr.direction);
+}
+
+test "removeTrack" {
+    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
+    defer tr.deinit(testing.io, testing.allocator);
+
+    tr.removeTrack();
+
+    try testing.expect(tr.sender.track == null);
+    try testing.expectEqual(.recvonly, tr.direction);
+
+    tr.stop();
+    try testing.expectEqual(.inactive, tr.direction);
+
+    tr.removeTrack();
+    try testing.expectEqual(.inactive, tr.direction);
 }
 
 test "getRtcpReport" {
