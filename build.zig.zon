@@ -1,16 +1,16 @@
 .{
     .name = .webrtc,
-    .version = "0.0.0",
+    .version = "0.1.0",
     .fingerprint = 0xaf856b418fb19f23,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .media = .{
-            .url = "git+https://github.com/zigouat/media.git#d3cdb8229f45484365796982c923e176a3f72670",
-            .hash = "media-0.1.0-qc-dCI_6AADJliB0X1WVXfGbO7z5MWti4-BxqJZoEYur",
+            .url = "git+https://github.com/zigouat/media.git?ref=v0.2.0#bd25220dd7615030beeb2fb0b6560a159b940935",
+            .hash = "media-0.2.0-qc-dCG76AAAxmrgm5XxNRCuD9KREZGpFdlJROf8OH53y",
         },
-        .protocols = .{
-            .url = "git+https://github.com/zigouat/media-protocols.git#161ec7b3063fb2c5ec2976821bda659d2717835e",
-            .hash = "protocols-0.0.0-nNJdjzHDBAA9g_uFUJ2lc7Igq07-BXatgCFJbpA98uBV",
+        .media_protocols = .{
+            .url = "git+https://github.com/zigouat/media-protocols.git#900230365b99bcd429432dc178c77b509c857bc7",
+            .hash = "media_protocols-0.1.0-WF_ijxzKBAAGNCarvnP9n7ZPrUaMpXc8zyyuWrfFJykR",
         },
         .mbedtls = .{
             .url = "git+https://github.com/allyourcodebase/mbedtls.git#55f2af148634945e9508a3a50de2ccfe65eb971f",
