@@ -1,7 +1,6 @@
 name: Build Documentatiion
 
 on:
-  pull_request:
   push:
     tags:
       - "v*"
@@ -15,7 +14,4 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - run: zig build test --summary all
-      - name: Build examples
-        working-directory: examples
-        run: zig build-lib -femit-docs src/webrtc.zig 
+      - run: zig build-lib -femit-docs src/webrtc.zig
