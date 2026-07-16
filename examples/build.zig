@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
     const webrtc = b.dependency("webrtc", .{ .target = target, .optimize = optimize });
     const media = b.dependency("media", .{ .target = target, .optimize = optimize });
     const media_formats = b.dependency("media_formats", .{ .target = target, .optimize = optimize });
-    const protocols = b.dependency("protocols", .{ .target = target, .optimize = optimize });
+    const protocols = b.dependency("media_protocols", .{ .target = target, .optimize = optimize });
 
     const apps = &.{
         .{
@@ -35,7 +35,6 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "media", .module = media.module("media") },
                     .{ .name = "rtp", .module = protocols.module("rtp") },
                     .{ .name = "webrtc", .module = webrtc.module("webrtc") },
-                    .{ .name = "mp4", .module = media_formats.module("mp4") },
                     .{ .name = "ivf", .module = media_formats.module("ivf") },
                 },
             }),

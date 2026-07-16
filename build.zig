@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const media = b.dependency("media", .{ .target = target, .optimize = optimize });
-    const protocols = b.dependency("protocols", .{ .target = target, .optimize = optimize });
+    const media_protocols = b.dependency("media_protocols", .{ .target = target, .optimize = optimize });
     const mbedtls = b.dependency("mbedtls", .{ .target = target, .optimize = .ReleaseFast });
 
     const config_header = mbedtls_config(b);
@@ -20,11 +20,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "media", .module = media.module("media") },
-            .{ .name = "sdp", .module = protocols.module("sdp") },
-            .{ .name = "ice", .module = protocols.module("ice") },
-            .{ .name = "rtp", .module = protocols.module("rtp") },
-            .{ .name = "rtcp", .module = protocols.module("rtcp") },
-            .{ .name = "srtp", .module = protocols.module("srtp") },
+            .{ .name = "sdp", .module = media_protocols.module("sdp") },
+            .{ .name = "ice", .module = media_protocols.module("ice") },
+            .{ .name = "rtp", .module = media_protocols.module("rtp") },
+            .{ .name = "rtcp", .module = media_protocols.module("rtcp") },
+            .{ .name = "srtp", .module = media_protocols.module("srtp") },
         },
     });
 
