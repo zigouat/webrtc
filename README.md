@@ -35,7 +35,7 @@ Then, in your `build.zig` file, add the following:
 ```zig
 const webrtc = b.dependecy("webrtc", .{ .target = .target, .optimize = optimize });
 
-exe.root_module.addImportPath("webrtc", webrtc.module("webrtc"));
+exe.root_module.addImport("webrtc", webrtc.module("webrtc"));
 ```
 
 ## Usage
