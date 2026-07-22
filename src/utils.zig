@@ -1,13 +1,14 @@
 const std = @import("std");
 const webrtc = @import("webrtc.zig");
 
-pub fn getCodecIntersection(
-    allocator: std.mem.Allocator,
-    a: []const webrtc.RtpCodecParameters,
-    b: []const webrtc.RtpCodecParameters,
-) ![]webrtc.RtpCodecParameters {
-    var result_a: std.ArrayList(webrtc.RtpCodecParameters) = .empty;
-    var result_b: std.ArrayList(webrtc.RtpCodecParameters) = .empty;
+const RtpCodec = webrtc.RtpCodecParameters;
+
+/// Returns the codecs from `a` that are also present in `b` (matched by `RtpCodecParameters.eql`),
+/// including any associated RTX codecs. Result follows `b`'s order and is owned by the caller.
+/// Used when building an answer, where inputs are `const` and a fresh owned slice is needed.
+pub fn getCodecIntersection(allocator: std.mem.Allocator, a: []const RtpCodec, b: []const RtpCodec) ![]RtpCodec {
+    var result_a: std.ArrayList(RtpCodec) = .empty;
+    var result_b: std.ArrayList(RtpCodec) = .empty;
     errdefer result_a.deinit(allocator);
     defer result_b.deinit(allocator);
 
@@ -40,26 +41,21 @@ pub fn getCodecIntersection(
     return try result_a.toOwnedSlice(allocator);
 }
 
-pub fn intersectCodecs(
-    a: []webrtc.RtpCodecParameters,
-    b: []webrtc.RtpCodecParameters,
-) !struct { []const webrtc.RtpCodecParameters, []const webrtc.RtpCodecParameters } {
+/// Reorders `a` and `b` in place so matched codecs (and their RTX pairs) line up by index, then
+/// returns the aligned prefixes `.{ a_matched, b_matched }`, which borrow from the inputs.
+pub fn intersectCodecs(a: []RtpCodec, b: []RtpCodec) error{NoCommonMedia}!struct { []const RtpCodec, []const RtpCodec } {
     sortByRtx(a);
     sortByRtx(b);
 
     var idx: usize = 0;
     while (idx < a.len and !a[idx].isRtx()) : (idx += 1) {
-        const pos: ?usize = blk: {
-            var pos: usize = idx;
-            while (pos < b.len and !a[idx].eql(&b[pos])) : (pos += 1) {}
-            if (pos >= b.len) break :blk null;
-            break :blk if (pos < b.len) pos else null;
+        const match: ?usize = blk: {
+            var p: usize = idx;
+            while (p < b.len and !a[idx].eql(&b[p])) : (p += 1) {}
+            break :blk if (p < b.len) p else null;
         };
 
-        if (pos == null) break;
-        const tmp = b[idx];
-        b[idx] = b[pos.?];
-        b[pos.?] = tmp;
+        if (match) |pos| swap(b, idx, pos) else break;
     }
 
     if (idx == 0) return error.NoCommonMedia;
@@ -83,7 +79,8 @@ pub fn intersectCodecs(
     return .{ a[0..offset], b[0..offset] };
 }
 
-fn findRtx(codecs: []const webrtc.RtpCodecParameters, pt: u8) ?usize {
+/// Index of the RTX codec whose `apt` references payload type `pt`, if any.
+fn findRtx(codecs: []const RtpCodec, pt: u8) ?usize {
     for (codecs, 0..) |*codec, idx| if (codec.isRtx() and codec.fmtp_params.?.rtx.apt == pt) {
         return idx;
     };
@@ -91,7 +88,8 @@ fn findRtx(codecs: []const webrtc.RtpCodecParameters, pt: u8) ?usize {
     return null;
 }
 
-fn sortByRtx(codecs: []webrtc.RtpCodecParameters) void {
+/// Moves RTX codecs after the primary codecs in place.
+fn sortByRtx(codecs: []RtpCodec) void {
     var idx: usize = 0;
     while (idx < codecs.len) : (idx += 1) {
         const codec = &codecs[idx];
@@ -108,8 +106,91 @@ fn sortByRtx(codecs: []webrtc.RtpCodecParameters) void {
     }
 }
 
-fn swap(codecs: []webrtc.RtpCodecParameters, i: usize, j: usize) void {
+fn swap(codecs: []RtpCodec, i: usize, j: usize) void {
     const tmp = codecs[i];
     codecs[i] = codecs[j];
     codecs[j] = tmp;
+}
+
+const testing = std.testing;
+
+fn vp8(pt: u8) RtpCodec {
+    return .{ .payload_type = pt, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000 };
+}
+
+fn opus(pt: u8) RtpCodec {
+    return .{ .payload_type = pt, .mime_type = webrtc.MimeType.Opus, .clock_rate = 48_000, .channels = 2 };
+}
+
+fn rtx(pt: u8, apt: u8) RtpCodec {
+    return .{ .payload_type = pt, .mime_type = webrtc.MimeType.Rtx, .clock_rate = 90_000, .fmtp_params = .{ .rtx = .{ .apt = apt } } };
+}
+
+test "getCodecIntersection: keeps matching a-side codecs, in b order" {
+    const a = [_]RtpCodec{ vp8(96), opus(111) };
+    const b = [_]RtpCodec{ opus(111), vp8(100) };
+
+    const result = try getCodecIntersection(testing.allocator, &a, &b);
+    defer testing.allocator.free(result);
+
+    // Follows b's order (opus, then vp8) but carries a's payload types.
+    try testing.expectEqual(2, result.len);
+    try testing.expectEqual(111, result[0].payload_type);
+    try testing.expectEqual(96, result[1].payload_type);
+}
+
+test "getCodecIntersection: no common codecs returns empty" {
+    const a = [_]RtpCodec{vp8(96)};
+    const b = [_]RtpCodec{opus(111)};
+
+    const result = try getCodecIntersection(testing.allocator, &a, &b);
+    defer testing.allocator.free(result);
+
+    try testing.expectEqual(0, result.len);
+}
+
+test "getCodecIntersection: includes the associated rtx codec" {
+    const a = [_]RtpCodec{ vp8(96), rtx(97, 96) };
+    const b = [_]RtpCodec{ vp8(100), rtx(101, 100) };
+
+    const result = try getCodecIntersection(testing.allocator, &a, &b);
+    defer testing.allocator.free(result);
+
+    try testing.expectEqual(2, result.len);
+    try testing.expectEqual(96, result[0].payload_type);
+    try testing.expect(result[1].isRtx());
+    try testing.expectEqual(97, result[1].payload_type);
+    try testing.expectEqual(96, result[1].fmtp_params.?.rtx.apt);
+}
+
+test "intersectCodecs: aligns the matched codec on both sides" {
+    var a = [_]RtpCodec{ vp8(96), opus(111) };
+    var b = [_]RtpCodec{vp8(100)};
+
+    const result = try intersectCodecs(&a, &b);
+
+    try testing.expectEqual(1, result.@"0".len);
+    try testing.expectEqual(1, result.@"1".len);
+    try testing.expectEqual(96, result.@"0"[0].payload_type);
+    try testing.expectEqual(100, result.@"1"[0].payload_type);
+}
+
+test "intersectCodecs: no common codecs returns error" {
+    var a = [_]RtpCodec{vp8(96)};
+    var b = [_]RtpCodec{opus(111)};
+
+    try testing.expectError(error.NoCommonMedia, intersectCodecs(&a, &b));
+}
+
+test "intersectCodecs: pairs the associated rtx codecs" {
+    var a = [_]RtpCodec{ vp8(96), rtx(97, 96) };
+    var b = [_]RtpCodec{ vp8(100), rtx(101, 100) };
+
+    const result = try intersectCodecs(&a, &b);
+
+    try testing.expectEqual(2, result.@"0".len);
+    try testing.expectEqual(2, result.@"1".len);
+    try testing.expect(result.@"0"[1].isRtx());
+    try testing.expectEqual(97, result.@"0"[1].payload_type);
+    try testing.expectEqual(101, result.@"1"[1].payload_type);
 }
