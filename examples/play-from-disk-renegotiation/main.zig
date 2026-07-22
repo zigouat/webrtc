@@ -12,6 +12,7 @@ const AppState = struct {
     pc: webrtc.PeerConnection,
     file_path: []const u8,
     senders: std.ArrayList(*webrtc.RtpSender) = .empty,
+    gathering_done: Io.Event = .unset,
 
     pub fn deinit(self: *AppState, allocator: std.mem.Allocator) void {
         self.pc.deinit();
@@ -63,6 +64,10 @@ const AppState = struct {
                     grp.cancel(io);
                     return;
                 },
+                else => {},
+            },
+            .gathering_state => |state| switch (state) {
+                .complete => self.gathering_done.set(io),
                 else => {},
             },
             else => {},
@@ -138,7 +143,11 @@ pub fn main(init: std.process.Init) !void {
 
     app_state = .{
         .file_path = file_path,
-        .pc = try webrtc.PeerConnection.init(io, allocator, .{}),
+        .pc = try webrtc.PeerConnection.init(io, allocator, .{
+            .rtc_configuration = .{
+                .ice_servers = &.{.{ .url = "stun:stun.l.google.com:19302" }},
+            },
+        }),
     };
     defer app_state.deinit(allocator);
 
@@ -194,6 +203,7 @@ fn doHandleClientConnection(io: Io, allocator: std.mem.Allocator, stream: Io.net
         std.debug.print("Offer:\n{s}\n", .{parsed.value.sdp});
 
         try app_state.addTrack(io, allocator, parsed.value);
+        try app_state.gathering_done.wait(io);
         try writeLocalDescription(allocator, &req);
     } else if (std.mem.eql(u8, req.head.target, "/removeVideo") and req.head.method == .POST) {
         std.log.info("Remove video", .{});
@@ -228,7 +238,7 @@ fn writeLocalDescription(allocator: std.mem.Allocator, req: *std.http.Server.Req
     var answer = (try app_state.pc.getLocalDescription()).?;
     defer answer.deinit(allocator);
 
-    std.debug.print("{s}\n", .{answer.sdp});
+    std.log.info("Answer:\n{s}\n", .{answer.sdp});
 
     const formatter = std.json.fmt(answer, .{});
     try formatter.format(&body_writer.writer);

@@ -13,6 +13,7 @@ const SDPSession = @import("sdp_session.zig");
 const Demuxer = @import("pc/demuxer.zig");
 const RtpTransceiver = @import("rtp_transceiver.zig");
 const RtpSender = @import("rtp_sender.zig");
+const Mid = @import("mid.zig");
 
 const Io = std.Io;
 const PeerConnection = @This();
@@ -68,6 +69,7 @@ pub const Event = union(enum) {
     negotiation_needed: void,
     signaling_state: SignalingState,
     connection_state: ConnectionState,
+    gathering_state: ice.GatheringState,
     track_event_init: RtpTransceiver.TrackEventInit,
 };
 
@@ -83,7 +85,7 @@ pub const PeerConfiguration = struct {
 };
 
 pub const Config = struct {
-    /// This is W3C's RTCConfiguration, which defines a set of parameters to configure how the peer-to-peer.
+    /// This is W3C's RTCConfiguration, which defines a set of parameters to configure the PeerConnection.
     rtc_configuration: RTCConfiguration = .{},
     /// This is the internal configuration for the PeerConnection, which defines a set of parameters to configure the PeerConnection.
     peer_config: PeerConfiguration = .{},
@@ -480,7 +482,7 @@ fn createFirstOffer(pc: *PeerConnection) Error!webrtc.SessionDescription {
         media.* = .empty;
 
         media.* = try tr.toSdpMedia(pc.allocator);
-        media.mid = try intToMid(mid);
+        media.mid = try Mid.fromInt(mid);
 
         tr.sdp_mline_index = @intCast(medias.items.len - 1);
         mid +%= 1;
@@ -534,7 +536,7 @@ fn createSubsequentOffer(pc: *PeerConnection) !webrtc.SessionDescription {
             break :blk media;
         };
         media.* = try tr.toSdpMedia(pc.allocator);
-        media.mid = try intToMid(pc.mid);
+        media.mid = try Mid.fromInt(pc.mid);
         pc.mid +%= 1;
     };
 
@@ -555,13 +557,6 @@ fn createSubsequentOffer(pc: *PeerConnection) !webrtc.SessionDescription {
     };
 
     return pc.last_offer.toSessionDescription();
-}
-
-fn intToMid(mid: u16) !u24 {
-    if (mid > 999) return error.MidOverflow;
-    var bytes: [3]u8 = @splat(0);
-    _ = std.fmt.bufPrint(&bytes, "{}", .{mid}) catch unreachable;
-    return @bitCast(bytes);
 }
 
 fn checkNegotiationNeeded(pc: *PeerConnection) !void {
@@ -629,6 +624,7 @@ fn writeDescriptionWithCandidates(pc: *PeerConnection, sess_desc: *const ParsedS
         defer ice_agent.mutex.unlock(io);
 
         media.candidates = ice_agent.localCandidates();
+        media.end_of_candidates = ice_agent.gatheringState() == .complete;
         defer media.candidates = &.{};
 
         try sess_desc.session.write(w);
@@ -846,7 +842,7 @@ fn findTransceiverByMediaIndex(pc: *PeerConnection, index: usize) ?*RtpTransceiv
     return null;
 }
 
-fn findTransceiverByMid(pc: *PeerConnection, mid: u24) ?*RtpTransceiver {
+fn findTransceiverByMid(pc: *PeerConnection, mid: Mid.Int) ?*RtpTransceiver {
     pc.mutex.lockUncancelable(pc.dtls_transport.getIo());
     defer pc.mutex.unlock(pc.dtls_transport.getIo());
     for (pc.transceivers.items) |tr| {
@@ -880,6 +876,7 @@ fn pollTransport(pc: *PeerConnection) !void {
                 }
             }
         },
+        .ice_gathering_state => |state| try pc.queue.putOne(io, .{ .gathering_state = state }),
         .rtcp => |data| pc.dtls_transport.ice_agent.destroyPacket(data),
         .rtp => |data| {
             errdefer pc.dtls_transport.ice_agent.destroyPacket(data);

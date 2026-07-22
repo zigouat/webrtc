@@ -5,6 +5,7 @@ const DtlsTransport = @import("dtls_transport.zig");
 const SDPSession = @import("sdp_session.zig");
 const RtpSender = @import("rtp_sender.zig");
 const RtpReceiver = @import("rtp_receiver.zig");
+const Mid = @import("mid.zig");
 
 const Io = std.Io;
 const RtpTransceiver = @This();
@@ -75,7 +76,7 @@ kind: TrackKind,
 direction: Direction,
 current_direction: ?Direction = null,
 fired_direction: ?Direction = null,
-mid: ?u24 = null, // mid is 3 bytes at most
+mid: ?Mid.Int = null,
 sdp_mline_index: ?u8 = null,
 stopping: bool = false,
 stopped: bool = false,

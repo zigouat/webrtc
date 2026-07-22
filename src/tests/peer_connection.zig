@@ -21,9 +21,15 @@ test "setLocalDescription: set offer" {
     const offer = try pc.createOffer();
     try pc.setLocalDescription(offer);
 
-    const event = try pc.poll();
-    try std.testing.expectEqual(.signaling_state, std.meta.activeTag(event));
-    try std.testing.expectEqual(.have_local_offer, event.signaling_state);
+    while (true) {
+        switch (try pc.poll()) {
+            .signaling_state => |state| {
+                try std.testing.expectEqual(.have_local_offer, state);
+                break;
+            },
+            else => {},
+        }
+    }
 }
 
 test "setLocalDescription: set offer multiple times" {

@@ -1,11 +1,12 @@
 const std = @import("std");
 const SDPSession = @import("../sdp_session.zig");
 const rtp = @import("rtp");
+const Mid = @import("../mid.zig");
 
 const Demuxer = @This();
 
-ssrc_to_mid: std.AutoHashMap(u32, u24),
-pt_to_mid: std.AutoHashMap(u8, u24),
+ssrc_to_mid: std.AutoHashMap(u32, Mid.Int),
+pt_to_mid: std.AutoHashMap(u8, Mid.Int),
 mid_id: ?u16 = null,
 mutex: std.Io.Mutex = .init,
 
@@ -39,7 +40,7 @@ pub fn updateMaps(demuxer: *Demuxer, io: std.Io, sdp_session: *const SDPSession)
     }
 }
 
-pub fn getMid(demuxer: *Demuxer, io: std.Io, packet: *const rtp.Packet) !?u24 {
+pub fn getMid(demuxer: *Demuxer, io: std.Io, packet: *const rtp.Packet) !?Mid.Int {
     try demuxer.mutex.lock(io);
     defer demuxer.mutex.unlock(io);
 
@@ -50,11 +51,9 @@ pub fn getMid(demuxer: *Demuxer, io: std.Io, packet: *const rtp.Packet) !?u24 {
 
     if (demuxer.mid_id != null) if (getMidFromPacket(packet, demuxer.mid_id.?) catch return null) |mid| {
         if (mid.len <= 3) {
-            var mid_bytes: [3]u8 = @splat(0);
-            @memcpy(mid_bytes[0..mid.len], mid);
-
-            try demuxer.ssrc_to_mid.put(packet.header.ssrc, @bitCast(mid_bytes));
-            return @bitCast(mid_bytes);
+            const packed_mid = Mid.fromBytes(mid) catch unreachable;
+            try demuxer.ssrc_to_mid.put(packet.header.ssrc, packed_mid);
+            return packed_mid;
         }
     };
 
