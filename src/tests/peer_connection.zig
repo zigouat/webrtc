@@ -397,10 +397,10 @@ test "negotiation between peers" {
 }
 
 test "negotiation between peers: add/remove tracks" {
-    var pc1: PeerConnection = try .init(io, allocator, .{ .inner_queue_size = 1 });
+    var pc1: PeerConnection = try .init(io, allocator, .{});
     defer pc1.deinit();
 
-    var pc2: PeerConnection = try .init(io, allocator, .{ .inner_queue_size = 1 });
+    var pc2: PeerConnection = try .init(io, allocator, .{});
     defer pc2.deinit();
 
     var pc1_collector: EventCollector = .init();

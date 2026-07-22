@@ -71,17 +71,35 @@ pub const Event = union(enum) {
     track_event_init: RtpTransceiver.TrackEventInit,
 };
 
+pub const RTCConfiguration = struct {
+    /// List of ICE servers used to establish the connection.
+    ///
+    /// Only public stun servers are supported at the moment.
+    ice_servers: []const ice.IceServer = &.{},
+};
+
+pub const PeerConfiguration = struct {
+    inner_queue_size: usize = 8,
+};
+
+pub const Config = struct {
+    /// This is W3C's RTCConfiguration, which defines a set of parameters to configure how the peer-to-peer.
+    rtc_configuration: RTCConfiguration = .{},
+    /// This is the internal configuration for the PeerConnection, which defines a set of parameters to configure the PeerConnection.
+    peer_config: PeerConfiguration = .{},
+};
+
 allocator: std.mem.Allocator,
 signaling_state: SignalingState,
 connection_state: ConnectionState,
 negotiation_needed: bool = false,
 
-local_description: ?ParsedSesssionDescription = null,
-remote_description: ?ParsedSesssionDescription = null,
-pending_local_description: ?ParsedSesssionDescription = null,
-pending_remote_description: ?ParsedSesssionDescription = null,
-last_offer: ParsedSesssionDescription = .empty(.offer),
-last_answer: ParsedSesssionDescription = .empty(.answer),
+local_description: ?ParsedSessionDescription = null,
+remote_description: ?ParsedSessionDescription = null,
+pending_local_description: ?ParsedSessionDescription = null,
+pending_remote_description: ?ParsedSessionDescription = null,
+last_offer: ParsedSessionDescription = .empty(.offer),
+last_answer: ParsedSessionDescription = .empty(.answer),
 
 streams: std.ArrayList(webrtc.MediaStream) = .empty,
 transceivers: std.ArrayList(*webrtc.RtpTransceiver) = .empty,
@@ -96,16 +114,12 @@ queue: Io.Queue(Event),
 group: std.Io.Group = .init,
 mutex: std.Io.Mutex = .init,
 
-pub const Config = struct {
-    inner_queue_size: u8 = 5,
-};
-
-const ParsedSesssionDescription = struct {
+const ParsedSessionDescription = struct {
     desc_type: webrtc.SessionDescriptionType,
     sdp: []const u8,
     session: SDPSession,
 
-    fn empty(desc_type: webrtc.SessionDescriptionType) ParsedSesssionDescription {
+    fn empty(desc_type: webrtc.SessionDescriptionType) ParsedSessionDescription {
         return .{
             .desc_type = desc_type,
             .sdp = &.{},
@@ -113,30 +127,32 @@ const ParsedSesssionDescription = struct {
         };
     }
 
-    fn deinit(sess_desc: *ParsedSesssionDescription, allocator: std.mem.Allocator) void {
+    fn deinit(sess_desc: *ParsedSessionDescription, allocator: std.mem.Allocator) void {
         allocator.free(sess_desc.sdp);
         sess_desc.session.deinit(allocator);
         sess_desc.* = .empty(sess_desc.desc_type);
     }
 
-    fn toSessionDescription(sess_desc: *const ParsedSesssionDescription) webrtc.SessionDescription {
+    fn toSessionDescription(sess_desc: *const ParsedSessionDescription) webrtc.SessionDescription {
         return .{
             .type = sess_desc.desc_type,
             .sdp = sess_desc.sdp,
         };
     }
 
-    fn getIceRole(sess_desc: *const ParsedSesssionDescription) ice.Role {
+    fn getIceRole(sess_desc: *const ParsedSessionDescription) ice.Role {
         if (sess_desc.desc_type == .offer or sess_desc.session.ice_lite) return .controlling;
         return .controlled;
     }
 };
 
 pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnection {
-    var dtls_transport: DtlsTransport = try .init(io, allocator, .{});
+    var dtls_transport: DtlsTransport = try .init(io, allocator, .{
+        .ice_servers = config.rtc_configuration.ice_servers,
+    });
     errdefer dtls_transport.deinit();
 
-    const queue_buffer = try allocator.alloc(Event, config.inner_queue_size);
+    const queue_buffer = try allocator.alloc(Event, config.peer_config.inner_queue_size);
 
     return .{
         .signaling_state = .stable,
@@ -292,7 +308,6 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
     sdp_session.medias = try .initCapacity(pc.allocator, offer.session.getMedias().len);
     pc.dtls_transport.session.getFingerprint(&sdp_session.fingerprint);
 
-    var idx: usize = 0;
     for (offer.session.getMedias()) |*media| {
         const tr = pc.findTransceiverByMid(media.mid) orelse return error.Unexpected;
         const new_media = sdp_session.medias.addOneAssumeCapacity();
@@ -302,8 +317,6 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
             cloned.bundle_only = false;
             break :blk cloned;
         } else try tr.toSdpMediaAnswer(pc.allocator, media);
-
-        idx += 1;
     }
 
     try sdp_session.write(&w.writer);
@@ -601,7 +614,7 @@ fn nextPeerConnectionState(ice_state: ice.ConnectionState, dtls_state: dtls.Conn
         .connecting;
 }
 
-fn writeDescriptionWithCandidates(pc: *PeerConnection, sess_desc: *const ParsedSesssionDescription, w: *Io.Writer) !void {
+fn writeDescriptionWithCandidates(pc: *PeerConnection, sess_desc: *const ParsedSessionDescription, w: *Io.Writer) !void {
     const session = sess_desc.session;
     const maybe_media = blk: {
         for (session.getMedias()) |*media| if (!media.isRejected()) break :blk media;
@@ -615,7 +628,7 @@ fn writeDescriptionWithCandidates(pc: *PeerConnection, sess_desc: *const ParsedS
         ice_agent.mutex.lockUncancelable(io);
         defer ice_agent.mutex.unlock(io);
 
-        media.candidates = ice_agent.candidates.items;
+        media.candidates = ice_agent.localCandidates();
         defer media.candidates = &.{};
 
         try sess_desc.session.write(w);
@@ -631,7 +644,7 @@ fn applyLocalOffer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescript
         transceiver.mid = media.mid;
     }
 
-    if (pc.dtls_transport.ice_agent.gathering_state == .new) {
+    if (pc.dtls_transport.ice_agent.gatheringState() == .new) {
         try pc.group.concurrent(pc.dtls_transport.getIo(), pollTransportWrapper, .{pc});
         try pc.dtls_transport.gatherCandidates(pc.last_offer.getIceRole());
     }
@@ -883,16 +896,17 @@ fn writeIceCandidates(pc: *PeerConnection, w: *Io.Writer) !void {
     try ice_agent.mutex.lock(pc.dtls_transport.getIo());
     defer ice_agent.mutex.unlock(pc.dtls_transport.getIo());
 
-    for (ice_agent.candidates.items) |*candidate| {
+    for (ice_agent.localCandidates()) |*candidate| {
         try w.print("a=candidate:{f}\r\n", .{candidate});
     }
 
-    if (ice_agent.gathering_state == .complete) {
+    if (ice_agent.gatheringState() == .complete) {
         const attr: SDPAttribute = .end_of_candidates;
         try attr.write(w);
     }
 }
 
+// TODO: we keep it until we implement proper deletion
 fn removeTransceivers(pc: *PeerConnection) void {
     if (pc.local_description == null or pc.remote_description == null) return;
     const local = pc.local_description.?.session;
