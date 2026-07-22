@@ -121,7 +121,7 @@ pub fn toSdpMedia(tr: *RtpTransceiver, allocator: std.mem.Allocator) std.mem.All
     media.rtp_codec_parameters = try allocator.dupe(webrtc.RtpCodecParameters, webrtc.getCodecCapabilities(tr.kind));
     media.rtcp_mux = true;
     media.rtcp_rsize = false;
-    media.setIceCredentials(tr.transport.ice_agent.credentials);
+    media.setIceCredentials(tr.transport.ice_agent.localCredentials());
 
     try tr.addSenderFields(allocator, &media);
     if (tr.mid) |mid| media.mid = mid;
@@ -162,7 +162,7 @@ pub fn toSdpMediaAnswer(
     else
         codecs;
     if (!rejected and answer.direction != .inactive) {
-        answer.setIceCredentials(tr.transport.ice_agent.credentials);
+        answer.setIceCredentials(tr.transport.ice_agent.localCredentials());
     }
 
     if (!rejected) try tr.addSenderFields(allocator, &answer);
@@ -336,7 +336,7 @@ test "toSdpMedia" {
     try testing.expect(media.track_id != null);
     try testing.expectEqualStrings(media.track_id.?, tr.sender.track.?.getId());
 
-    const ice_credentials = transport.ice_agent.credentials;
+    const ice_credentials = transport.ice_agent.localCredentials();
     try testing.expectEqualStrings(ice_credentials.username, media.ice_ufrag);
     try testing.expectEqualStrings(ice_credentials.password, media.ice_pwd);
 
@@ -376,7 +376,7 @@ test "toSdpMediaAnswer: answer to offer" {
     try testing.expectEqual(0x30, answer_media.mid);
     try testing.expect(answer_media.rtp_codec_parameters.len == offer_media.rtp_codec_parameters.len);
 
-    const ice_credentials = transport.ice_agent.credentials;
+    const ice_credentials = transport.ice_agent.localCredentials();
     try testing.expectEqualStrings(ice_credentials.username, answer_media.ice_ufrag);
     try testing.expectEqualStrings(ice_credentials.password, answer_media.ice_pwd);
 }

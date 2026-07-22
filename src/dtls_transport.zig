@@ -40,10 +40,14 @@ pub const Event = union(enum) {
     rtcp: []const u8,
 };
 
-pub const Config = struct {};
+pub const Config = struct {
+    ice_servers: []const ice.IceServer = &.{},
+};
 
-pub fn init(io: std.Io, allocator: std.mem.Allocator, _: Config) !DtlsTransport {
-    var ice_agent: ice.Agent = try .init(io, allocator, .{});
+pub fn init(io: std.Io, allocator: std.mem.Allocator, config: Config) !DtlsTransport {
+    var ice_agent: ice.Agent = try .init(io, allocator, .{
+        .ice_servers = config.ice_servers,
+    });
     errdefer ice_agent.deinit();
 
     const pair = try dtls.P256KeyPair.init(io);
@@ -80,7 +84,7 @@ pub fn setPeerFingerprint(transport: *DtlsTransport, fingerprint: *const [32]u8)
 
 pub fn applyIceAttributes(transport: *DtlsTransport, media: *SDPSession.SDPMedia) !void {
     Logger.debug("Apply remote credentials and candidates...", .{});
-    const remote_credens = transport.ice_agent.remote_credentials;
+    const remote_credens = transport.ice_agent.remoteCredentials();
     if (remote_credens) |credens| {
         if (!std.mem.eql(u8, media.ice_ufrag, credens.username) or !std.mem.eql(u8, media.ice_pwd, credens.password))
             return error.MismatchedIceCredentials;
@@ -102,7 +106,7 @@ pub fn gatherCandidates(transport: *DtlsTransport, role: ice.Role) !void {
 }
 
 pub fn getConnectionState(transport: *const DtlsTransport) struct { ice.ConnectionState, dtls.ConnectionState } {
-    return .{ transport.ice_agent.connection_state, transport.session.connection_state };
+    return .{ transport.ice_agent.connectionState(), transport.session.connection_state };
 }
 
 pub inline fn sendRtp(transport: *DtlsTransport, data: []const u8) SendError!void {
@@ -131,6 +135,10 @@ pub fn poll(transport: *DtlsTransport) !Event {
                 transport.session.handleData(null) catch {};
             }
             return .{ .ice_connection_state = ice_connection_state };
+        },
+        .gathering_state => |gathering_state| {
+            Logger.debug("ICE gathering state changed: {}", .{gathering_state});
+            continue;
         },
         .data => |ice_data| {
             defer transport.ice_agent.destroyPacket(ice_data);
