@@ -277,4 +277,5 @@ test {
     _ = @import("sdp_session.zig");
     _ = @import("rtp_transceiver.zig");
     _ = @import("rtp_sender.zig");
+    _ = @import("mid.zig");
 }

@@ -6,6 +6,7 @@ const webrtc = @import("webrtc.zig");
 const SDPSession = @This();
 const Direction = @import("rtp_transceiver.zig").Direction;
 const SDPAttribute = sdp.Attribute.ParsedAttribute;
+const Mid = @import("mid.zig");
 
 const sdp_header =
     \\v=0
@@ -42,7 +43,7 @@ pub const SDPMedia = struct {
     bundle_only: bool,
     rtp_codec_parameters: []webrtc.RtpCodecParameters,
     rtp_header_extensions: []webrtc.RtpHeaderExtensionParameter,
-    mid: u24,
+    mid: Mid.Int,
     direction: Direction,
     ice_ufrag: []const u8,
     ice_pwd: []const u8,
@@ -115,12 +116,7 @@ pub const SDPMedia = struct {
         var attr_it = media.attributeIterator();
         while (try attr_it.next()) |attr| switch (try attr.parse()) {
             .bundle_only => sdp_media.bundle_only = true,
-            .mid => |v| {
-                if (v.len > 3) return error.InvalidSDP;
-                var mid: [3]u8 = @splat(0);
-                @memcpy(mid[0..v.len], v);
-                sdp_media.mid = @bitCast(mid);
-            },
+            .mid => |v| sdp_media.mid = Mid.fromBytes(v) catch return error.InvalidSDP,
             .setup => |v| sdp_media.setup = v,
             .direction => |v| sdp_media.direction = std.meta.stringToEnum(Direction, v) orelse .sendrecv,
             .ice_ufrag => |v| sdp_media.ice_ufrag = v,
@@ -212,8 +208,8 @@ pub const SDPMedia = struct {
         try SDPAttribute.write(.{ .setup = media.setup }, w);
         try SDPAttribute.write(.{ .direction = @tagName(media.direction) }, w);
         if (media.mid != 0) {
-            const mid: [3]u8 = @bitCast(media.mid);
-            try SDPAttribute.write(.{ .mid = std.mem.sliceTo(&mid, 0) }, w);
+            const bytes = Mid.toBytes(media.mid);
+            try SDPAttribute.write(.{ .mid = std.mem.sliceTo(&bytes, 0) }, w);
         }
 
         if (media.port != 0) {
@@ -351,7 +347,8 @@ pub fn write(s: *const SDPSession, w: *std.Io.Writer) !void {
     if (bundle) {
         try w.writeAll("a=group:BUNDLE");
         for (s.getMedias()) |*m| if (m.port != 0) {
-            try w.print(" {s}", .{std.mem.sliceTo(&@as([3]u8, @bitCast(m.mid)), 0)});
+            const bytes = Mid.toBytes(m.mid);
+            try w.print(" {s}", .{std.mem.sliceTo(&bytes, 0)});
         };
         try w.writeAll("\r\n");
     }

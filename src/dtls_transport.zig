@@ -35,6 +35,7 @@ mutex: std.Io.Mutex = .init,
 pub const Event = union(enum) {
     ice_connection_state: ice.ConnectionState,
     ice_candidate: ?ice.Candidate,
+    ice_gathering_state: ice.GatheringState,
     dtls_connection_state: dtls.ConnectionState,
     rtp: []const u8,
     rtcp: []const u8,
@@ -136,10 +137,7 @@ pub fn poll(transport: *DtlsTransport) !Event {
             }
             return .{ .ice_connection_state = ice_connection_state };
         },
-        .gathering_state => |gathering_state| {
-            Logger.debug("ICE gathering state changed: {}", .{gathering_state});
-            continue;
-        },
+        .gathering_state => |gathering_state| return .{ .ice_gathering_state = gathering_state },
         .data => |ice_data| {
             defer transport.ice_agent.destroyPacket(ice_data);
             switch (getPacketType(ice_data)) {
