@@ -19,7 +19,7 @@ const sdp_header =
 
 pub const SDPError = error{
     ParseError,
-    MissingBundle,
+    MissingBundleGroup,
     InvalidAttribute,
 };
 
@@ -317,7 +317,9 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !SDPSession {
 
     var media_it = session.mediaIterator();
     while (try media_it.next()) |media| {
-        try medias.append(allocator, try .parse(allocator, media, &result.fingerprint));
+        var parsed_media = try SDPMedia.parse(allocator, media, &result.fingerprint);
+        errdefer parsed_media.deinit(allocator);
+        try medias.append(allocator, parsed_media);
     }
 
     for (medias.items) |*media| if (media.port != 0 and result.bundle.len == 0)
