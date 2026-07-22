@@ -133,7 +133,10 @@ pub fn poll(transport: *DtlsTransport) !Event {
             if (ice_connection_state == .connected) {
                 try transport.mutex.lock(transport.getIo());
                 defer transport.mutex.unlock(transport.getIo());
-                transport.session.handleData(null) catch {};
+                transport.session.handleData(null) catch |err| switch (err) {
+                    error.WantData => {},
+                    else => |e| Logger.err("Error occurred while handling dtls message: {}", .{e}),
+                };
             }
             return .{ .ice_connection_state = ice_connection_state };
         },

@@ -27,6 +27,16 @@ pub const Error = error{
     SsrcUnavailable,
     /// Too many transceivers have been added to the PeerConnection and the mid counter has overflowed.
     MidOverflow,
+    /// The applied local description does not match the last generated offer/answer.
+    TamperedOffer,
+    /// An answer has a different number of media sections than the local offer.
+    InvalidAnswer,
+    /// No local description has been set.
+    NoLocalDescription,
+    /// A media section references a transceiver that does not exist.
+    NotExistingTransceiver,
+    /// The requested operation is not implemented.
+    NotImplemented,
 } || std.mem.Allocator.Error;
 
 /// SignalingState represents the signaling state of the PeerConnection.
@@ -179,16 +189,22 @@ pub fn deinit(pc: *PeerConnection) void {
     for (pc.streams.items) |*stream| stream.deinit(pc.allocator);
     pc.streams.deinit(pc.allocator);
 
-    if (pc.local_description) |*local_desc| local_desc.deinit(pc.allocator);
-    if (pc.remote_description) |*remote_desc| remote_desc.deinit(pc.allocator);
-    if (pc.pending_local_description) |*local_desc| local_desc.deinit(pc.allocator);
-    if (pc.pending_remote_description) |*remote_desc| remote_desc.deinit(pc.allocator);
+    pc.deinitDescriptions(&.{
+        &pc.local_description,
+        &pc.remote_description,
+        &pc.pending_local_description,
+        &pc.pending_remote_description,
+    });
 
     pc.last_offer.deinit(pc.allocator);
     pc.last_answer.deinit(pc.allocator);
 
     pc.dtls_transport.deinit();
     pc.demuxer.deinit();
+}
+
+fn deinitDescriptions(pc: *PeerConnection, descriptions: []const *?ParsedSessionDescription) void {
+    for (descriptions) |desc| if (desc.*) |*d| d.deinit(pc.allocator);
 }
 
 /// Adds a new track to the PeerConnection and optionally associates it with a stream.
@@ -262,14 +278,18 @@ pub fn addTransceiverFromKind(
         .receiver = try .init(.init(io, kind), pc.allocator),
         .transport = &pc.dtls_transport,
     };
+    errdefer tr.receiver.deinit(io, pc.allocator);
 
     if (init_config.stream_id) |stream_id| {
         const stream = try getOrAddStream(pc, stream_id);
         tr.sender.setStream(stream);
     }
     tr.sender.ssrc = try generateSsrc(io, &pc.demuxer);
-    try pc.checkNegotiationNeeded();
+
     try pc.appendTransceiver(tr);
+    errdefer _ = pc.transceivers.swapRemove(pc.getTransceivers().len - 1);
+
+    try pc.checkNegotiationNeeded();
     return tr;
 }
 
@@ -311,7 +331,7 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
     pc.dtls_transport.session.getFingerprint(&sdp_session.fingerprint);
 
     for (offer.session.getMedias()) |*media| {
-        const tr = pc.findTransceiverByMid(media.mid) orelse return error.Unexpected;
+        const tr = pc.findTransceiverByMid(media.mid) orelse return error.NotExistingTransceiver;
         const new_media = sdp_session.medias.addOneAssumeCapacity();
         new_media.* = if (media.isRejected()) blk: {
             var cloned = try media.clone(pc.allocator);
@@ -459,11 +479,13 @@ fn initTransceiverFromTrack(
 
 fn getOrAddStream(pc: *PeerConnection, stream_id: []const u8) !webrtc.MediaStream {
     for (pc.streams.items) |stream| if (std.mem.eql(u8, stream.id, stream_id)) return stream;
-    try pc.streams.append(pc.allocator, try .init(pc.allocator, stream_id));
+    var stream: webrtc.MediaStream = try .init(pc.allocator, stream_id);
+    errdefer stream.deinit(pc.allocator);
+    try pc.streams.append(pc.allocator, stream);
     return pc.streams.getLast();
 }
 
-fn createFirstOffer(pc: *PeerConnection) Error!webrtc.SessionDescription {
+fn createFirstOffer(pc: *PeerConnection) !webrtc.SessionDescription {
     var w = std.Io.Writer.Allocating.init(pc.allocator);
     errdefer w.deinit();
 
@@ -488,7 +510,7 @@ fn createFirstOffer(pc: *PeerConnection) Error!webrtc.SessionDescription {
         mid +%= 1;
     }
 
-    sdp_session.write(&w.writer) catch return error.OutOfMemory;
+    try sdp_session.write(&w.writer);
 
     pc.last_offer.deinit(pc.allocator);
     pc.last_offer = .{
@@ -817,8 +839,7 @@ fn appendTransceiver(pc: *PeerConnection, tr: *RtpTransceiver) !void {
 fn updateSignalingStateToStable(pc: *PeerConnection) !void {
     pc.signaling_state = .stable;
 
-    if (pc.local_description) |*local_desc| local_desc.deinit(pc.allocator);
-    if (pc.remote_description) |*remote_desc| remote_desc.deinit(pc.allocator);
+    pc.deinitDescriptions(&.{ &pc.local_description, &pc.remote_description });
 
     pc.local_description = pc.pending_local_description;
     pc.remote_description = pc.pending_remote_description;

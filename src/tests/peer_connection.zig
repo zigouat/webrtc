@@ -14,6 +14,16 @@ test "init" {
     defer pc.deinit();
 }
 
+test "addTransceiverFromKind: no leak on allocation failure" {
+    try std.testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            var pc = try PeerConnection.init(io, alloc, .{});
+            defer pc.deinit();
+            _ = try pc.addTransceiverFromKind(.video, .{ .direction = .sendrecv, .stream_id = "stream" });
+        }
+    }.run, .{});
+}
+
 test "setLocalDescription: set offer" {
     var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
     defer pc.deinit();

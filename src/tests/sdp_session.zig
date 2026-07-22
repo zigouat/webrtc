@@ -397,6 +397,15 @@ test "parse: ice credentials mismatch" {
     );
 }
 
+test "parse: no leak on allocation failure" {
+    try std.testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            var session: SDPSession = try .parse(alloc, offer_txt);
+            defer session.deinit(testing.allocator);
+        }
+    }.run, .{});
+}
+
 fn rtx(pt: u8, apt: u8) webrtc.RtpCodecParameters {
     return .{
         .payload_type = pt,
