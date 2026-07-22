@@ -88,7 +88,7 @@ pub const SDPMedia = struct {
         };
         sdp_media.port = media.port_range.port;
 
-        // Parse foarmts
+        // Parse formats
         var rtp_codec_parameters: std.ArrayList(webrtc.RtpCodecParameters) = .empty;
         errdefer rtp_codec_parameters.deinit(allocator);
 

@@ -41,8 +41,8 @@ pub fn poll(receiver: *RtpReceiver, io: Io) !TrackEvent {
 }
 
 /// Deinitializes the event and frees any resources associated with it.
-pub fn deinitEvent(reciever: *RtpReceiver, event: *const TrackEvent) void {
-    const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("receiver", reciever));
+pub fn deinitEvent(receiver: *RtpReceiver, event: *const TrackEvent) void {
+    const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("receiver", receiver));
     switch (event.*) {
         .rtp => |rtp_packet| {
             const header_size: u8 = @intCast(rtp_packet.size() - rtp_packet.payload.len);

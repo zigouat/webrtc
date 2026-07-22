@@ -11,7 +11,6 @@ const MediaPacket = @import("media").Packet;
 const RtpTransceiver = @import("rtp_transceiver.zig");
 
 const rtp_header_size = 12; // No header extension are sent for now.
-const ntp_unix_epoch_diff = 2_208_988_800;
 
 track: ?MediaStreamTrack,
 codecs: []const webrtc.RtpCodecParameters,
@@ -213,7 +212,7 @@ fn sendAndRecord(tr: *RtpTransceiver, rtp_packet: *const rtp.Packet, buffer: []u
 }
 
 fn microsecondsToNtp(timestamp: i64) u64 {
-    const ntp_seconds = @divTrunc(timestamp, std.time.us_per_s) + ntp_unix_epoch_diff;
+    const ntp_seconds = @divTrunc(timestamp, std.time.us_per_s) + webrtc.ntp_unix_epoch_diff;
     const ntp_fraction = @rem(timestamp, std.time.us_per_s);
     return @bitCast((ntp_seconds << 32) | ntp_fraction);
 }

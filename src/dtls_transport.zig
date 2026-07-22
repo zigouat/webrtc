@@ -176,7 +176,7 @@ pub fn poll(transport: *DtlsTransport) !Event {
                     },
                     else => continue,
                 },
-                .unknown => Logger.debug("Received unkown packet", .{}),
+                .unknown => Logger.debug("Received unknown packet", .{}),
             }
         },
     } else |err| return err;

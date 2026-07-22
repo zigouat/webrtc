@@ -11,7 +11,7 @@ const Io = std.Io;
 const FmtpParams = sdp.Attribute.Fmtp.Params;
 const testing = std.testing;
 
-const ntp_unix_epoch_diff = 2_208_988_800;
+pub const ntp_unix_epoch_diff = 2_208_988_800;
 
 /// Default video codecs used for sending and receiving video tracks.
 ///
