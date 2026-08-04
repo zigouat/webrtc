@@ -84,9 +84,7 @@ pub const Event = union(enum) {
 };
 
 pub const RTCConfiguration = struct {
-    /// List of ICE servers used to establish the connection.
-    ///
-    /// Only public stun servers are supported at the moment.
+    /// List of ICE servers (stun/turn) used for candidates gathering.
     ice_servers: []const ice.IceServer = &.{},
 };
 

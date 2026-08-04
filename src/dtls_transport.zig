@@ -22,7 +22,7 @@ const Timer = struct {
     };
 };
 
-pub const SendError = srtp.EncryptError || std.Io.net.Socket.SendError;
+pub const SendError = srtp.EncryptError || std.Io.net.Socket.SendError || error{ WriteFailed, UnknownAttribute };
 
 allocator: std.mem.Allocator,
 ice_agent: ice.Agent,
@@ -102,7 +102,7 @@ pub fn applyIceAttributes(transport: *DtlsTransport, media: *SDPSession.SDPMedia
 }
 
 pub fn gatherCandidates(transport: *DtlsTransport, role: ice.Role) !void {
-    transport.ice_agent.setRole(role);
+    try transport.ice_agent.setRole(role);
     try transport.ice_agent.gatherCandidates();
 }
 
@@ -110,7 +110,7 @@ pub fn getConnectionState(transport: *const DtlsTransport) struct { ice.Connecti
     return .{ transport.ice_agent.connectionState(), transport.session.connection_state };
 }
 
-pub inline fn sendRtp(transport: *DtlsTransport, data: []const u8) SendError!void {
+pub fn sendRtp(transport: *DtlsTransport, data: []const u8) SendError!void {
     if (transport.session.connection_state != .connected) return;
     const buffer = try transport.ice_agent.createPacket();
     defer transport.ice_agent.destroyPacket(buffer);
