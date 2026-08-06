@@ -244,3 +244,16 @@ test "intersectHeaderExtensions: no common uri returns empty" {
 
     try testing.expectEqual(0, result.len);
 }
+
+test "intersectHeaderExtensions: keeps only matched entries, preserving offerer order" {
+    var offerer = [_]RtpHeaderExtension{ ext(1, "mid"), ext(2, "abs-send-time"), ext(3, "unsupported") };
+    const answerer = [_]RtpHeaderExtension{ ext(9, "unsupported"), ext(8, "mid") };
+
+    const result = intersectHeaderExtensions(&offerer, &answerer);
+
+    try testing.expectEqual(2, result.len);
+    try testing.expectEqual(1, result[0].id);
+    try testing.expectEqualStrings("mid", result[0].uri);
+    try testing.expectEqual(3, result[1].id);
+    try testing.expectEqualStrings("unsupported", result[1].uri);
+}

@@ -14,13 +14,13 @@ const Mid = @import("mid.zig");
 const rtp_default_header_size = 12;
 const rtp_payload_max_size = 1200;
 
-const RtpHeaderExt = struct {
+const RtpHeaderExtensions = struct {
     mid: u16 = 0,
 };
 
 track: ?MediaStreamTrack,
 codecs: []const webrtc.RtpCodecParameters,
-header_extensions: RtpHeaderExt,
+header_extensions: RtpHeaderExtensions,
 ssrc: u32,
 report: Report,
 packetizer: union(enum) {
@@ -131,18 +131,18 @@ pub fn sendSample(sender: *RtpSender, sample: *const MediaPacket) SendError!void
     switch (sender.packetizer) {
         .vp8 => |*p| {
             var it = p.packetize(sample);
-            while (it.next(buffer[header_size..])) |packet|
-                try sendAndRecord(tr, &packet, header_size, buffer, timestamp);
+            while (it.next(buffer[header_size..])) |*packet|
+                try sendAndRecord(tr, packet, header_size, buffer, timestamp);
         },
         .h264 => |*p| {
             var it = p.packetize(sample);
-            while (try it.next(buffer[header_size..])) |packet|
-                try sendAndRecord(tr, &packet, header_size, buffer, timestamp);
+            while (try it.next(buffer[header_size..])) |*packet|
+                try sendAndRecord(tr, packet, header_size, buffer, timestamp);
         },
         .opus => |*p| {
             var it = p.packetize(sample);
-            while (it.next(buffer[header_size..])) |packet|
-                try sendAndRecord(tr, &packet, header_size, buffer, timestamp);
+            while (it.next(buffer[header_size..])) |*packet|
+                try sendAndRecord(tr, packet, header_size, buffer, timestamp);
         },
         else => return,
     }
@@ -248,6 +248,41 @@ fn microsecondsToNtp(timestamp: i64) u64 {
 }
 
 const testing = std.testing;
+
+test "setHeaderExtensions: picks the mid extension id, ignores others" {
+    var sender: RtpSender = .init(null);
+    sender.setHeaderExtensions(&.{
+        .{ .id = 9, .uri = "some-other-uri" },
+        .{ .id = 3, .uri = webrtc.mid_extension_uri },
+    });
+
+    try testing.expectEqual(3, sender.header_extensions.mid);
+}
+
+test "setHeaderExtensions: no mid extension leaves it unset" {
+    var sender: RtpSender = .init(null);
+    sender.setHeaderExtensions(&.{.{ .id = 9, .uri = "some-other-uri" }});
+
+    try testing.expectEqual(0, sender.header_extensions.mid);
+}
+
+test "writeHeaderExtensions: not negotiated writes nothing" {
+    var sender: RtpSender = .init(null);
+    var buffer: [64]u8 = undefined;
+
+    try testing.expectEqual(0, try sender.writeHeaderExtensions(try Mid.fromInt(1), &buffer));
+}
+
+test "writeHeaderExtensions: writes a one-byte mid extension" {
+    var sender: RtpSender = .init(null);
+    sender.header_extensions.mid = 3;
+
+    var buffer: [64]u8 = undefined;
+    const len = try sender.writeHeaderExtensions(try Mid.fromInt(12), &buffer);
+
+    const expected = [_]u8{ 0xBE, 0xDE, 0x00, 0x01, 0x31, '1', '2', 0x00 };
+    try testing.expectEqualSlices(u8, &expected, buffer[0..len]);
+}
 
 test "record packets" {
     var report: Report = .empty;

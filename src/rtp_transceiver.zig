@@ -120,6 +120,10 @@ pub fn toSdpMedia(tr: *RtpTransceiver, allocator: std.mem.Allocator) std.mem.All
     media.port = if (tr.stopping) 0 else 9;
     media.direction = tr.direction;
     media.rtp_codec_parameters = try allocator.dupe(webrtc.RtpCodecParameters, webrtc.getCodecCapabilities(tr.kind));
+    media.rtp_header_extensions = try allocator.dupe(
+        webrtc.RtpHeaderExtensionParameter,
+        webrtc.getHeaderExtensionCapabilities(tr.kind),
+    );
     media.rtcp_mux = true;
     media.rtcp_rsize = false;
     media.setIceCredentials(tr.transport.ice_agent.localCredentials());
@@ -162,11 +166,11 @@ pub fn toSdpMediaAnswer(
         try allocator.dupe(webrtc.RtpCodecParameters, media.rtp_codec_parameters)
     else
         codecs;
-    answer.rtp_header_extensions = if (!rejected and tr.kind == .video) try allocator.dupe(
+    answer.rtp_header_extensions = if (!rejected) try allocator.dupe(
         webrtc.RtpHeaderExtensionParameter,
         utils.intersectHeaderExtensions(
             media.rtp_header_extensions,
-            &webrtc.default_video_extensions,
+            webrtc.getHeaderExtensionCapabilities(tr.kind),
         ),
     ) else &.{};
 
@@ -390,6 +394,35 @@ test "toSdpMediaAnswer: answer to offer" {
     try testing.expectEqualStrings(ice_credentials.password, answer_media.ice_pwd);
 }
 
+test "toSdpMediaAnswer: negotiates header extensions, keeping the offerer's id" {
+    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    defer transport.deinit();
+
+    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
+    defer tr.deinit(testing.io, testing.allocator);
+    tr.mid = 0x30;
+    tr.transport = &transport;
+
+    var offer_media = SDPSession.SDPMedia.empty;
+    offer_media.kind = .video;
+    offer_media.direction = .sendrecv;
+    offer_media.port = 9;
+    offer_media.rtp_codec_parameters = try testing.allocator.dupe(webrtc.RtpCodecParameters, webrtc.getCodecCapabilities(.video));
+    defer offer_media.deinit(testing.allocator);
+
+    offer_media.rtp_header_extensions = try testing.allocator.dupe(webrtc.RtpHeaderExtensionParameter, &.{
+        .{ .id = 7, .uri = webrtc.mid_extension_uri },
+        .{ .id = 9, .uri = "some-unsupported-uri" },
+    });
+
+    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media);
+    defer answer_media.deinit(testing.allocator);
+
+    try testing.expectEqual(1, answer_media.rtp_header_extensions.len);
+    try testing.expectEqual(7, answer_media.rtp_header_extensions[0].id);
+    try testing.expectEqualStrings(webrtc.mid_extension_uri, answer_media.rtp_header_extensions[0].uri);
+}
+
 test "toSdpMediaAnswer: reject offer" {
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
     defer tr.deinit(testing.io, testing.allocator);
@@ -404,6 +437,7 @@ test "toSdpMediaAnswer: reject offer" {
         defer answer_media.deinit(testing.allocator);
         try testing.expectEqual(.video, answer_media.kind);
         try testing.expectEqual(0, answer_media.port);
+        try testing.expectEqual(0, answer_media.rtp_header_extensions.len);
         try testing.expect(answer_media.ice_pwd.len == 0);
         try testing.expect(answer_media.ice_ufrag.len == 0);
     }
@@ -417,6 +451,7 @@ test "toSdpMediaAnswer: reject offer" {
         defer answer_media.deinit(testing.allocator);
         try testing.expectEqual(.video, answer_media.kind);
         try testing.expectEqual(0, answer_media.port);
+        try testing.expectEqual(0, answer_media.rtp_header_extensions.len);
         try testing.expect(answer_media.ice_pwd.len == 0);
         try testing.expect(answer_media.ice_ufrag.len == 0);
     }

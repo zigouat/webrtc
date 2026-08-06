@@ -98,6 +98,10 @@ pub const default_video_extensions = [_]RtpHeaderExtensionParameter{
     .{ .id = 1, .uri = mid_extension_uri },
 };
 
+pub const default_audio_extensions = [_]RtpHeaderExtensionParameter{
+    .{ .id = 1, .uri = mid_extension_uri },
+};
+
 pub const RtpHeaderExtensionParameter = struct {
     uri: []const u8,
     id: u16,
@@ -270,6 +274,13 @@ pub fn getCodecCapabilities(kind: TrackKind) []const RtpCodecParameters {
     return switch (kind) {
         .audio => default_audio_codecs,
         .video => default_video_codecs,
+    };
+}
+
+pub fn getHeaderExtensionCapabilities(kind: TrackKind) []const RtpHeaderExtensionParameter {
+    return switch (kind) {
+        .audio => &default_audio_extensions,
+        .video => &default_video_extensions,
     };
 }
 

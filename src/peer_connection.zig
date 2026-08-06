@@ -729,7 +729,6 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
         if (remote_sdp.getMedias().len != local_session.getMedias().len) return error.InvalidAnswer;
     }
 
-    // TODO: negotiate rtp header extensions when creating an answer (toSdpMediaAnswer)
     // TODO: Add rtcp feedback
 
     var first_media: ?*SDPSession.SDPMedia = null;
