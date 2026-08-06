@@ -9,8 +9,8 @@
             .hash = "media-0.2.0-qc-dCGkfAQB6KYTjxevH6rY3DNrpzkDZxL6eQMopzViy",
         },
         .media_protocols = .{
-            .url = "git+https://github.com/zigouat/media-protocols.git#eddbcd3ebd0f091f0f0d4082d44db1ecb8b791b4",
-            .hash = "media_protocols-0.1.0-WF_ij44VBgDZ6lq5EebaBIsxmqvVPS06VyXds2ayAOLP",
+            .url = "git+https://github.com/zigouat/media-protocols.git#338eceaddc4f92d303266ce79dae2f11410a20a4",
+            .hash = "media_protocols-0.1.0-WF_ij4IuBgD5P39nhwqygC3A6dVUVhX4p0dHeE_8Dc_T",
         },
         .mbedtls = .{
             .url = "git+https://github.com/allyourcodebase/mbedtls.git#55f2af148634945e9508a3a50de2ccfe65eb971f",

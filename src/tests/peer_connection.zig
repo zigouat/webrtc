@@ -234,7 +234,7 @@ test "addTransceiver" {
     }
 
     {
-        var failing_alloc = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 5 });
+        var failing_alloc = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 7 });
         var pc = try PeerConnection.init(testing.io, failing_alloc.allocator(), .{});
         defer pc.deinit();
 
@@ -410,6 +410,11 @@ test "negotiation between peers" {
     track = transceivers[1].receiver.track;
     try testing.expectEqualStrings(sender2.track.?.getId(), track.getId());
     try testing.expectEqualStrings("stream-2", track.stream_id.?);
+
+    try testing.expect(pc1.demuxer.mid_id != null);
+    try testing.expect(pc2.demuxer.mid_id != null);
+    try testing.expect(sender1.header_extensions.mid != 0);
+    for (transceivers) |tr| try testing.expect(tr.sender.header_extensions.mid != 0);
 }
 
 test "negotiation between peers: add/remove tracks" {

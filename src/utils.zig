@@ -2,6 +2,7 @@ const std = @import("std");
 const webrtc = @import("webrtc.zig");
 
 const RtpCodec = webrtc.RtpCodecParameters;
+const RtpHeaderExtension = webrtc.RtpHeaderExtensionParameter;
 
 /// Returns the codecs from `a` that are also present in `b` (matched by `RtpCodecParameters.eql`),
 /// including any associated RTX codecs. Result follows `b`'s order and is owned by the caller.
@@ -77,6 +78,31 @@ pub fn intersectCodecs(a: []RtpCodec, b: []RtpCodec) error{NoCommonMedia}!struct
     }
 
     return .{ a[0..offset], b[0..offset] };
+}
+
+/// Filters `offerer_extensions` down to the ones whose uri is also present in `answerer_extensions`.
+/// The answerer must reuse the offerer's ids for any extension it accepts, so the offerer's id is
+/// authoritative and kept as-is. Reorders `offerer_extensions` in place; result borrows from it.
+pub fn intersectHeaderExtensions(offerer_extensions: []RtpHeaderExtension, answerer_extensions: []const RtpHeaderExtension) []const RtpHeaderExtension {
+    var matched: usize = 0;
+    for (0..offerer_extensions.len) |idx| {
+        const found = for (answerer_extensions) |answerer_ext| {
+            if (std.mem.eql(u8, answerer_ext.uri, offerer_extensions[idx].uri)) break true;
+        } else false;
+
+        if (found) {
+            swapExt(offerer_extensions, matched, idx);
+            matched += 1;
+        }
+    }
+
+    return offerer_extensions[0..matched];
+}
+
+fn swapExt(extensions: []RtpHeaderExtension, i: usize, j: usize) void {
+    const tmp = extensions[i];
+    extensions[i] = extensions[j];
+    extensions[j] = tmp;
 }
 
 /// Index of the RTX codec whose `apt` references payload type `pt`, if any.
@@ -193,4 +219,41 @@ test "intersectCodecs: pairs the associated rtx codecs" {
     try testing.expect(result.@"0"[1].isRtx());
     try testing.expectEqual(97, result.@"0"[1].payload_type);
     try testing.expectEqual(101, result.@"1"[1].payload_type);
+}
+
+fn ext(id: u16, uri: []const u8) RtpHeaderExtension {
+    return .{ .id = id, .uri = uri };
+}
+
+test "intersectHeaderExtensions: keeps the offerer's id for matched uris" {
+    var offerer = [_]RtpHeaderExtension{ ext(1, "mid"), ext(2, "abs-send-time") };
+    const answerer = [_]RtpHeaderExtension{ext(9, "abs-send-time")};
+
+    const result = intersectHeaderExtensions(&offerer, &answerer);
+
+    try testing.expectEqual(1, result.len);
+    try testing.expectEqual(2, result[0].id);
+    try testing.expectEqualStrings("abs-send-time", result[0].uri);
+}
+
+test "intersectHeaderExtensions: no common uri returns empty" {
+    var offerer = [_]RtpHeaderExtension{ext(1, "mid")};
+    const answerer = [_]RtpHeaderExtension{ext(1, "abs-send-time")};
+
+    const result = intersectHeaderExtensions(&offerer, &answerer);
+
+    try testing.expectEqual(0, result.len);
+}
+
+test "intersectHeaderExtensions: keeps only matched entries, preserving offerer order" {
+    var offerer = [_]RtpHeaderExtension{ ext(1, "mid"), ext(2, "abs-send-time"), ext(3, "unsupported") };
+    const answerer = [_]RtpHeaderExtension{ ext(9, "unsupported"), ext(8, "mid") };
+
+    const result = intersectHeaderExtensions(&offerer, &answerer);
+
+    try testing.expectEqual(2, result.len);
+    try testing.expectEqual(1, result[0].id);
+    try testing.expectEqualStrings("mid", result[0].uri);
+    try testing.expectEqual(3, result[1].id);
+    try testing.expectEqualStrings("unsupported", result[1].uri);
 }

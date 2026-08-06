@@ -16,6 +16,7 @@ pub const TrackEvent = union(enum) {
 
 track: webrtc.MediaStreamTrack,
 codecs: []const webrtc.RtpCodecParameters = &.{},
+header_extensions: []const webrtc.RtpHeaderExtensionParameter = &.{},
 ssrc: u32,
 queue: Io.Queue(TrackEvent),
 queue_buffer: []TrackEvent,

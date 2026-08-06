@@ -691,6 +691,8 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
 
         tr.sender.setCodecs(pc.dtls_transport.getIo(), media.rtp_codec_parameters);
         tr.receiver.codecs = media.rtp_codec_parameters;
+        tr.sender.setHeaderExtensions(media.rtp_header_extensions);
+        tr.receiver.header_extensions = media.rtp_header_extensions;
         // TODO: track removal
         tr.current_direction = media.direction;
         tr.fired_direction = media.direction;
@@ -727,7 +729,6 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
         if (remote_sdp.getMedias().len != local_session.getMedias().len) return error.InvalidAnswer;
     }
 
-    // TODO: validate rtp header extensions and add them to transceivers
     // TODO: Add rtcp feedback
 
     var first_media: ?*SDPSession.SDPMedia = null;
@@ -788,6 +789,13 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
 
             transceiver.sender.setCodecs(io, codecs.@"0");
             transceiver.receiver.codecs = codecs.@"1";
+
+            const local_extensions = local_sdp.getMedias()[idx].rtp_header_extensions;
+            const remote_extensions = media.rtp_header_extensions;
+            const extensions = utils.intersectHeaderExtensions(local_extensions, remote_extensions);
+
+            transceiver.sender.setHeaderExtensions(extensions);
+            transceiver.receiver.header_extensions = extensions;
         }
 
         if (transceiver.processRemoteTrack(direction, msid)) |track_init_event| {

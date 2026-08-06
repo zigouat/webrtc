@@ -2,6 +2,7 @@ const std = @import("std");
 const SDPSession = @import("../sdp_session.zig");
 const rtp = @import("rtp");
 const Mid = @import("../mid.zig");
+const webrtc = @import("../webrtc.zig");
 
 const Demuxer = @This();
 
@@ -30,6 +31,10 @@ pub fn updateMaps(demuxer: *Demuxer, io: std.Io, sdp_session: *const SDPSession)
         if (media.ssrc) |ssrc| {
             try demuxer.ssrc_to_mid.put(ssrc, media.mid);
         }
+
+        if (demuxer.mid_id == null) for (media.rtp_header_extensions) |ext| if (std.mem.eql(u8, ext.uri, webrtc.mid_extension_uri)) {
+            demuxer.mid_id = ext.id;
+        };
 
         inner: for (media.rtp_codec_parameters) |codec| {
             for (sdp_session.getMedias()) |*m| if (media.mid != m.mid and m.hasPayload(codec.payload_type))
@@ -79,6 +84,7 @@ fn getMidFromPacket(packet: *const rtp.Packet, mid_id: u16) !?[]const u8 {
 const RtpCodecParameters = @import("../webrtc.zig").RtpCodecParameters;
 
 // MID strings packed into a u24 the same way SDP parsing does (mid[0] in the low byte).
+const mid_ext_id = 4;
 const mid_1: u24 = @bitCast([3]u8{ '1', 0, 0 });
 const mid_2: u24 = @bitCast([3]u8{ '2', 0, 0 });
 const mid_3: u24 = @bitCast([3]u8{ '3', 0, 0 });
@@ -97,6 +103,10 @@ fn testSdpSession(alloc: std.mem.Allocator) !SDPSession {
     media1_params[0] = .{ .payload_type = 96, .clock_rate = 90000, .mime_type = "video/h264" };
     media1_params[1] = .{ .payload_type = 97, .clock_rate = 90000, .mime_type = "video/rtx" };
     media1_params[2] = .{ .payload_type = 98, .clock_rate = 90000, .mime_type = "video/vp8" };
+
+    medias[0].rtp_header_extensions = try alloc.dupe(webrtc.RtpHeaderExtensionParameter, &.{
+        .{ .id = mid_ext_id, .uri = webrtc.mid_extension_uri },
+    });
 
     var media2_params = try alloc.alloc(RtpCodecParameters, 3);
     medias[1].rtp_codec_parameters = media2_params;
@@ -124,6 +134,8 @@ test "update maps" {
     defer session.deinit(std.testing.allocator);
 
     try demuxer.updateMaps(std.testing.io, &session);
+
+    try std.testing.expectEqual(mid_ext_id, demuxer.mid_id.?);
 
     try std.testing.expectEqual(2, demuxer.ssrc_to_mid.count());
     try std.testing.expectEqual(mid_1, demuxer.ssrc_to_mid.get(0x10101010).?);
@@ -183,4 +195,41 @@ test "getMid" {
     packet.header.ssrc = 0x10101010;
     packet.header.payload_type = 10;
     try std.testing.expect(try demuxer.getMid(io, &packet) != null);
+}
+
+test "getMid: falls back to the mid header extension when ssrc is unknown" {
+    const io = std.testing.io;
+
+    var demuxer = init(std.testing.allocator);
+    defer demuxer.deinit();
+
+    var session = try testSdpSession(std.testing.allocator);
+    defer session.deinit(std.testing.allocator);
+
+    try demuxer.updateMaps(io, &session);
+    try std.testing.expectEqual(mid_ext_id, demuxer.mid_id.?);
+
+    var ext_buffer: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&ext_buffer);
+    var ext_writer = try rtp.Packet.Extension.Writer.init(.one_byte, &w);
+    try ext_writer.writeItem(.{ .id = mid_ext_id, .value = "1" });
+    try ext_writer.flush();
+
+    const packet: rtp.Packet = .{
+        .header = .{
+            .payload_type = 50,
+            .ssrc = 0xDEADBEEF,
+            .sequence_number = 0,
+            .timestamp = 0,
+            .marker = false,
+            .extension = true,
+            .padding = false,
+        },
+        .extension = .{ .profile = .one_byte, .data = w.buffered()[4..] },
+        .payload = &.{},
+    };
+
+    try std.testing.expectEqual(mid_1, (try demuxer.getMid(io, &packet)).?);
+    try std.testing.expect(demuxer.ssrc_to_mid.contains(packet.header.ssrc));
+    try std.testing.expectEqual(mid_1, (try demuxer.getMid(io, &packet)).?);
 }
