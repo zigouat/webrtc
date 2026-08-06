@@ -2,6 +2,7 @@ const std = @import("std");
 const SDPSession = @import("../sdp_session.zig");
 const rtp = @import("rtp");
 const Mid = @import("../mid.zig");
+const webrtc = @import("../webrtc.zig");
 
 const Demuxer = @This();
 
@@ -30,6 +31,10 @@ pub fn updateMaps(demuxer: *Demuxer, io: std.Io, sdp_session: *const SDPSession)
         if (media.ssrc) |ssrc| {
             try demuxer.ssrc_to_mid.put(ssrc, media.mid);
         }
+
+        if (demuxer.mid_id == null) for (media.rtp_header_extensions) |ext| if (std.mem.eql(u8, ext.uri, webrtc.mid_extension_uri)) {
+            demuxer.mid_id = ext.id;
+        };
 
         inner: for (media.rtp_codec_parameters) |codec| {
             for (sdp_session.getMedias()) |*m| if (media.mid != m.mid and m.hasPayload(codec.payload_type))

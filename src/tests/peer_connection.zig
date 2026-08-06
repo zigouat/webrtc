@@ -234,7 +234,7 @@ test "addTransceiver" {
     }
 
     {
-        var failing_alloc = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 5 });
+        var failing_alloc = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 7 });
         var pc = try PeerConnection.init(testing.io, failing_alloc.allocator(), .{});
         defer pc.deinit();
 

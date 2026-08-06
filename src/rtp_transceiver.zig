@@ -162,6 +162,14 @@ pub fn toSdpMediaAnswer(
         try allocator.dupe(webrtc.RtpCodecParameters, media.rtp_codec_parameters)
     else
         codecs;
+    answer.rtp_header_extensions = if (!rejected and tr.kind == .video) try allocator.dupe(
+        webrtc.RtpHeaderExtensionParameter,
+        utils.intersectHeaderExtensions(
+            media.rtp_header_extensions,
+            &webrtc.default_video_extensions,
+        ),
+    ) else &.{};
+
     if (!rejected and answer.direction != .inactive) {
         answer.setIceCredentials(tr.transport.ice_agent.localCredentials());
     }

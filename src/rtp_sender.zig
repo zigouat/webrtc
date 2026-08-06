@@ -9,11 +9,18 @@ const DtlsTransport = @import("dtls_transport.zig");
 const MediaStreamTrack = webrtc.MediaStreamTrack;
 const MediaPacket = @import("media").Packet;
 const RtpTransceiver = @import("rtp_transceiver.zig");
+const Mid = @import("mid.zig");
 
-const rtp_header_size = 12; // No header extension are sent for now.
+const rtp_default_header_size = 12;
+const rtp_payload_max_size = 1200;
+
+const RtpHeaderExt = struct {
+    mid: u16 = 0,
+};
 
 track: ?MediaStreamTrack,
 codecs: []const webrtc.RtpCodecParameters,
+header_extensions: RtpHeaderExt,
 ssrc: u32,
 report: Report,
 packetizer: union(enum) {
@@ -60,6 +67,7 @@ pub fn init(track: ?MediaStreamTrack) RtpSender {
     return .{
         .track = track,
         .codecs = &.{},
+        .header_extensions = .{},
         .ssrc = 0,
         .report = .empty,
         .packetizer = .none,
@@ -100,33 +108,41 @@ pub fn setCodecs(sender: *RtpSender, io: std.Io, codecs: []const webrtc.RtpCodec
     }
 }
 
+pub fn setHeaderExtensions(sender: *RtpSender, extensions: []const webrtc.RtpHeaderExtensionParameter) void {
+    for (extensions) |ext| {
+        if (std.mem.eql(u8, ext.uri, webrtc.mid_extension_uri)) {
+            sender.header_extensions.mid = ext.id;
+        }
+    }
+}
+
 /// Sends a media sample to the remote peer.
 pub fn sendSample(sender: *RtpSender, sample: *const MediaPacket) SendError!void {
     const tr = try checkAndGetTransceiver(sender);
+    const timestamp = Io.Timestamp.now(tr.transport.getIo(), .real).toMicroseconds();
 
     var buffer = try tr.transport.ice_agent.createPacket();
     defer tr.transport.ice_agent.destroyPacket(buffer);
 
-    buffer = buffer[0 .. rtp_header_size + 1200];
-
-    const timestamp = Io.Timestamp.now(tr.transport.getIo(), .real).toMicroseconds();
+    const header_size = rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[rtp_default_header_size..]);
+    buffer = buffer[0 .. header_size + rtp_payload_max_size];
 
     //TODO: refactor this mess
     switch (sender.packetizer) {
         .vp8 => |*p| {
             var it = p.packetize(sample);
-            while (it.next(buffer[rtp_header_size..])) |packet|
-                try sendAndRecord(tr, &packet, buffer, timestamp);
+            while (it.next(buffer[header_size..])) |packet|
+                try sendAndRecord(tr, &packet, header_size, buffer, timestamp);
         },
         .h264 => |*p| {
             var it = p.packetize(sample);
-            while (try it.next(buffer[rtp_header_size..])) |packet|
-                try sendAndRecord(tr, &packet, buffer, timestamp);
+            while (try it.next(buffer[header_size..])) |packet|
+                try sendAndRecord(tr, &packet, header_size, buffer, timestamp);
         },
         .opus => |*p| {
             var it = p.packetize(sample);
-            while (it.next(buffer[rtp_header_size..])) |packet|
-                try sendAndRecord(tr, &packet, buffer, timestamp);
+            while (it.next(buffer[header_size..])) |packet|
+                try sendAndRecord(tr, &packet, header_size, buffer, timestamp);
         },
         else => return,
     }
@@ -142,9 +158,10 @@ pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) SendError!void {
     defer tr.transport.ice_agent.destroyPacket(buffer);
 
     const timestamp = Io.Timestamp.now(tr.transport.getIo(), .real).toMicroseconds();
+    const header_size = rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[rtp_default_header_size..]);
 
     const header: rtp.Packet.Header = .{
-        .extension = false,
+        .extension = header_size != rtp_default_header_size,
         .marker = packet.header.marker,
         .padding = false,
         .payload_type = @intCast(tr.sender.codecs[0].payload_type),
@@ -153,9 +170,9 @@ pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) SendError!void {
         .timestamp = packet.header.timestamp,
     };
 
-    @memcpy(buffer[rtp_header_size .. packet.payload.len + rtp_header_size], packet.payload);
-    std.mem.writeInt(u96, buffer[0..rtp_header_size], @bitCast(header), .big);
-    try tr.transport.sendRtp(buffer[0 .. packet.payload.len + rtp_header_size]);
+    @memcpy(buffer[header_size .. packet.payload.len + rtp_default_header_size], packet.payload);
+    std.mem.writeInt(u96, buffer[0..rtp_default_header_size], @bitCast(header), .big);
+    try tr.transport.sendRtp(buffer[0 .. packet.payload.len + header_size]);
     sender.report.recordPacket(packet, timestamp);
 }
 
@@ -204,10 +221,23 @@ fn checkAndGetTransceiver(sender: *RtpSender) !*RtpTransceiver {
     return tr;
 }
 
-fn sendAndRecord(tr: *RtpTransceiver, rtp_packet: *const rtp.Packet, buffer: []u8, timestamp: i64) !void {
+fn writeHeaderExtensions(sender: *RtpSender, mid: Mid.Int, buffer: []u8) !usize {
+    if (sender.header_extensions.mid == 0) return 0;
+
+    var w = Io.Writer.fixed(buffer);
+    var rtp_writer = try rtp.Packet.Extension.Writer.init(.one_byte, &w);
+    try rtp_writer.writeItem(.{ .id = @intCast(sender.header_extensions.mid), .value = std.mem.sliceTo(&Mid.toBytes(mid), 0) });
+    try rtp_writer.flush();
+    return w.buffered().len;
+}
+
+fn sendAndRecord(tr: *RtpTransceiver, rtp_packet: *const rtp.Packet, header_size: usize, buffer: []u8, timestamp: i64) !void {
     const payload_len = rtp_packet.payload.len;
-    std.mem.writeInt(u96, buffer[0..rtp_header_size], @bitCast(rtp_packet.header), .big);
-    try tr.transport.sendRtp(buffer[0 .. rtp_header_size + payload_len]);
+    var header = rtp_packet.header;
+    header.extension = header_size != rtp_default_header_size;
+
+    std.mem.writeInt(u96, buffer[0..rtp_default_header_size], @bitCast(header), .big);
+    try tr.transport.sendRtp(buffer[0 .. header_size + payload_len]);
     tr.sender.report.recordPacket(rtp_packet, timestamp);
 }
 

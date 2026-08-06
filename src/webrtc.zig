@@ -92,8 +92,10 @@ pub const MimeType = struct {
     }
 };
 
+pub const mid_extension_uri = "urn:ietf:params:rtp-hdrext:sdes:mid";
+
 pub const default_video_extensions = [_]RtpHeaderExtensionParameter{
-    .{ .id = 1, .uri = "urn:ietf:params:rtp-hdrext:sdes:mid" },
+    .{ .id = 1, .uri = mid_extension_uri },
 };
 
 pub const RtpHeaderExtensionParameter = struct {
