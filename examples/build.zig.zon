@@ -8,8 +8,8 @@
             .path = "..",
         },
         .media = .{
-            .url = "git+https://github.com/zigouat/media.git?ref=v0.2.0#bd25220dd7615030beeb2fb0b6560a159b940935",
-            .hash = "media-0.2.0-qc-dCG76AAAxmrgm5XxNRCuD9KREZGpFdlJROf8OH53y",
+            .url = "git+https://github.com/zigouat/media.git#2f159b0b0fcff25d0b193ecaa827a6b2bbbb147f",
+            .hash = "media-0.2.0-qc-dCGkfAQB6KYTjxevH6rY3DNrpzkDZxL6eQMopzViy",
         },
         .media_protocols = .{
             .url = "git+https://github.com/zigouat/media-protocols.git#338eceaddc4f92d303266ce79dae2f11410a20a4",
