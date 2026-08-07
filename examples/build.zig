@@ -22,6 +22,10 @@ pub fn build(b: *std.Build) void {
             .name = "reflect",
             .root_source_file = b.path("reflect/main.zig"),
         },
+        .{
+            .name = "broadcast",
+            .root_source_file = b.path("broadcast/main.zig"),
+        },
     };
 
     inline for (apps) |app| {
