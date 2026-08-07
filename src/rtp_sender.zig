@@ -170,7 +170,7 @@ pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) SendError!void {
         .timestamp = packet.header.timestamp,
     };
 
-    @memcpy(buffer[header_size .. packet.payload.len + rtp_default_header_size], packet.payload);
+    @memcpy(buffer[header_size .. packet.payload.len + header_size], packet.payload);
     std.mem.writeInt(u96, buffer[0..rtp_default_header_size], @bitCast(header), .big);
     try tr.transport.sendRtp(buffer[0 .. packet.payload.len + header_size]);
     sender.report.recordPacket(packet, timestamp);

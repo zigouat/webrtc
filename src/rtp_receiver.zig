@@ -46,7 +46,7 @@ pub fn deinitEvent(receiver: *RtpReceiver, event: *const TrackEvent) void {
     const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("receiver", receiver));
     switch (event.*) {
         .rtp => |rtp_packet| {
-            const header_size: u8 = @intCast(rtp_packet.size() - rtp_packet.payload.len);
+            const header_size = rtp_packet.size() - rtp_packet.payload.len;
             const beg = rtp_packet.payload.ptr - header_size;
             tr.transport.ice_agent.destroyPacket(beg[0..1]);
         },
