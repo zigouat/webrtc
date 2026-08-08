@@ -4,7 +4,7 @@ const media = @import("media");
 const rtp = @import("rtp");
 
 const Io = std.Io;
-const BroadcastChannel = media.BroadcastChannel(webrtc.RtpReceiver.TrackEvent, 16);
+const BroadcastChannel = media.BroadcastChannel(rtp.Packet, 16);
 
 const server_addr = Io.net.IpAddress{ .ip4 = .unspecified(9000) };
 var queue_buffer: [1]std.json.Parsed(webrtc.SessionDescription) = undefined;
@@ -42,7 +42,7 @@ pub fn main(init: std.process.Init) !void {
         const rtp_channel = BroadcastChannel.init(.{
             .deinit = deinitPacket,
             .deinit_ctx = &tr.receiver,
-            .empty = .{ .rtp = .{ .header = undefined, .payload = &.{} } },
+            .empty = .{ .header = undefined, .payload = &.{} },
         });
         break :blk .{ pc, tr, rtp_channel };
     };
@@ -50,8 +50,8 @@ pub fn main(init: std.process.Init) !void {
 
     var gathering_done = Io.Event.unset;
 
-    try grp.concurrent(io, pollPublisher, .{ io, pc, &gathering_done });
-    try grp.concurrent(io, receivePublishedData, .{ io, &tr.receiver, &rtp_channel });
+    try pc.group.concurrent(io, pollPublisher, .{ io, pc, &gathering_done });
+    try pc.group.concurrent(io, receivePublishedData, .{ io, &tr.receiver, &rtp_channel });
 
     try gathering_done.wait(io);
     try encodeSdp(pc);
@@ -79,21 +79,18 @@ pub fn main(init: std.process.Init) !void {
     } else |err| return err;
 }
 
-fn deinitPacket(userdata: ?*anyopaque, packet: *webrtc.RtpReceiver.TrackEvent) void {
-    if (packet.rtp.payload.len == 0) return;
+fn deinitPacket(userdata: ?*anyopaque, packet: *rtp.Packet) void {
+    if (packet.payload.len == 0) return;
     const receiver: *webrtc.RtpReceiver = @ptrCast(@alignCast(userdata.?));
-    receiver.deinitEvent(packet);
+    receiver.deinitEvent(&.{ .rtp = packet.* });
 }
 
-fn clonePacket(userdata: ?*anyopaque, event: *const webrtc.RtpReceiver.TrackEvent) webrtc.RtpReceiver.TrackEvent {
+fn clonePacket(userdata: ?*anyopaque, packet: *const rtp.Packet) rtp.Packet {
     const buffer: *[1500]u8 = @ptrCast(@alignCast(userdata.?));
-    const packet = event.rtp;
     @memcpy(buffer.*[0..packet.payload.len], packet.payload);
     return .{
-        .rtp = rtp.Packet{
-            .header = packet.header,
-            .payload = buffer.*[0..packet.payload.len],
-        },
+        .header = packet.header,
+        .payload = buffer.*[0..packet.payload.len],
     };
 }
 
@@ -136,17 +133,14 @@ fn doHandleClientConnection(io: Io, allocator: std.mem.Allocator, stream: Io.net
     var http_server = std.http.Server.init(&r.interface, &w.interface);
     var req = try http_server.receiveHead();
 
-    if (std.mem.eql(u8, req.head.target, "/") and req.head.method == .POST) {
+    if (req.head.method == .POST) {
         const parsed = readRequestContent(allocator, &req) catch |err| switch (err) {
             error.ReadFailed => return r.err.?,
             else => |e| return e,
         };
 
         try queue.putOne(io, parsed);
-        try req.respond(&.{}, .{
-            .transfer_encoding = .none,
-            .status = .ok,
-        });
+        try req.respond(&.{}, .{ .transfer_encoding = .none, .status = .ok });
     }
 }
 
@@ -189,13 +183,17 @@ fn pollPublisher(io: Io, pc: *webrtc.PeerConnection, gathering_done: *Io.Event) 
     while (pc.poll()) |event| switch (event) {
         .connection_state => |state| {
             std.log.info("Publisher state: {}", .{state});
-            if (state == .connected) pc.group.concurrent(io, sendPli, .{ io, &pc.getTransceivers()[0].receiver }) catch return;
-            if (state == .failed) pc.close();
-            if (state == .closed) break;
+            switch (state) {
+                .connected => {
+                    // send pli periodically to the publisher to request keyframes
+                    pc.group.concurrent(io, sendPli, .{ io, &pc.getTransceivers()[0].receiver }) catch return;
+                },
+                .failed => pc.close(),
+                .closed => break,
+                else => {},
+            }
         },
-        .gathering_state => |state| if (state == .complete) {
-            gathering_done.set(io);
-        },
+        .gathering_state => |state| if (state == .complete) gathering_done.set(io),
         else => {},
     } else |err| switch (err) {
         error.Canceled => return error.Canceled,
@@ -205,7 +203,7 @@ fn pollPublisher(io: Io, pc: *webrtc.PeerConnection, gathering_done: *Io.Event) 
 
 fn receivePublishedData(io: Io, receiver: *webrtc.RtpReceiver, c: *BroadcastChannel) !void {
     while (receiver.poll(io)) |event| switch (event) {
-        .rtp => c.send(io, event),
+        .rtp => |packet| c.send(io, packet),
     } else |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => std.log.err("Error while polling receiver: {}", .{err}),
@@ -248,8 +246,8 @@ fn sendDataToSubscriber(io: Io, sender: *webrtc.RtpSender, c: *BroadcastChannel)
     var buffer: [1500]u8 = undefined;
     var sub = c.subscribe(clonePacket, &buffer);
 
-    while (c.receive(io, &sub)) |event| {
-        sender.sendRtp(&event.rtp) catch return;
+    while (c.receive(io, &sub)) |packet| {
+        sender.sendRtp(&packet) catch return;
     } else |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => std.log.err("Error while receiving data from broadcast channel: {}", .{err}),
