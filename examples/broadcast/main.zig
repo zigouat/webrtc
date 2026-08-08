@@ -46,11 +46,14 @@ pub fn main(init: std.process.Init) !void {
         });
         break :blk .{ pc, tr, rtp_channel };
     };
-    defer rtp_channel.deinit();
+    // No need for rtp_channel.deinit() since all the buffers will be released when the
+    // ice agent is destroyed.
 
     var gathering_done = Io.Event.unset;
+    var done = Io.Event.unset;
 
-    try pc.group.concurrent(io, pollPublisher, .{ io, pc, &gathering_done });
+    try grp.concurrent(io, exit, .{ io, &done });
+    try grp.concurrent(io, pollPublisher, .{ io, pc, &gathering_done, &done });
     try pc.group.concurrent(io, receivePublishedData, .{ io, &tr.receiver, &rtp_channel });
 
     try gathering_done.wait(io);
@@ -68,7 +71,7 @@ pub fn main(init: std.process.Init) !void {
 
         const sender = try pc2.addTrack(.init(io, .video), "stream");
         gathering_done.reset();
-        try pc2.group.concurrent(io, pollSubscriber, .{ io, pc2, sender, &gathering_done, &rtp_channel });
+        try grp.concurrent(io, pollSubscriber, .{ io, pc2, sender, &gathering_done, &rtp_channel });
         try pc2.setRemoteDescription(offer.value);
 
         const answer = try pc2.createAnswer();
@@ -76,7 +79,12 @@ pub fn main(init: std.process.Init) !void {
 
         try gathering_done.wait(io);
         try encodeSdp(pc2);
-    } else |err| return err;
+    } else |_| {}
+}
+
+fn exit(io: Io, done: *Io.Event) !void {
+    try done.wait(io);
+    queue.close(io);
 }
 
 fn deinitPacket(userdata: ?*anyopaque, packet: *rtp.Packet) void {
@@ -176,9 +184,9 @@ fn encodeSdp(pc: *webrtc.PeerConnection) !void {
     std.debug.print("{s}\n", .{result});
 }
 
-fn pollPublisher(io: Io, pc: *webrtc.PeerConnection, gathering_done: *Io.Event) !void {
-    defer pc.deinit();
+fn pollPublisher(io: Io, pc: *webrtc.PeerConnection, gathering_done: *Io.Event, done: *Io.Event) !void {
     defer pc.allocator.destroy(pc);
+    defer pc.deinit();
 
     while (pc.poll()) |event| switch (event) {
         .connection_state => |state| {
@@ -188,8 +196,14 @@ fn pollPublisher(io: Io, pc: *webrtc.PeerConnection, gathering_done: *Io.Event) 
                     // send pli periodically to the publisher to request keyframes
                     pc.group.concurrent(io, sendPli, .{ io, &pc.getTransceivers()[0].receiver }) catch return;
                 },
-                .failed => pc.close(),
-                .closed => break,
+                .failed => {
+                    pc.close();
+                    done.set(io);
+                },
+                .closed => {
+                    done.set(io);
+                    break;
+                },
                 else => {},
             }
         },
@@ -224,8 +238,8 @@ fn pollSubscriber(
     gathering_done: *Io.Event,
     c: *BroadcastChannel,
 ) !void {
-    defer pc.deinit();
     defer pc.allocator.destroy(pc);
+    defer pc.deinit();
 
     while (pc.poll()) |event| switch (event) {
         .connection_state => |state| switch (state) {
