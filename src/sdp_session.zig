@@ -7,6 +7,7 @@ const SDPSession = @This();
 const Direction = @import("rtp_transceiver.zig").Direction;
 const SDPAttribute = sdp.Attribute.ParsedAttribute;
 const Mid = @import("mid.zig");
+const RtpCodec = webrtc.RtpCodecParameters;
 
 const sdp_header =
     \\v=0
@@ -41,7 +42,7 @@ pub const SDPMedia = struct {
     kind: webrtc.TrackKind,
     port: u16,
     bundle_only: bool,
-    rtp_codec_parameters: []webrtc.RtpCodecParameters,
+    rtp_codec_parameters: []RtpCodec,
     rtp_header_extensions: []webrtc.RtpHeaderExtensionParameter,
     mid: Mid.Int,
     direction: Direction,
@@ -90,28 +91,13 @@ pub const SDPMedia = struct {
         sdp_media.port = media.port_range.port;
 
         // Parse formats
-        var rtp_codec_parameters: std.ArrayList(webrtc.RtpCodecParameters) = .empty;
-        errdefer rtp_codec_parameters.deinit(allocator);
+        sdp_media.rtp_codec_parameters = try allocRtpCodecsParameters(allocator, media.formats);
 
         var rtp_header_extensions: std.ArrayList(webrtc.RtpHeaderExtensionParameter) = .empty;
         errdefer rtp_header_extensions.deinit(allocator);
 
-        var fmt_iterator = std.mem.tokenizeScalar(u8, media.formats, ' ');
-        while (fmt_iterator.next()) |payload_type| {
-            const pt = try std.fmt.parseInt(u8, payload_type, 10);
-            try rtp_codec_parameters.append(allocator, webrtc.RtpCodecParameters{
-                .payload_type = pt,
-                .clock_rate = 0,
-                .mime_type = &.{},
-            });
-        }
-
         var candidates: std.ArrayList(ice.Candidate) = .empty;
         errdefer candidates.deinit(allocator);
-
-        // Hold fmtp lines until rtpmap is encountered
-        var fmtps: std.AutoHashMap(u8, []const u8) = .init(allocator);
-        defer fmtps.deinit();
 
         var attr_it = media.attributeIterator();
         while (try attr_it.next()) |attr| switch (try attr.parse()) {
@@ -132,24 +118,22 @@ pub const SDPMedia = struct {
             .rtcp_mux => sdp_media.rtcp_mux = true,
             .rtcp_rsize => sdp_media.rtcp_rsize = true,
             .rtpmap => |rtpmap| {
-                const rtp_codec = findRtpCodecParameters(rtp_codec_parameters, rtpmap.payload_type) orelse return error.InvalidRtpMap;
+                const rtp_codec = findRtpCodecParameters(
+                    sdp_media.rtp_codec_parameters,
+                    rtpmap.payload_type,
+                ) orelse return error.InvalidRtpMap;
+
                 rtp_codec.clock_rate = rtpmap.clock_rate;
                 rtp_codec.channels = rtpmap.channels;
                 rtp_codec.mime_type = webrtc.MimeType.fromKindAndCodec(sdp_media.kind, rtpmap.encoding);
-
-                if (fmtps.get(rtp_codec.payload_type)) |fmtp_line| {
-                    try setRtpCodecParameterFmtp(rtp_codec, fmtp_line);
-                    _ = fmtps.remove(rtp_codec.payload_type);
-                }
             },
             .fmtp => |fmtp| {
                 const pt, const fmtp_line = fmtp;
-                const rtp_codec = findRtpCodecParameters(rtp_codec_parameters, pt) orelse return error.InvalidFmtp;
-                if (rtp_codec.mime_type.len == 0) {
-                    try fmtps.put(pt, fmtp_line);
-                } else {
-                    try setRtpCodecParameterFmtp(rtp_codec, fmtp_line);
-                }
+                const rtp_codec = findRtpCodecParameters(
+                    sdp_media.rtp_codec_parameters,
+                    pt,
+                ) orelse return error.InvalidFmtp;
+                rtp_codec.fmtp_params = .{ .unknown = fmtp_line };
             },
             .fingerprint => |value| switch (value) {
                 .sha_256 => |f| @memcpy(fingerprint, &f),
@@ -174,9 +158,8 @@ pub const SDPMedia = struct {
         if (sdp_media.port != 0 and !sdp_media.rtcp_mux) return error.RtcpMuxRequired;
         if (sdp_media.mid == 0) return error.MidAttributeRequired;
 
-        try validateRtpCodecParameters(rtp_codec_parameters);
+        try validateRtpCodecParameters(sdp_media.rtp_codec_parameters);
 
-        sdp_media.rtp_codec_parameters = try rtp_codec_parameters.toOwnedSlice(allocator);
         sdp_media.rtp_header_extensions = try rtp_header_extensions.toOwnedSlice(allocator);
         sdp_media.candidates = try candidates.toOwnedSlice(allocator);
         return sdp_media;
@@ -245,7 +228,7 @@ pub const SDPMedia = struct {
 
     pub fn clone(media: *const SDPMedia, allocator: std.mem.Allocator) !SDPMedia {
         var new_media = media.*;
-        new_media.rtp_codec_parameters = try allocator.dupe(webrtc.RtpCodecParameters, media.rtp_codec_parameters);
+        new_media.rtp_codec_parameters = try allocator.dupe(RtpCodec, media.rtp_codec_parameters);
         errdefer allocator.free(new_media.rtp_codec_parameters);
         new_media.rtp_header_extensions = try allocator.dupe(webrtc.RtpHeaderExtensionParameter, media.rtp_header_extensions);
         errdefer allocator.free(new_media.rtp_header_extensions);
@@ -255,9 +238,28 @@ pub const SDPMedia = struct {
         return new_media;
     }
 
-    fn validateRtpCodecParameters(rtp_codec_parameters: std.ArrayList(webrtc.RtpCodecParameters)) !void {
-        for (rtp_codec_parameters.items) |*rtp_codec| {
+    fn allocRtpCodecsParameters(allocator: std.mem.Allocator, formats: []const u8) ![]RtpCodec {
+        var count: usize = 0;
+        var fmt_iterator = std.mem.tokenizeScalar(u8, formats, ' ');
+        while (fmt_iterator.next()) |_| : (count += 1) {}
+
+        fmt_iterator = std.mem.tokenizeScalar(u8, formats, ' ');
+        var rtp_codec_parameters = try allocator.alloc(RtpCodec, count);
+        var idx: usize = 0;
+        while (fmt_iterator.next()) |payload_type| {
+            const pt = try std.fmt.parseInt(u8, payload_type, 10);
+            rtp_codec_parameters[idx] = .{ .payload_type = pt, .clock_rate = 0, .mime_type = &.{} };
+            idx += 1;
+        }
+
+        return rtp_codec_parameters;
+    }
+
+    fn validateRtpCodecParameters(rtp_codec_parameters: []RtpCodec) !void {
+        for (rtp_codec_parameters) |*rtp_codec| {
             if (rtp_codec.mime_type.len == 0) return error.InvalidMedia; // no rtpmap entry exists
+
+            if (rtp_codec.fmtp_params) |params| try setRtpCodecParameterFmtp(rtp_codec, params.unknown);
 
             // Check the associated codec with this rtx
             if (rtp_codec.isRtx()) {
@@ -269,14 +271,14 @@ pub const SDPMedia = struct {
         }
     }
 
-    fn findRtpCodecParameters(rtp_codec_parameters: std.ArrayList(webrtc.RtpCodecParameters), payload_type: u8) ?*webrtc.RtpCodecParameters {
-        for (rtp_codec_parameters.items) |*rtp_codec| if (rtp_codec.payload_type == payload_type)
+    fn findRtpCodecParameters(rtp_codec_parameters: []RtpCodec, payload_type: u8) ?*RtpCodec {
+        for (rtp_codec_parameters) |*rtp_codec| if (rtp_codec.payload_type == payload_type)
             return rtp_codec;
 
         return null;
     }
 
-    fn setRtpCodecParameterFmtp(rtp_codec: *webrtc.RtpCodecParameters, fmtp_line: []const u8) !void {
+    fn setRtpCodecParameterFmtp(rtp_codec: *RtpCodec, fmtp_line: []const u8) !void {
         const codec = if (std.mem.indexOfScalar(u8, rtp_codec.mime_type, '/')) |idx|
             rtp_codec.mime_type[idx + 1 ..]
         else
