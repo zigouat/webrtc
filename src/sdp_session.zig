@@ -152,6 +152,15 @@ pub const SDPMedia = struct {
             .ssrc => |ssrc| if (sdp_media.ssrc == null) {
                 sdp_media.ssrc = ssrc.id;
             },
+            .rtcp_fb => |fb| {
+                const codecs = sdp_media.rtp_codec_parameters;
+                switch (fb.payload_type) {
+                    .all => for (codecs) |*codec| codec.rtcp_feedbacks.fromSdpRtcpFb(fb),
+                    else => |pt| if (findRtpCodecParameters(codecs, @intFromEnum(pt))) |codec| {
+                        codec.rtcp_feedbacks.fromSdpRtcpFb(fb);
+                    },
+                }
+            },
             else => {},
         };
 
