@@ -123,8 +123,9 @@ pub const RtpCodecParameters = struct {
     clock_rate: u32,
     channels: ?u8 = null,
     fmtp_params: ?FmtpParams = null,
+    rtcp_feedbacks: RtcpFeedbacks = RtcpFeedbacks.empty,
 
-    pub fn format(codec_params: @This(), writer: *Io.Writer) !void {
+    pub fn format(codec_params: *RtpCodecParameters, writer: *Io.Writer) !void {
         try sdp.Attribute.ParsedAttribute.write(.{
             .rtpmap = .{
                 .clock_rate = codec_params.clock_rate,
@@ -137,6 +138,8 @@ pub const RtpCodecParameters = struct {
         if (codec_params.fmtp_params) |params| {
             try writer.print("a=fmtp:{} {f}\r\n", .{ codec_params.payload_type, params });
         }
+
+        try codec_params.rtcp_feedbacks.writeAsSdpAttribute(codec_params.payload_type, writer);
     }
 
     pub fn isRtx(a: *const RtpCodecParameters) bool {
@@ -267,6 +270,128 @@ pub const MediaStreamTrack = struct {
     test "getId" {
         const track = initWithId("test-track", .audio);
         try testing.expectEqualStrings("test-track", track.getId());
+    }
+};
+
+pub const RtcpFeedbacks = packed struct(u8) {
+    nack: bool,
+    nack_pli: bool,
+    transport_cc: bool,
+    ccm_fir: bool,
+    goog_remb: bool,
+    _pad: u3,
+
+    pub const empty: RtcpFeedbacks = @bitCast(@as(u8, 0));
+
+    pub fn fromSdpRtcpFb(fb: *RtcpFeedbacks, attr: sdp.Attribute.RtcpFb) void {
+        if (std.ascii.eqlIgnoreCase(attr.value, "nack")) {
+            if (attr.param.len == 0) {
+                fb.nack = true;
+            } else if (std.ascii.eqlIgnoreCase(attr.param, "pli")) {
+                fb.nack_pli = true;
+            }
+        } else if (std.ascii.eqlIgnoreCase(attr.value, "transport-cc")) {
+            fb.transport_cc = true;
+        } else if (std.ascii.eqlIgnoreCase(attr.value, "ccm")) {
+            if (std.ascii.eqlIgnoreCase(attr.param, "fir")) {
+                fb.ccm_fir = true;
+            }
+        } else if (std.ascii.eqlIgnoreCase(attr.value, "goog-remb")) {
+            fb.goog_remb = true;
+        }
+    }
+
+    pub fn writeAsSdpAttribute(fb: *const RtcpFeedbacks, payload_type: u8, writer: *Io.Writer) !void {
+        if (fb.nack) {
+            try writer.print("a=rtcp-fb:{} nack\r\n", .{payload_type});
+        }
+        if (fb.nack_pli) {
+            try writer.print("a=rtcp-fb:{} nack pli\r\n", .{payload_type});
+        }
+        if (fb.transport_cc) {
+            try writer.print("a=rtcp-fb:{} transport-cc\r\n", .{payload_type});
+        }
+        if (fb.ccm_fir) {
+            try writer.print("a=rtcp-fb:{} ccm fir\r\n", .{payload_type});
+        }
+        if (fb.goog_remb) {
+            try writer.print("a=rtcp-fb:{} goog-remb\r\n", .{payload_type});
+        }
+    }
+
+    test "fromSdpRtcpFb: nack" {
+        var fb: RtcpFeedbacks = .empty;
+        fb.fromSdpRtcpFb(.{ .payload_type = @enumFromInt(96), .value = "nack", .param = "" });
+        try testing.expect(fb.nack);
+        try testing.expect(!fb.nack_pli);
+    }
+
+    test "fromSdpRtcpFb: nack pli is case insensitive" {
+        var fb: RtcpFeedbacks = .empty;
+        fb.fromSdpRtcpFb(.{ .payload_type = @enumFromInt(96), .value = "NACK", .param = "PLI" });
+        try testing.expect(!fb.nack);
+        try testing.expect(fb.nack_pli);
+    }
+
+    test "fromSdpRtcpFb: transport-cc" {
+        var fb: RtcpFeedbacks = .empty;
+        fb.fromSdpRtcpFb(.{ .payload_type = @enumFromInt(96), .value = "transport-cc", .param = "" });
+        try testing.expect(fb.transport_cc);
+    }
+
+    test "fromSdpRtcpFb: ccm fir" {
+        var fb: RtcpFeedbacks = .empty;
+        fb.fromSdpRtcpFb(.{ .payload_type = @enumFromInt(96), .value = "ccm", .param = "fir" });
+        try testing.expect(fb.ccm_fir);
+    }
+
+    test "fromSdpRtcpFb: ccm without fir param is ignored" {
+        var fb: RtcpFeedbacks = .empty;
+        fb.fromSdpRtcpFb(.{ .payload_type = @enumFromInt(96), .value = "ccm", .param = "" });
+        try testing.expectEqual(RtcpFeedbacks.empty, fb);
+    }
+
+    test "fromSdpRtcpFb: goog-remb" {
+        var fb: RtcpFeedbacks = .empty;
+        fb.fromSdpRtcpFb(.{ .payload_type = @enumFromInt(96), .value = "goog-remb", .param = "" });
+        try testing.expect(fb.goog_remb);
+    }
+
+    test "fromSdpRtcpFb: unknown value is ignored" {
+        var fb: RtcpFeedbacks = .empty;
+        fb.fromSdpRtcpFb(.{ .payload_type = @enumFromInt(96), .value = "unknown-fb", .param = "" });
+        try testing.expectEqual(RtcpFeedbacks.empty, fb);
+    }
+
+    test "writeAsSdpAttribute: all flags" {
+        const fb: RtcpFeedbacks = .{
+            .nack = true,
+            .nack_pli = true,
+            .transport_cc = true,
+            .ccm_fir = true,
+            .goog_remb = true,
+            ._pad = 0,
+        };
+
+        var buffer: [256]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buffer);
+        try fb.writeAsSdpAttribute(96, &w);
+
+        try testing.expectEqualStrings(
+            "a=rtcp-fb:96 nack\r\n" ++
+                "a=rtcp-fb:96 nack pli\r\n" ++
+                "a=rtcp-fb:96 transport-cc\r\n" ++
+                "a=rtcp-fb:96 ccm fir\r\n" ++
+                "a=rtcp-fb:96 goog-remb\r\n",
+            w.buffered(),
+        );
+    }
+
+    test "writeAsSdpAttribute: no flags writes nothing" {
+        var buffer: [16]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buffer);
+        try RtcpFeedbacks.empty.writeAsSdpAttribute(96, &w);
+        try testing.expectEqualStrings("", w.buffered());
     }
 };
 

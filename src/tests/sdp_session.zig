@@ -4,6 +4,7 @@ const webrtc = @import("../webrtc.zig");
 const testing = std.testing;
 
 const SDPSession = @import("../sdp_session.zig");
+const Mid = @import("../mid.zig");
 
 const head =
     \\v=0
@@ -280,6 +281,17 @@ test "parse: sdp offer" {
         try testing.expect(expected.eql(codec));
     }
 
+    for (audio_codecs) |*codec| {
+        try testing.expectEqual(webrtc.RtcpFeedbacks{
+            .nack = false,
+            .nack_pli = false,
+            .transport_cc = true,
+            .ccm_fir = false,
+            .goog_remb = false,
+            ._pad = 0,
+        }, codec.rtcp_feedbacks);
+    }
+
     try testing.expectEqual(1, audio_media.rtp_header_extensions.len);
     try testing.expectEqual(4, audio_media.rtp_header_extensions[0].id);
     try testing.expectEqualStrings(
@@ -343,6 +355,14 @@ test "parse: sdp offer" {
         try testing.expect(expected.eql(current));
     }
 
+    for (video_codecs) |*codec| {
+        const expected_fb: webrtc.RtcpFeedbacks = if (codec.isRtx())
+            .{ .nack = true, .nack_pli = true, .transport_cc = true, .ccm_fir = false, .goog_remb = false, ._pad = 0 }
+        else
+            .{ .nack = true, .nack_pli = true, .transport_cc = true, .ccm_fir = true, .goog_remb = true, ._pad = 0 };
+        try testing.expectEqual(expected_fb, codec.rtcp_feedbacks);
+    }
+
     const hdr_extensions = video_media.rtp_header_extensions;
     try testing.expectEqual(4, hdr_extensions.len);
     try testing.expectEqual(3, hdr_extensions[0].id);
@@ -404,6 +424,132 @@ test "parse: no leak on allocation failure" {
             defer session.deinit(testing.allocator);
         }
     }.run, .{});
+}
+
+test "write: media" {
+    var media: SDPSession.SDPMedia = .empty;
+    media.kind = .audio;
+    media.port = 9;
+    media.mid = try Mid.fromInt(0);
+    media.direction = .sendrecv;
+    media.ice_ufrag = "ufrag1";
+    media.ice_pwd = "pwd1234567890123456789";
+    media.setup = .actpass;
+    media.rtcp_mux = true;
+    media.track_id = "audio0";
+    media.msid = .{ .id = "stream1" };
+    media.ssrc = 12345;
+
+    var codecs = [_]webrtc.RtpCodecParameters{.{
+        .payload_type = 111,
+        .mime_type = webrtc.MimeType.Opus,
+        .clock_rate = 48000,
+        .channels = 2,
+        .fmtp_params = .{ .unknown = "minptime=10;useinbandfec=1" },
+        .rtcp_feedbacks = .{
+            .nack = false,
+            .nack_pli = false,
+            .transport_cc = true,
+            .ccm_fir = false,
+            .goog_remb = false,
+            ._pad = 0,
+        },
+    }};
+    media.rtp_codec_parameters = &codecs;
+
+    var extensions = [_]webrtc.RtpHeaderExtensionParameter{.{ .id = 4, .uri = "http://example.com/ext" }};
+    media.rtp_header_extensions = &extensions;
+
+    var buffer: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buffer);
+    try media.write(&w);
+
+    try testing.expectEqualStrings(
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
+            "c=IN IP4 0.0.0.0\r\n" ++
+            "a=rtpmap:111 Opus/48000/2\r\n" ++
+            "a=fmtp:111 minptime=10;useinbandfec=1\r\n" ++
+            "a=rtcp-fb:111 transport-cc\r\n" ++
+            "a=extmap:4 http://example.com/ext\r\n" ++
+            "a=setup:actpass\r\n" ++
+            "a=sendrecv\r\n" ++
+            "a=mid:0\r\n" ++
+            "a=rtcp-mux\r\n" ++
+            "a=ice-ufrag:ufrag1\r\n" ++
+            "a=ice-pwd:pwd1234567890123456789\r\n" ++
+            "a=msid:stream1 audio0\r\n" ++
+            "a=ssrc:12345 msid:stream1 audio0\r\n",
+        w.buffered(),
+    );
+}
+
+test "write: rejected media" {
+    var media: SDPSession.SDPMedia = .empty;
+    media.kind = .video;
+    media.bundle_only = true;
+    media.mid = try Mid.fromInt(1);
+    media.direction = .sendrecv;
+    media.setup = .actpass;
+
+    var buffer: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buffer);
+    try media.write(&w);
+
+    try testing.expectEqualStrings(
+        "m=video 0 UDP/TLS/RTP/SAVPF\r\n" ++
+            "c=IN IP4 0.0.0.0\r\n" ++
+            "a=bundle-only\r\n" ++
+            "a=setup:actpass\r\n" ++
+            "a=sendrecv\r\n" ++
+            "a=mid:1\r\n",
+        w.buffered(),
+    );
+}
+
+test "write: session round-trip" {
+    var session: SDPSession = try .parse(testing.allocator, offer_txt);
+    defer session.deinit(testing.allocator);
+
+    var w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer w.deinit();
+    try session.write(&w.writer);
+
+    var rewritten: SDPSession = try .parse(testing.allocator, w.writer.buffered());
+    defer rewritten.deinit(testing.allocator);
+
+    try testing.expectEqualSlices(u8, &session.fingerprint, &rewritten.fingerprint);
+    try testing.expectEqual(session.getMedias().len, rewritten.getMedias().len);
+
+    for (session.getMedias(), rewritten.getMedias()) |*orig, *new| {
+        try testing.expectEqual(orig.kind, new.kind);
+        try testing.expectEqual(orig.port, new.port);
+        try testing.expectEqual(orig.mid, new.mid);
+        try testing.expectEqual(orig.direction, new.direction);
+        try testing.expectEqual(orig.setup, new.setup);
+        try testing.expectEqualStrings(orig.ice_ufrag, new.ice_ufrag);
+        try testing.expectEqualStrings(orig.ice_pwd, new.ice_pwd);
+        try testing.expectEqual(orig.rtcp_mux, new.rtcp_mux);
+        try testing.expectEqual(orig.ssrc, new.ssrc);
+        try testing.expectEqual(orig.candidates.len, new.candidates.len);
+        try testing.expectEqual(orig.end_of_candidates, new.end_of_candidates);
+
+        try testing.expectEqual(orig.msid != null, new.msid != null);
+        if (orig.msid) |om| if (new.msid) |nm| try testing.expectEqualStrings(om.id, nm.id);
+        try testing.expectEqual(orig.track_id != null, new.track_id != null);
+        if (orig.track_id) |ot| if (new.track_id) |nt| try testing.expectEqualStrings(ot, nt);
+
+        try testing.expectEqual(orig.rtp_codec_parameters.len, new.rtp_codec_parameters.len);
+        for (orig.rtp_codec_parameters, new.rtp_codec_parameters) |*o, *n| {
+            try testing.expect(o.eql(n));
+            try testing.expectEqual(o.rtcp_feedbacks, n.rtcp_feedbacks);
+        }
+
+        try testing.expectEqual(orig.rtp_header_extensions.len, new.rtp_header_extensions.len);
+        for (orig.rtp_header_extensions, new.rtp_header_extensions) |o_ext, n_ext| {
+            try testing.expectEqual(o_ext.id, n_ext.id);
+            try testing.expectEqualStrings(o_ext.uri, n_ext.uri);
+        }
+    }
 }
 
 fn rtx(pt: u8, apt: u8) webrtc.RtpCodecParameters {
