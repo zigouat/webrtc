@@ -689,7 +689,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
 
         media_exists = true;
 
-        tr.sender.setCodecs(pc.dtls_transport.getIo(), media.rtp_codec_parameters);
+        try tr.sender.setCodecs(pc.dtls_transport.getIo(), pc.allocator, media.rtp_codec_parameters);
         tr.receiver.codecs = media.rtp_codec_parameters;
         tr.sender.setHeaderExtensions(media.rtp_header_extensions);
         tr.receiver.header_extensions = media.rtp_header_extensions;
@@ -782,12 +782,12 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
         transceiver.current_direction = direction;
 
         if (session_desc.type == .answer) {
-            const local_sdp = pc.pending_local_description.?.session;
+            const local_sdp = &pc.pending_local_description.?.session;
             const local_codecs = local_sdp.getMedias()[idx].rtp_codec_parameters;
             const remote_codecs = media.rtp_codec_parameters;
             const codecs = try utils.intersectCodecs(remote_codecs, local_codecs);
 
-            transceiver.sender.setCodecs(io, codecs.@"0");
+            try transceiver.sender.setCodecs(io, pc.allocator, codecs.@"0");
             transceiver.receiver.codecs = codecs.@"1";
 
             const local_extensions = local_sdp.getMedias()[idx].rtp_header_extensions;
@@ -1009,6 +1009,7 @@ test {
     _ = @import("tests/peer_connection.zig");
     _ = @import("pc/demuxer.zig");
     _ = @import("dtls/dtls.zig");
+    _ = @import("utils/send_buffer.zig");
 }
 
 test "nextPeerConnectionState" {

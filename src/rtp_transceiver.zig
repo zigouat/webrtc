@@ -107,6 +107,7 @@ pub fn initFromSdpMedia(allocator: std.mem.Allocator, io: Io, sdp_media: *const 
 
 pub fn deinit(tr: *RtpTransceiver, io: Io, allocator: std.mem.Allocator) void {
     tr.receiver.deinit(io, allocator);
+    tr.sender.deinit(allocator);
     allocator.destroy(tr);
 }
 
@@ -378,6 +379,7 @@ test "toSdpMediaAnswer: answer to offer" {
     offer_media.direction = .sendrecv;
     offer_media.port = 9;
     offer_media.rtp_codec_parameters = try testing.allocator.dupe(webrtc.RtpCodecParameters, webrtc.getCodecCapabilities(.video));
+    offer_media.rtp_codec_parameters[0].rtcp_feedbacks = .{ .nack = true, .nack_pli = true };
     defer offer_media.deinit(testing.allocator);
 
     var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media);
@@ -388,6 +390,10 @@ test "toSdpMediaAnswer: answer to offer" {
     try testing.expectEqual(.sendrecv, answer_media.direction);
     try testing.expectEqual(0x30, answer_media.mid);
     try testing.expect(answer_media.rtp_codec_parameters.len == offer_media.rtp_codec_parameters.len);
+
+    for (answer_media.rtp_codec_parameters) |codec| {
+        try testing.expect(codec.rtcp_feedbacks == webrtc.RtcpFeedbacks{ .nack_pli = true });
+    }
 
     const ice_credentials = transport.ice_agent.localCredentials();
     try testing.expectEqualStrings(ice_credentials.username, answer_media.ice_ufrag);

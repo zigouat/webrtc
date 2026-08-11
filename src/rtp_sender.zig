@@ -2,6 +2,7 @@ const std = @import("std");
 const webrtc = @import("webrtc.zig");
 const rtp = @import("rtp");
 const rtcp = @import("rtcp");
+const SendBuffer = @import("utils/send_buffer.zig");
 
 const Io = std.Io;
 const RtpSender = @This();
@@ -12,10 +13,33 @@ const RtpTransceiver = @import("rtp_transceiver.zig");
 const Mid = @import("mid.zig");
 
 const rtp_default_header_size = 12;
-const rtp_payload_max_size = 1200;
+const max_rtp_payload_size = 1200;
 
 const RtpHeaderExtensions = struct {
     mid: u16 = 0,
+};
+
+const Packetizer = union(enum) {
+    vp8: rtp.packetizer.VP8,
+    h264: rtp.packetizer.H264,
+    opus: rtp.packetizer.Opus,
+    none: void,
+
+    fn init(io: Io, ssrc: u32, codec: webrtc.RtpCodecParameters) @This() {
+        var rtp_config = rtp.packetizer.RtpConfig.init(io);
+        rtp_config.payload_type = @intCast(codec.payload_type);
+        rtp_config.ssrc = ssrc;
+
+        if (std.mem.eql(u8, codec.mime_type, webrtc.MimeType.VP8)) {
+            return .{ .vp8 = .init(rtp_config) };
+        } else if (std.mem.eql(u8, codec.mime_type, webrtc.MimeType.H264)) {
+            return .{ .h264 = .init(rtp_config) };
+        } else if (std.mem.eql(u8, codec.mime_type, webrtc.MimeType.Opus)) {
+            return .{ .opus = .init(rtp_config) };
+        }
+
+        return .none;
+    }
 };
 
 track: ?MediaStreamTrack,
@@ -23,12 +47,8 @@ codecs: []const webrtc.RtpCodecParameters,
 header_extensions: RtpHeaderExtensions,
 ssrc: u32,
 report: Report,
-packetizer: union(enum) {
-    vp8: rtp.packetizer.VP8,
-    h264: rtp.packetizer.H264,
-    opus: rtp.packetizer.Opus,
-    none: void,
-},
+packetizer: Packetizer,
+send_buffer: ?SendBuffer = null,
 
 pub const SendError = DtlsTransport.SendError || Io.Reader.Error || error{ NoAssociatedTrack, InvalidDirection };
 
@@ -74,6 +94,13 @@ pub fn init(track: ?MediaStreamTrack) RtpSender {
     };
 }
 
+pub fn deinit(sender: *RtpSender, allocator: std.mem.Allocator) void {
+    if (sender.send_buffer) |*send_buffer| {
+        send_buffer.deinit(allocator);
+        sender.send_buffer = null;
+    }
+}
+
 pub fn replaceTrack(sender: *RtpSender, new_track: MediaStreamTrack) !void {
     sender.track = new_track;
 }
@@ -82,7 +109,7 @@ pub fn setStream(sender: *RtpSender, stream: webrtc.MediaStream) void {
     if (sender.track) |*track| track.stream_id = stream.id;
 }
 
-pub fn setCodecs(sender: *RtpSender, io: std.Io, codecs: []const webrtc.RtpCodecParameters) void {
+pub fn setCodecs(sender: *RtpSender, io: std.Io, allocator: std.mem.Allocator, codecs: []const webrtc.RtpCodecParameters) !void {
     if (sender.codecs.len != 0) {
         // TODO: Handle this use case better. What if the codec is changed?
         // For now do not allow changing codecs after they have been set
@@ -93,17 +120,16 @@ pub fn setCodecs(sender: *RtpSender, io: std.Io, codecs: []const webrtc.RtpCodec
     sender.packetizer = .none;
 
     if (codecs.len > 0) {
-        const codec = codecs[0];
-        var rtp_config = rtp.packetizer.RtpConfig.init(io);
-        rtp_config.payload_type = @intCast(codec.payload_type);
-        rtp_config.ssrc = sender.ssrc;
+        const chosen_codec = codecs[0];
+        sender.packetizer = .init(io, sender.ssrc, chosen_codec);
+        const rtx_codec = blk: {
+            for (codecs) |codec| if (codec.isRtx() and codec.fmtp_params.?.rtx.apt == chosen_codec.payload_type)
+                break :blk codec;
+            break :blk null;
+        };
 
-        if (std.mem.eql(u8, codec.mime_type, webrtc.MimeType.VP8)) {
-            sender.packetizer = .{ .vp8 = .init(rtp_config) };
-        } else if (std.mem.eql(u8, codec.mime_type, webrtc.MimeType.H264)) {
-            sender.packetizer = .{ .h264 = .init(rtp_config) };
-        } else if (std.mem.eql(u8, codec.mime_type, webrtc.MimeType.Opus)) {
-            sender.packetizer = .{ .opus = .init(rtp_config) };
+        if (rtx_codec != null and chosen_codec.rtcp_feedbacks.nack) {
+            sender.send_buffer = try .init(allocator, 1024, max_rtp_payload_size);
         }
     }
 }
@@ -125,7 +151,7 @@ pub fn sendSample(sender: *RtpSender, sample: *const MediaPacket) SendError!void
     defer tr.transport.ice_agent.destroyPacket(buffer);
 
     const header_size = rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[rtp_default_header_size..]);
-    buffer = buffer[0 .. header_size + rtp_payload_max_size];
+    buffer = buffer[0 .. header_size + max_rtp_payload_size];
 
     //TODO: refactor this mess
     switch (sender.packetizer) {
