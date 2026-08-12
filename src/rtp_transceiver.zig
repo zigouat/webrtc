@@ -157,8 +157,8 @@ pub fn toSdpMediaAnswer(
 
     const codecs = try utils.getCodecIntersection(
         allocator,
-        media.rtp_codec_parameters,
         capabilities_with_rtx orelse local_capabilities,
+        media.rtp_codec_parameters,
     );
     defer if (answer.port == 0) allocator.free(codecs);
 
