@@ -90,6 +90,8 @@ pub const RTCConfiguration = struct {
 
 pub const PeerConfiguration = struct {
     inner_queue_size: usize = 8,
+    /// When true, generates an RTX codec for each video codec and enables nack feedback.
+    enable_rtx: bool = false,
 };
 
 pub const Config = struct {
@@ -118,6 +120,8 @@ demuxer: Demuxer,
 
 /// Used as a counter for generating mid values for transceivers.
 mid: u16 = 0,
+
+enable_rtx: bool = false,
 
 queue_buffer: []Event,
 queue: Io.Queue(Event),
@@ -172,6 +176,7 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
         .demuxer = .init(allocator),
         .queue_buffer = queue_buffer,
         .queue = .init(queue_buffer),
+        .enable_rtx = config.peer_config.enable_rtx,
     };
 }
 
@@ -336,7 +341,7 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
             cloned.port = 0;
             cloned.bundle_only = false;
             break :blk cloned;
-        } else try tr.toSdpMediaAnswer(pc.allocator, media);
+        } else try tr.toSdpMediaAnswer(pc.allocator, media, pc.enable_rtx);
     }
 
     try sdp_session.write(&w.writer);
@@ -501,7 +506,7 @@ fn createFirstOffer(pc: *PeerConnection) !webrtc.SessionDescription {
         const media = try medias.addOne(pc.allocator);
         media.* = .empty;
 
-        media.* = try tr.toSdpMedia(pc.allocator);
+        media.* = try tr.toSdpMedia(pc.allocator, pc.enable_rtx);
         media.mid = try Mid.fromInt(mid);
 
         tr.sdp_mline_index = @intCast(medias.items.len - 1);
@@ -555,7 +560,7 @@ fn createSubsequentOffer(pc: *PeerConnection) !webrtc.SessionDescription {
             tr.sdp_mline_index = @intCast(sdp_session.medias.items.len - 1);
             break :blk media;
         };
-        media.* = try tr.toSdpMedia(pc.allocator);
+        media.* = try tr.toSdpMedia(pc.allocator, pc.enable_rtx);
         media.mid = try Mid.fromInt(pc.mid);
         pc.mid +%= 1;
     };
