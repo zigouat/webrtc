@@ -95,8 +95,8 @@ pub fn initFromSdpMedia(allocator: std.mem.Allocator, io: Io, sdp_media: *const 
     tr.* = .{
         .direction = .recvonly,
         .kind = sdp_media.kind,
-        .receiver = try .init(track, allocator),
-        .sender = .init(null),
+        .receiver = try RtpReceiver.init(track, allocator),
+        .sender = RtpSender.init(null),
         .mid = sdp_media.mid,
         .sdp_mline_index = index,
         .transport = undefined,
@@ -289,6 +289,10 @@ fn addSenderFields(tr: *const RtpTransceiver, allocator: std.mem.Allocator, medi
             if (track.stream_id) |stream_id| media.msid = .{ .id = stream_id };
             media.track_id = try allocator.dupe(u8, track.getId());
             media.ssrc = tr.sender.ssrc;
+            for (media.rtp_codec_parameters) |codec| if (codec.isRtx()) {
+                media.rtx_ssrc = tr.sender.rtx_ssrc;
+                break;
+            };
         },
         else => {},
     }
@@ -298,8 +302,8 @@ fn newTestRtpTransceiver(io: Io, allocator: std.mem.Allocator) !*RtpTransceiver 
     const tr = try allocator.create(RtpTransceiver);
 
     tr.* = .{
-        .sender = .init(.init(io, .video)),
-        .receiver = try .init(.init(io, .video), allocator),
+        .sender = RtpSender.init(.init(io, .video)),
+        .receiver = try RtpReceiver.init(.init(io, .video), allocator),
         .direction = .sendrecv,
         .kind = .video,
         .transport = undefined,

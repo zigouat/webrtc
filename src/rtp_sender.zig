@@ -3,6 +3,7 @@ const webrtc = @import("webrtc.zig");
 const rtp = @import("rtp");
 const rtcp = @import("rtcp");
 const SendBuffer = @import("utils/send_buffer.zig");
+const Demuxer = @import("pc/demuxer.zig");
 
 const Io = std.Io;
 const RtpSender = @This();
@@ -276,6 +277,11 @@ pub fn handleNack(sender: *RtpSender, nack: rtcp.Nack) !void {
     }
 }
 
+pub fn generateSsrc(sender: *RtpSender, io: Io, demuxer: *Demuxer) !void {
+    sender.ssrc = try demuxer.registerRandomSsrc(io);
+    sender.rtx_ssrc = try demuxer.registerRandomSsrc(io);
+}
+
 fn recordSent(sender: *RtpSender, packet: *const rtp.Packet, timestamp: i64) void {
     sender.report.recordPacket(packet, timestamp);
     if (sender.send_buffer) |*send_buffer| send_buffer.add(packet);
@@ -327,8 +333,22 @@ fn microsecondsToNtp(timestamp: i64) u64 {
 
 const testing = std.testing;
 
-test "setHeaderExtensions: picks the mid extension id, ignores others" {
+test "generateSsrc: assigns distinct ssrc and rtx_ssrc" {
+    var demuxer = Demuxer.init(testing.allocator);
+    defer demuxer.deinit();
+
     var sender: RtpSender = .init(null);
+    try sender.generateSsrc(testing.io, &demuxer);
+
+    try testing.expect(sender.ssrc != 0);
+    try testing.expect(sender.rtx_ssrc != 0);
+    try testing.expect(sender.ssrc != sender.rtx_ssrc);
+    try testing.expect(demuxer.generated_ssrc.contains(sender.ssrc));
+    try testing.expect(demuxer.generated_ssrc.contains(sender.rtx_ssrc));
+}
+
+test "setHeaderExtensions: picks the mid extension id, ignores others" {
+    var sender = RtpSender.init(null);
     sender.setHeaderExtensions(&.{
         .{ .id = 9, .uri = "some-other-uri" },
         .{ .id = 3, .uri = webrtc.mid_extension_uri },
@@ -338,21 +358,21 @@ test "setHeaderExtensions: picks the mid extension id, ignores others" {
 }
 
 test "setHeaderExtensions: no mid extension leaves it unset" {
-    var sender: RtpSender = .init(null);
+    var sender = RtpSender.init(null);
     sender.setHeaderExtensions(&.{.{ .id = 9, .uri = "some-other-uri" }});
 
     try testing.expectEqual(0, sender.header_extensions.mid);
 }
 
 test "writeHeaderExtensions: not negotiated writes nothing" {
-    var sender: RtpSender = .init(null);
+    var sender = RtpSender.init(null);
     var buffer: [64]u8 = undefined;
 
     try testing.expectEqual(0, try sender.writeHeaderExtensions(try Mid.fromInt(1), &buffer));
 }
 
 test "writeHeaderExtensions: writes a one-byte mid extension" {
-    var sender: RtpSender = .init(null);
+    var sender = RtpSender.init(null);
     sender.header_extensions.mid = 3;
 
     var buffer: [64]u8 = undefined;

@@ -282,8 +282,7 @@ pub fn addTransceiverFromKind(
         const stream = try getOrAddStream(pc, stream_id);
         tr.sender.setStream(stream);
     }
-    tr.sender.ssrc = try generateSsrc(io, &pc.demuxer);
-    tr.sender.rtx_ssrc = try generateSsrc(io, &pc.demuxer);
+    try tr.sender.generateSsrc(io, &pc.demuxer);
 
     try pc.appendTransceiver(tr);
     errdefer _ = pc.transceivers.swapRemove(pc.getTransceivers().len - 1);
@@ -470,8 +469,7 @@ fn initTransceiverFromTrack(
         const stream = try getOrAddStream(pc, sid);
         tr.sender.setStream(stream);
     }
-    tr.sender.ssrc = try generateSsrc(pc.dtls_transport.getIo(), &pc.demuxer);
-    tr.sender.rtx_ssrc = try generateSsrc(pc.dtls_transport.getIo(), &pc.demuxer);
+    try tr.sender.generateSsrc(pc.dtls_transport.getIo(), &pc.demuxer);
 
     try pc.appendTransceiver(tr);
     return tr;
@@ -1012,17 +1010,6 @@ fn doSendReports(pc: *PeerConnection) !void {
             try pc.dtls_transport.sendRtcp(data);
         }
     }
-}
-
-fn generateSsrc(io: Io, demuxer: *Demuxer) !u32 {
-    var max_retries: usize = 100;
-    var ssrc: u32 = 0;
-    while (max_retries > 0) : (max_retries -= 1) {
-        io.random(std.mem.asBytes(&ssrc));
-        if (!demuxer.containsSsrc(io, ssrc)) return ssrc;
-    }
-
-    return error.SsrcUnavailable;
 }
 
 test {
