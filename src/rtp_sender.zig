@@ -90,6 +90,7 @@ report: Report,
 packetizer: Packetizer,
 rtx_config: ?RtxConfig,
 send_buffer: ?SendBuffer,
+mutex: Io.Mutex,
 
 pub fn init(track: ?MediaStreamTrack) RtpSender {
     return .{
@@ -102,6 +103,7 @@ pub fn init(track: ?MediaStreamTrack) RtpSender {
         .packetizer = .none,
         .rtx_config = null,
         .send_buffer = null,
+        .mutex = Io.Mutex.init,
     };
 }
 
@@ -209,11 +211,17 @@ pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) SendError!void {
 
     @memcpy(buffer[header_size .. packet.payload.len + header_size], packet.payload);
     try writeHeaderAndSend(tr, header, header_size, packet.payload.len, buffer);
-    sender.recordSent(packet, timestamp);
+    recordSent(tr, packet, timestamp);
 }
 
-pub fn writeReport(sender: *const RtpSender, timestamp: i64, buffer: []u8) []const u8 {
-    if (sender.report.packet_count == 0) return &.{};
+pub fn writeRtcpSenderReport(sender: *RtpSender, io: Io, timestamp: i64, buffer: []u8) []const u8 {
+    const report = blk: {
+        sender.mutex.lockUncancelable(io);
+        defer sender.mutex.unlock(io);
+        break :blk sender.report;
+    };
+
+    if (report.packet_count == 0) return &.{};
     std.debug.assert(buffer.len >= rtcp.header_size + rtcp.sr_base_size);
     const length = rtcp.header_size + rtcp.sr_base_size;
 
@@ -223,9 +231,8 @@ pub fn writeReport(sender: *const RtpSender, timestamp: i64, buffer: []u8) []con
         .length = length / 4 - 1,
         .padding = false,
     };
-    std.mem.writeInt(@Int(.unsigned, @bitSizeOf(rtcp.Header)), buffer[0..rtcp.header_size], @bitCast(header), .big);
+    std.mem.writeInt(@Int(.unsigned, rtcp.header_size * 8), buffer[0..rtcp.header_size], @bitCast(header), .big);
 
-    const report = sender.report;
     const codec = sender.codecs[0]; // First codec is used for sending
     const ts = if (timestamp <= report.timestamp) report.timestamp else timestamp;
     const diff: u32 = @intCast(@divTrunc((ts - report.timestamp) * codec.clock_rate, std.time.us_per_s));
@@ -249,9 +256,12 @@ pub fn handleNack(sender: *RtpSender, nack: rtcp.Nack) !void {
 
     var it = nack.iterateSequenceNumbers();
     while (it.next()) |seq| {
-        const packet = send_buffer.get(seq) orelse continue;
-
-        std.debug.print("Send rtx packet: {}\n", .{seq});
+        const packet = blk: {
+            const io = tr.transport.getIo();
+            sender.mutex.lockUncancelable(io);
+            defer sender.mutex.unlock(io);
+            break :blk send_buffer.get(seq);
+        } orelse continue;
 
         var buffer = try tr.transport.ice_agent.createPacket();
         defer tr.transport.ice_agent.destroyPacket(buffer);
@@ -282,9 +292,13 @@ pub fn generateSsrc(sender: *RtpSender, io: Io, demuxer: *Demuxer) !void {
     sender.rtx_ssrc = try demuxer.registerRandomSsrc(io);
 }
 
-fn recordSent(sender: *RtpSender, packet: *const rtp.Packet, timestamp: i64) void {
-    sender.report.recordPacket(packet, timestamp);
-    if (sender.send_buffer) |*send_buffer| send_buffer.add(packet);
+fn recordSent(tr: *RtpTransceiver, packet: *const rtp.Packet, timestamp: i64) void {
+    const io = tr.transport.getIo();
+    tr.sender.mutex.lockUncancelable(io);
+    defer tr.sender.mutex.unlock(io);
+
+    tr.sender.report.recordPacket(packet, timestamp);
+    if (tr.sender.send_buffer) |*send_buffer| send_buffer.add(packet);
 }
 
 fn checkAndGetTransceiver(sender: *RtpSender) !*RtpTransceiver {
@@ -322,7 +336,7 @@ fn sendAndRecord(tr: *RtpTransceiver, rtp_packet: *const rtp.Packet, header_size
     header.extension = header_size != rtp_default_header_size;
 
     try writeHeaderAndSend(tr, header, header_size, rtp_packet.payload.len, buffer);
-    tr.sender.recordSent(rtp_packet, timestamp);
+    recordSent(tr, rtp_packet, timestamp);
 }
 
 fn microsecondsToNtp(timestamp: i64) u64 {

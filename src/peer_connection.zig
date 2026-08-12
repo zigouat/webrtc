@@ -1010,7 +1010,7 @@ fn doSendReports(pc: *PeerConnection) !void {
             if (tr.isStopped() or tr.direction == .inactive) continue;
 
             // Logger.debug("send rtcp report for transceiver: {?s}", .{tr.mid});
-            const data = tr.getRtcpReport(timestamp, buffer);
+            const data = tr.getRtcpReport(io, timestamp, buffer);
             if (data.len == 0) continue;
             try pc.dtls_transport.sendRtcp(data);
         }
