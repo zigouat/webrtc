@@ -4,17 +4,23 @@ const rtp = @import("rtp");
 const SendBuffer = @This();
 
 const Entry = packed struct {
-    payload_len: u15,
+    timestamp: u32,
+    payload_len: u14,
+    marker: bool,
     available: bool,
 
     const empty: Entry = .{
+        .timestamp = 0,
         .payload_len = 0,
+        .marker = false,
         .available = false,
     };
 
-    fn from(len: usize) Entry {
+    fn from(packet: *const rtp.Packet) Entry {
         return .{
-            .payload_len = @intCast(len),
+            .timestamp = packet.header.timestamp,
+            .payload_len = @intCast(packet.payload.len),
+            .marker = packet.header.marker,
             .available = true,
         };
     }
@@ -60,7 +66,7 @@ pub fn add(send_buffer: *SendBuffer, packet: *const rtp.Packet) void {
         send_buffer.highest_seq_number = packet.header.sequence_number;
         send_buffer.started = true;
         @memcpy(send_buffer.buffer[offset .. offset + packet.payload.len], packet.payload);
-        send_buffer.entries[index] = .from(packet.payload.len);
+        send_buffer.entries[index] = .from(packet);
         return;
     }
 
@@ -76,10 +82,10 @@ pub fn add(send_buffer: *SendBuffer, packet: *const rtp.Packet) void {
     }
 
     @memcpy(send_buffer.buffer[offset .. offset + packet.payload.len], packet.payload);
-    send_buffer.entries[index] = .from(packet.payload.len);
+    send_buffer.entries[index] = .from(packet);
 }
 
-pub fn get(send_buffer: *SendBuffer, seq_number: u16) ?[]u8 {
+pub fn get(send_buffer: *SendBuffer, seq_number: u16) ?rtp.Packet {
     const index = seq_number & (send_buffer.size - 1);
     const entry = send_buffer.entries[index];
 
@@ -88,7 +94,18 @@ pub fn get(send_buffer: *SendBuffer, seq_number: u16) ?[]u8 {
     if (!entry.available) return null;
 
     const offset = @as(usize, index) * send_buffer.max_rtp_payload;
-    return send_buffer.buffer[offset .. offset + entry.payload_len];
+    return rtp.Packet{
+        .header = .{
+            .extension = false,
+            .marker = entry.marker,
+            .padding = false,
+            .payload_type = 0,
+            .sequence_number = 0,
+            .ssrc = 0,
+            .timestamp = entry.timestamp,
+        },
+        .payload = send_buffer.buffer[offset .. offset + entry.payload_len],
+    };
 }
 
 const testing = std.testing;
@@ -119,7 +136,7 @@ test "add and get: roundtrips a single packet" {
     send_buffer.add(&testPacket(0, "abc"));
 
     const got = send_buffer.get(0).?;
-    try testing.expectEqualSlices(u8, "abc", got[0..3]);
+    try testing.expectEqualSlices(u8, "abc", got.payload[0..3]);
 }
 
 test "get: returns null for a sequence number never added" {
@@ -148,7 +165,7 @@ test "add: duplicate sequence number does not overwrite existing data" {
     send_buffer.add(&testPacket(0, "xyz"));
 
     const got = send_buffer.get(0).?;
-    try testing.expectEqualSlices(u8, "abc", got[0..3]);
+    try testing.expectEqualSlices(u8, "abc", got.payload[0..3]);
 }
 
 test "add: out-of-order packet is stored without advancing the highest sequence number" {
@@ -161,7 +178,7 @@ test "add: out-of-order packet is stored without advancing the highest sequence 
     try testing.expectEqual(5, send_buffer.highest_seq_number);
 
     const got = send_buffer.get(4).?;
-    try testing.expectEqualSlices(u8, "first", got[0..5]);
+    try testing.expectEqualSlices(u8, "first", got.payload[0..5]);
 }
 
 test "add: advancing past the window evicts old entries" {
@@ -187,5 +204,19 @@ test "add: sequence number wraparound is treated as newer" {
     try testing.expectEqual(1, send_buffer.highest_seq_number);
 
     const got = send_buffer.get(1).?;
-    try testing.expectEqualSlices(u8, "xyz", got[0..3]);
+    try testing.expectEqualSlices(u8, "xyz", got.payload[0..3]);
+}
+
+test "add and get: preserves timestamp and marker" {
+    var send_buffer = try SendBuffer.init(testing.allocator, 4, 16);
+    defer send_buffer.deinit(testing.allocator);
+
+    var packet = testPacket(0, "abc");
+    packet.header.timestamp = 12345;
+    packet.header.marker = true;
+    send_buffer.add(&packet);
+
+    const got = send_buffer.get(0).?;
+    try testing.expectEqual(12345, got.header.timestamp);
+    try testing.expectEqual(true, got.header.marker);
 }

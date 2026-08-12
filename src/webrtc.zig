@@ -149,6 +149,11 @@ pub const RtpCodecParameters = struct {
         return std.ascii.eqlIgnoreCase(codec, "rtx");
     }
 
+    pub fn findRtx(codecs: []const RtpCodecParameters, payload_type: u8) ?RtpCodecParameters {
+        for (codecs) |codec| if (codec.isRtx() and codec.fmtp_params.?.rtx.apt == payload_type) return codec;
+        return null;
+    }
+
     pub fn eql(a: *const RtpCodecParameters, b: *const RtpCodecParameters) bool {
         if (!std.ascii.eqlIgnoreCase(a.mime_type, b.mime_type) or
             a.clock_rate != b.clock_rate or

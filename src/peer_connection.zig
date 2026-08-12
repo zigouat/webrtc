@@ -283,6 +283,7 @@ pub fn addTransceiverFromKind(
         tr.sender.setStream(stream);
     }
     tr.sender.ssrc = try generateSsrc(io, &pc.demuxer);
+    tr.sender.rtx_ssrc = try generateSsrc(io, &pc.demuxer);
 
     try pc.appendTransceiver(tr);
     errdefer _ = pc.transceivers.swapRemove(pc.getTransceivers().len - 1);
@@ -470,6 +471,7 @@ fn initTransceiverFromTrack(
         tr.sender.setStream(stream);
     }
     tr.sender.ssrc = try generateSsrc(pc.dtls_transport.getIo(), &pc.demuxer);
+    tr.sender.rtx_ssrc = try generateSsrc(pc.dtls_transport.getIo(), &pc.demuxer);
 
     try pc.appendTransceiver(tr);
     return tr;
@@ -904,7 +906,9 @@ fn pollTransport(pc: *PeerConnection) !void {
             }
         },
         .ice_gathering_state => |state| try pc.queue.putOne(io, .{ .gathering_state = state }),
-        .rtcp => |data| pc.dtls_transport.ice_agent.destroyPacket(data),
+        .rtcp => |data| pc.handleRtcpData(data) catch |err| {
+            Logger.warn("Failed to handle RTCP data: {}", .{err});
+        },
         .rtp => |data| {
             errdefer pc.dtls_transport.ice_agent.destroyPacket(data);
             const packet = try rtp.Packet.parse(data);
@@ -913,6 +917,22 @@ fn pollTransport(pc: *PeerConnection) !void {
             };
         },
     } else |err| return err;
+}
+
+fn handleRtcpData(pc: *PeerConnection, data: []const u8) !void {
+    defer pc.dtls_transport.ice_agent.destroyPacket(data);
+    var it = rtcp.CompoundPacketIterator.init(data);
+    while (try it.next()) |packet| switch (packet.payload) {
+        .nack => |nack| if (pc.findSenderBySsrc(nack.media_ssrc)) |sender| try sender.handleNack(nack),
+        else => {},
+    };
+}
+
+fn findSenderBySsrc(pc: *PeerConnection, ssrc: u32) ?*RtpSender {
+    pc.mutex.lockUncancelable(pc.dtls_transport.getIo());
+    defer pc.mutex.unlock(pc.dtls_transport.getIo());
+    for (pc.transceivers.items) |tr| if (tr.sender.ssrc == ssrc) return &tr.sender;
+    return null;
 }
 
 fn writeIceCandidates(pc: *PeerConnection, w: *Io.Writer) !void {
@@ -956,14 +976,14 @@ fn removeTransceivers(pc: *PeerConnection) void {
 
 fn startSenderReports(pc: *PeerConnection, renegotiation: bool) !void {
     if (renegotiation) return;
-    try pc.group.concurrent(pc.dtls_transport.getIo(), sendReports, .{pc});
-}
-
-fn sendReports(pc: *PeerConnection) !void {
-    pc.doSendReports() catch |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        else => |e| Logger.err("Error occurred while sending report: {}", .{e}),
-    };
+    try pc.group.concurrent(pc.dtls_transport.getIo(), struct {
+        fn sendReports(p: *PeerConnection) !void {
+            p.doSendReports() catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => |e| Logger.err("Error occurred while sending report: {}", .{e}),
+            };
+        }
+    }.sendReports, .{pc});
 }
 
 fn doSendReports(pc: *PeerConnection) !void {
