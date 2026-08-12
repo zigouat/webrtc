@@ -57,6 +57,7 @@ pub const SDPMedia = struct {
     track_id: ?[]const u8,
     msid: ?webrtc.MediaStream,
     ssrc: ?u32,
+    rtx_ssrc: ?u32,
 
     pub const empty: SDPMedia = .{
         .kind = .video,
@@ -77,6 +78,7 @@ pub const SDPMedia = struct {
         .track_id = null,
         .msid = null,
         .ssrc = null,
+        .rtx_ssrc = null,
     };
 
     pub fn parse(allocator: std.mem.Allocator, media: sdp.Media, fingerprint: *[32]u8) !SDPMedia {
@@ -152,6 +154,12 @@ pub const SDPMedia = struct {
             .ssrc => |ssrc| if (sdp_media.ssrc == null) {
                 sdp_media.ssrc = ssrc.id;
             },
+            .ssrc_group => |group| if (group.semantics == .FID) {
+                var ssrc_it = std.mem.tokenizeScalar(u8, group.mids, ' ');
+                _ = ssrc_it.next() orelse return error.InvalidSDP;
+                const rtx_ssrc = ssrc_it.next() orelse return error.InvalidSDP;
+                sdp_media.rtx_ssrc = std.fmt.parseInt(u32, rtx_ssrc, 10) catch return error.InvalidSDP;
+            },
             .rtcp_fb => |fb| {
                 const codecs = sdp_media.rtp_codec_parameters;
                 switch (fb.payload_type) {
@@ -221,7 +229,9 @@ pub const SDPMedia = struct {
             if (media.ssrc) |ssrc| {
                 const msid = if (media.msid) |m| m.id else "-";
                 const track_id = if (media.track_id) |track_id| track_id else "";
+                if (media.rtx_ssrc) |rtx_ssrc| try w.print("a=ssrc-group:FID {} {}\r\n", .{ ssrc, rtx_ssrc });
                 try w.print("a=ssrc:{} msid:{s} {s}\r\n", .{ ssrc, msid, track_id });
+                if (media.rtx_ssrc) |rtx_ssrc| try w.print("a=ssrc:{} msid:{s} {s}\r\n", .{ rtx_ssrc, msid, track_id });
             }
         }
     }

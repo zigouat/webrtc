@@ -21,6 +21,7 @@ pub const default_video_codecs = &[_]RtpCodecParameters{
         .payload_type = 96,
         .mime_type = MimeType.VP8,
         .clock_rate = 90_000,
+        .rtcp_feedbacks = .{ .nack_pli = true },
     },
     .{
         .payload_type = 104,
@@ -33,6 +34,7 @@ pub const default_video_codecs = &[_]RtpCodecParameters{
                 .packetization_mode = 1,
             },
         },
+        .rtcp_feedbacks = .{ .nack_pli = true },
     },
 };
 
@@ -145,6 +147,11 @@ pub const RtpCodecParameters = struct {
     pub fn isRtx(a: *const RtpCodecParameters) bool {
         const codec = std.mem.cutScalar(u8, a.mime_type, '/').?.@"1";
         return std.ascii.eqlIgnoreCase(codec, "rtx");
+    }
+
+    pub fn findRtx(codecs: []const RtpCodecParameters, payload_type: u8) ?RtpCodecParameters {
+        for (codecs) |codec| if (codec.isRtx() and codec.fmtp_params.?.rtx.apt == payload_type) return codec;
+        return null;
     }
 
     pub fn eql(a: *const RtpCodecParameters, b: *const RtpCodecParameters) bool {
@@ -274,12 +281,12 @@ pub const MediaStreamTrack = struct {
 };
 
 pub const RtcpFeedbacks = packed struct(u8) {
-    nack: bool,
-    nack_pli: bool,
-    transport_cc: bool,
-    ccm_fir: bool,
-    goog_remb: bool,
-    _pad: u3,
+    nack: bool = false,
+    nack_pli: bool = false,
+    transport_cc: bool = false,
+    ccm_fir: bool = false,
+    goog_remb: bool = false,
+    _pad: u3 = 0,
 
     pub const empty: RtcpFeedbacks = @bitCast(@as(u8, 0));
 
@@ -317,6 +324,10 @@ pub const RtcpFeedbacks = packed struct(u8) {
         if (fb.goog_remb) {
             try writer.print("a=rtcp-fb:{} goog-remb\r\n", .{payload_type});
         }
+    }
+
+    pub fn intersect(a: RtcpFeedbacks, b: RtcpFeedbacks) RtcpFeedbacks {
+        return @bitCast(@as(u8, @bitCast(a)) & @as(u8, @bitCast(b)));
     }
 
     test "fromSdpRtcpFb: nack" {

@@ -16,8 +16,13 @@ pub fn getCodecIntersection(allocator: std.mem.Allocator, a: []const RtpCodec, b
     for (b) |codec_b| if (!codec_b.isRtx()) {
         for (a) |codec_a| if (!codec_a.isRtx()) {
             if (codec_b.eql(&codec_a)) {
-                try result_a.append(allocator, codec_a);
-                try result_b.append(allocator, codec_b);
+                var new_codec_a = codec_a;
+                var new_codec_b = codec_b;
+                new_codec_a.rtcp_feedbacks = webrtc.RtcpFeedbacks.intersect(codec_a.rtcp_feedbacks, codec_b.rtcp_feedbacks);
+                new_codec_b.rtcp_feedbacks = new_codec_a.rtcp_feedbacks;
+
+                try result_a.append(allocator, new_codec_a);
+                try result_b.append(allocator, new_codec_b);
             }
         };
     };
@@ -33,8 +38,13 @@ pub fn getCodecIntersection(allocator: std.mem.Allocator, a: []const RtpCodec, b
 
         const src_apt = result_a.items[maybe_index.?].payload_type;
         for (a) |codec_a| if (codec_a.isRtx() and codec_a.fmtp_params.?.rtx.apt == src_apt) {
-            try result_a.append(allocator, codec_a);
-            try result_b.append(allocator, codec_b);
+            var new_codec_a = codec_a;
+            var new_codec_b = codec_b;
+            new_codec_a.rtcp_feedbacks = webrtc.RtcpFeedbacks.intersect(codec_a.rtcp_feedbacks, codec_b.rtcp_feedbacks);
+            new_codec_b.rtcp_feedbacks = new_codec_a.rtcp_feedbacks;
+
+            try result_a.append(allocator, new_codec_a);
+            try result_b.append(allocator, new_codec_b);
             break;
         };
     };

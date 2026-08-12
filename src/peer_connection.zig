@@ -90,6 +90,8 @@ pub const RTCConfiguration = struct {
 
 pub const PeerConfiguration = struct {
     inner_queue_size: usize = 8,
+    /// When true, generates an RTX codec for each video codec and enables nack feedback.
+    enable_rtx: bool = false,
 };
 
 pub const Config = struct {
@@ -118,6 +120,8 @@ demuxer: Demuxer,
 
 /// Used as a counter for generating mid values for transceivers.
 mid: u16 = 0,
+
+enable_rtx: bool = false,
 
 queue_buffer: []Event,
 queue: Io.Queue(Event),
@@ -172,6 +176,7 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
         .demuxer = .init(allocator),
         .queue_buffer = queue_buffer,
         .queue = .init(queue_buffer),
+        .enable_rtx = config.peer_config.enable_rtx,
     };
 }
 
@@ -282,7 +287,7 @@ pub fn addTransceiverFromKind(
         const stream = try getOrAddStream(pc, stream_id);
         tr.sender.setStream(stream);
     }
-    tr.sender.ssrc = try generateSsrc(io, &pc.demuxer);
+    try tr.sender.generateSsrc(io, &pc.demuxer);
 
     try pc.appendTransceiver(tr);
     errdefer _ = pc.transceivers.swapRemove(pc.getTransceivers().len - 1);
@@ -336,7 +341,7 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
             cloned.port = 0;
             cloned.bundle_only = false;
             break :blk cloned;
-        } else try tr.toSdpMediaAnswer(pc.allocator, media);
+        } else try tr.toSdpMediaAnswer(pc.allocator, media, pc.enable_rtx);
     }
 
     try sdp_session.write(&w.writer);
@@ -469,7 +474,7 @@ fn initTransceiverFromTrack(
         const stream = try getOrAddStream(pc, sid);
         tr.sender.setStream(stream);
     }
-    tr.sender.ssrc = try generateSsrc(pc.dtls_transport.getIo(), &pc.demuxer);
+    try tr.sender.generateSsrc(pc.dtls_transport.getIo(), &pc.demuxer);
 
     try pc.appendTransceiver(tr);
     return tr;
@@ -501,7 +506,7 @@ fn createFirstOffer(pc: *PeerConnection) !webrtc.SessionDescription {
         const media = try medias.addOne(pc.allocator);
         media.* = .empty;
 
-        media.* = try tr.toSdpMedia(pc.allocator);
+        media.* = try tr.toSdpMedia(pc.allocator, pc.enable_rtx);
         media.mid = try Mid.fromInt(mid);
 
         tr.sdp_mline_index = @intCast(medias.items.len - 1);
@@ -555,7 +560,7 @@ fn createSubsequentOffer(pc: *PeerConnection) !webrtc.SessionDescription {
             tr.sdp_mline_index = @intCast(sdp_session.medias.items.len - 1);
             break :blk media;
         };
-        media.* = try tr.toSdpMedia(pc.allocator);
+        media.* = try tr.toSdpMedia(pc.allocator, pc.enable_rtx);
         media.mid = try Mid.fromInt(pc.mid);
         pc.mid +%= 1;
     };
@@ -689,7 +694,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
 
         media_exists = true;
 
-        tr.sender.setCodecs(pc.dtls_transport.getIo(), media.rtp_codec_parameters);
+        try tr.sender.setCodecs(pc.dtls_transport.getIo(), pc.allocator, media.rtp_codec_parameters);
         tr.receiver.codecs = media.rtp_codec_parameters;
         tr.sender.setHeaderExtensions(media.rtp_header_extensions);
         tr.receiver.header_extensions = media.rtp_header_extensions;
@@ -782,12 +787,12 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
         transceiver.current_direction = direction;
 
         if (session_desc.type == .answer) {
-            const local_sdp = pc.pending_local_description.?.session;
+            const local_sdp = &pc.pending_local_description.?.session;
             const local_codecs = local_sdp.getMedias()[idx].rtp_codec_parameters;
             const remote_codecs = media.rtp_codec_parameters;
             const codecs = try utils.intersectCodecs(remote_codecs, local_codecs);
 
-            transceiver.sender.setCodecs(io, codecs.@"0");
+            try transceiver.sender.setCodecs(io, pc.allocator, codecs.@"0");
             transceiver.receiver.codecs = codecs.@"1";
 
             const local_extensions = local_sdp.getMedias()[idx].rtp_header_extensions;
@@ -904,7 +909,9 @@ fn pollTransport(pc: *PeerConnection) !void {
             }
         },
         .ice_gathering_state => |state| try pc.queue.putOne(io, .{ .gathering_state = state }),
-        .rtcp => |data| pc.dtls_transport.ice_agent.destroyPacket(data),
+        .rtcp => |data| pc.handleRtcpData(data) catch |err| {
+            Logger.warn("Failed to handle RTCP data: {}", .{err});
+        },
         .rtp => |data| {
             errdefer pc.dtls_transport.ice_agent.destroyPacket(data);
             const packet = try rtp.Packet.parse(data);
@@ -913,6 +920,22 @@ fn pollTransport(pc: *PeerConnection) !void {
             };
         },
     } else |err| return err;
+}
+
+fn handleRtcpData(pc: *PeerConnection, data: []const u8) !void {
+    defer pc.dtls_transport.ice_agent.destroyPacket(data);
+    var it = rtcp.CompoundPacketIterator.init(data);
+    while (try it.next()) |packet| switch (packet.payload) {
+        .nack => |nack| if (pc.findSenderBySsrc(nack.media_ssrc)) |sender| try sender.handleNack(nack),
+        else => {},
+    };
+}
+
+fn findSenderBySsrc(pc: *PeerConnection, ssrc: u32) ?*RtpSender {
+    pc.mutex.lockUncancelable(pc.dtls_transport.getIo());
+    defer pc.mutex.unlock(pc.dtls_transport.getIo());
+    for (pc.transceivers.items) |tr| if (tr.sender.ssrc == ssrc) return &tr.sender;
+    return null;
 }
 
 fn writeIceCandidates(pc: *PeerConnection, w: *Io.Writer) !void {
@@ -956,14 +979,14 @@ fn removeTransceivers(pc: *PeerConnection) void {
 
 fn startSenderReports(pc: *PeerConnection, renegotiation: bool) !void {
     if (renegotiation) return;
-    try pc.group.concurrent(pc.dtls_transport.getIo(), sendReports, .{pc});
-}
-
-fn sendReports(pc: *PeerConnection) !void {
-    pc.doSendReports() catch |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        else => |e| Logger.err("Error occurred while sending report: {}", .{e}),
-    };
+    try pc.group.concurrent(pc.dtls_transport.getIo(), struct {
+        fn sendReports(p: *PeerConnection) !void {
+            p.doSendReports() catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => |e| Logger.err("Error occurred while sending report: {}", .{e}),
+            };
+        }
+    }.sendReports, .{pc});
 }
 
 fn doSendReports(pc: *PeerConnection) !void {
@@ -994,21 +1017,11 @@ fn doSendReports(pc: *PeerConnection) !void {
     }
 }
 
-fn generateSsrc(io: Io, demuxer: *Demuxer) !u32 {
-    var max_retries: usize = 100;
-    var ssrc: u32 = 0;
-    while (max_retries > 0) : (max_retries -= 1) {
-        io.random(std.mem.asBytes(&ssrc));
-        if (!demuxer.containsSsrc(io, ssrc)) return ssrc;
-    }
-
-    return error.SsrcUnavailable;
-}
-
 test {
     _ = @import("tests/peer_connection.zig");
     _ = @import("pc/demuxer.zig");
     _ = @import("dtls/dtls.zig");
+    _ = @import("utils/send_buffer.zig");
 }
 
 test "nextPeerConnectionState" {

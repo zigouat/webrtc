@@ -260,6 +260,7 @@ test "parse: sdp offer" {
 
     try testing.expect(audio_media.ssrc != null);
     try testing.expectEqual(3427430813, audio_media.ssrc.?);
+    try testing.expectEqual(null, audio_media.rtx_ssrc);
 
     const audio_codecs = audio_media.rtp_codec_parameters;
     try testing.expectEqual(4, audio_codecs.len);
@@ -320,6 +321,8 @@ test "parse: sdp offer" {
 
     try testing.expect(video_media.ssrc != null);
     try testing.expectEqual(3213490500, video_media.ssrc.?);
+    try testing.expect(video_media.rtx_ssrc != null);
+    try testing.expectEqual(428397658, video_media.rtx_ssrc.?);
 
     const video_codecs = video_media.rtp_codec_parameters;
     try testing.expectEqual(24, video_codecs.len);
@@ -479,6 +482,36 @@ test "write: media" {
             "a=ice-pwd:pwd1234567890123456789\r\n" ++
             "a=msid:stream1 audio0\r\n" ++
             "a=ssrc:12345 msid:stream1 audio0\r\n",
+        w.buffered(),
+    );
+}
+
+test "write: media with rtx ssrc emits ssrc-group:FID and a second ssrc line" {
+    var media: SDPSession.SDPMedia = .empty;
+    media.kind = .video;
+    media.port = 9;
+    media.mid = try Mid.fromInt(0);
+    media.direction = .sendrecv;
+    media.setup = .actpass;
+    media.track_id = "video0";
+    media.msid = .{ .id = "stream1" };
+    media.ssrc = 12345;
+    media.rtx_ssrc = 67890;
+
+    var buffer: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buffer);
+    try media.write(&w);
+
+    try testing.expectEqualStrings(
+        "m=video 9 UDP/TLS/RTP/SAVPF\r\n" ++
+            "c=IN IP4 0.0.0.0\r\n" ++
+            "a=setup:actpass\r\n" ++
+            "a=sendrecv\r\n" ++
+            "a=mid:0\r\n" ++
+            "a=msid:stream1 video0\r\n" ++
+            "a=ssrc-group:FID 12345 67890\r\n" ++
+            "a=ssrc:12345 msid:stream1 video0\r\n" ++
+            "a=ssrc:67890 msid:stream1 video0\r\n",
         w.buffered(),
     );
 }

@@ -288,6 +288,46 @@ test "createOffer: m-lines created for each transceiver" {
     }
 }
 
+test "createOffer: enable_rtx synthesizes rtx codecs for video only" {
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .peer_config = .{ .enable_rtx = true } });
+    defer pc.deinit();
+
+    _ = try pc.addTrack(.initWithId("video", .video), null);
+    _ = try pc.addTrack(.initWithId("audio", .audio), null);
+
+    const offer = try pc.createOffer();
+    var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
+    defer sdp_session.deinit(testing.allocator);
+
+    const medias = sdp_session.getMedias();
+    for (medias) |media| {
+        var saw_rtx = false;
+        for (media.rtp_codec_parameters) |codec| {
+            if (codec.isRtx()) {
+                saw_rtx = true;
+            } else if (media.kind == .video) {
+                try testing.expect(codec.rtcp_feedbacks.nack);
+            }
+        }
+        try testing.expectEqual(media.kind == .video, saw_rtx);
+    }
+}
+
+test "createOffer: enable_rtx defaults to false, never emits rtx codecs" {
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    defer pc.deinit();
+
+    _ = try pc.addTrack(.initWithId("video", .video), null);
+
+    const offer = try pc.createOffer();
+    var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
+    defer sdp_session.deinit(testing.allocator);
+
+    for (sdp_session.getMedias()) |media| {
+        for (media.rtp_codec_parameters) |codec| try testing.expect(!codec.isRtx());
+    }
+}
+
 test "createOffer: stopped non-associted transceiver is ignored" {
     var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
     defer pc.deinit();

@@ -95,8 +95,8 @@ pub fn initFromSdpMedia(allocator: std.mem.Allocator, io: Io, sdp_media: *const 
     tr.* = .{
         .direction = .recvonly,
         .kind = sdp_media.kind,
-        .receiver = try .init(track, allocator),
-        .sender = .init(null),
+        .receiver = try RtpReceiver.init(track, allocator),
+        .sender = RtpSender.init(null),
         .mid = sdp_media.mid,
         .sdp_mline_index = index,
         .transport = undefined,
@@ -107,19 +107,23 @@ pub fn initFromSdpMedia(allocator: std.mem.Allocator, io: Io, sdp_media: *const 
 
 pub fn deinit(tr: *RtpTransceiver, io: Io, allocator: std.mem.Allocator) void {
     tr.receiver.deinit(io, allocator);
+    tr.sender.deinit(allocator);
     allocator.destroy(tr);
 }
 
 /// Creates an SDP media description from the transceiver.
 ///
 /// Called when creating offers.
-pub fn toSdpMedia(tr: *RtpTransceiver, allocator: std.mem.Allocator) std.mem.Allocator.Error!SDPSession.SDPMedia {
+pub fn toSdpMedia(tr: *RtpTransceiver, allocator: std.mem.Allocator, enable_rtx: bool) std.mem.Allocator.Error!SDPSession.SDPMedia {
     var media: SDPSession.SDPMedia = .empty;
 
     media.kind = tr.kind;
     media.port = if (tr.stopping) 0 else 9;
     media.direction = tr.direction;
-    media.rtp_codec_parameters = try allocator.dupe(webrtc.RtpCodecParameters, webrtc.getCodecCapabilities(tr.kind));
+    media.rtp_codec_parameters = if (enable_rtx and tr.kind == .video)
+        try synthesizeRtxCodecs(allocator, webrtc.getCodecCapabilities(tr.kind))
+    else
+        try allocator.dupe(webrtc.RtpCodecParameters, webrtc.getCodecCapabilities(tr.kind));
     media.rtp_header_extensions = try allocator.dupe(
         webrtc.RtpHeaderExtensionParameter,
         webrtc.getHeaderExtensionCapabilities(tr.kind),
@@ -139,14 +143,22 @@ pub fn toSdpMediaAnswer(
     tr: *const RtpTransceiver,
     allocator: std.mem.Allocator,
     media: *const SDPSession.SDPMedia,
+    enable_rtx: bool,
 ) std.mem.Allocator.Error!SDPSession.SDPMedia {
     var answer: SDPSession.SDPMedia = .empty;
     errdefer answer.deinit(allocator);
 
+    const local_capabilities = webrtc.getCodecCapabilities(tr.kind);
+    const capabilities_with_rtx = if (enable_rtx and tr.kind == .video)
+        try synthesizeRtxCodecs(allocator, local_capabilities)
+    else
+        null;
+    defer if (capabilities_with_rtx) |c| allocator.free(c);
+
     const codecs = try utils.getCodecIntersection(
         allocator,
+        capabilities_with_rtx orelse local_capabilities,
         media.rtp_codec_parameters,
-        webrtc.getCodecCapabilities(tr.kind),
     );
     defer if (answer.port == 0) allocator.free(codecs);
 
@@ -180,6 +192,33 @@ pub fn toSdpMediaAnswer(
 
     if (!rejected) try tr.addSenderFields(allocator, &answer);
     return answer;
+}
+
+/// Returns a copy of `codecs` with an RTX companion appended for each one, and `nack` feedback
+/// enabled. `codecs` must not already contain RTX entries.
+fn synthesizeRtxCodecs(allocator: std.mem.Allocator, codecs: []const webrtc.RtpCodecParameters) std.mem.Allocator.Error![]webrtc.RtpCodecParameters {
+    const result = try allocator.alloc(webrtc.RtpCodecParameters, codecs.len * 2);
+
+    var used: [256]bool = @splat(false);
+    for (codecs) |c| used[c.payload_type] = true;
+
+    var next_pt: u16 = 96;
+    for (codecs, 0..) |codec, i| {
+        while (used[next_pt]) : (next_pt += 1) {}
+        const pt: u8 = @intCast(next_pt);
+        used[pt] = true;
+
+        result[i * 2] = codec;
+        result[i * 2].rtcp_feedbacks.nack = true;
+        result[i * 2 + 1] = .{
+            .payload_type = pt,
+            .mime_type = webrtc.MimeType.Rtx,
+            .clock_rate = codec.clock_rate,
+            .fmtp_params = .{ .rtx = .{ .apt = codec.payload_type } },
+        };
+    }
+
+    return result;
 }
 
 /// Check if a track of kind `kind` can be associated with this transceiver.
@@ -288,6 +327,10 @@ fn addSenderFields(tr: *const RtpTransceiver, allocator: std.mem.Allocator, medi
             if (track.stream_id) |stream_id| media.msid = .{ .id = stream_id };
             media.track_id = try allocator.dupe(u8, track.getId());
             media.ssrc = tr.sender.ssrc;
+            for (media.rtp_codec_parameters) |codec| if (codec.isRtx()) {
+                media.rtx_ssrc = tr.sender.rtx_ssrc;
+                break;
+            };
         },
         else => {},
     }
@@ -297,8 +340,8 @@ fn newTestRtpTransceiver(io: Io, allocator: std.mem.Allocator) !*RtpTransceiver 
     const tr = try allocator.create(RtpTransceiver);
 
     tr.* = .{
-        .sender = .init(.init(io, .video)),
-        .receiver = try .init(.init(io, .video), allocator),
+        .sender = RtpSender.init(.init(io, .video)),
+        .receiver = try RtpReceiver.init(.init(io, .video), allocator),
         .direction = .sendrecv,
         .kind = .video,
         .transport = undefined,
@@ -339,7 +382,7 @@ test "toSdpMedia" {
     defer tr.deinit(testing.io, testing.allocator);
     tr.transport = &transport;
 
-    var media = try tr.toSdpMedia(testing.allocator);
+    var media = try tr.toSdpMedia(testing.allocator, false);
 
     try testing.expectEqual(.video, media.kind);
     try testing.expectEqual(9, media.port);
@@ -357,7 +400,7 @@ test "toSdpMedia" {
     tr.sender.track = null;
 
     media.deinit(testing.allocator);
-    media = try tr.toSdpMedia(testing.allocator);
+    media = try tr.toSdpMedia(testing.allocator, false);
     defer media.deinit(testing.allocator);
 
     try testing.expectEqual(.recvonly, media.direction);
@@ -378,9 +421,10 @@ test "toSdpMediaAnswer: answer to offer" {
     offer_media.direction = .sendrecv;
     offer_media.port = 9;
     offer_media.rtp_codec_parameters = try testing.allocator.dupe(webrtc.RtpCodecParameters, webrtc.getCodecCapabilities(.video));
+    offer_media.rtp_codec_parameters[0].rtcp_feedbacks = .{ .nack = true, .nack_pli = true };
     defer offer_media.deinit(testing.allocator);
 
-    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media);
+    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, false);
     defer answer_media.deinit(testing.allocator);
 
     try testing.expectEqual(.video, answer_media.kind);
@@ -389,9 +433,139 @@ test "toSdpMediaAnswer: answer to offer" {
     try testing.expectEqual(0x30, answer_media.mid);
     try testing.expect(answer_media.rtp_codec_parameters.len == offer_media.rtp_codec_parameters.len);
 
+    for (answer_media.rtp_codec_parameters) |codec| {
+        try testing.expect(codec.rtcp_feedbacks == webrtc.RtcpFeedbacks{ .nack_pli = true });
+    }
+
     const ice_credentials = transport.ice_agent.localCredentials();
     try testing.expectEqualStrings(ice_credentials.username, answer_media.ice_ufrag);
     try testing.expectEqualStrings(ice_credentials.password, answer_media.ice_pwd);
+}
+
+test "toSdpMediaAnswer: includes rtx_ssrc when the negotiated codecs include rtx" {
+    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    defer transport.deinit();
+
+    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
+    defer tr.deinit(testing.io, testing.allocator);
+    tr.mid = 0x30;
+    tr.transport = &transport;
+    tr.sender.rtx_ssrc = 424242;
+
+    var offer_media = SDPSession.SDPMedia.empty;
+    offer_media.kind = .video;
+    offer_media.direction = .sendrecv;
+    offer_media.port = 9;
+    offer_media.rtp_codec_parameters = try synthesizeRtxCodecs(testing.allocator, webrtc.getCodecCapabilities(.video));
+    defer offer_media.deinit(testing.allocator);
+
+    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, true);
+    defer answer_media.deinit(testing.allocator);
+
+    try testing.expectEqual(424242, answer_media.rtx_ssrc);
+}
+
+test "toSdpMediaAnswer: enable_rtx=false ignores an rtx-capable offer" {
+    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    defer transport.deinit();
+
+    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
+    defer tr.deinit(testing.io, testing.allocator);
+    tr.mid = 0x30;
+    tr.transport = &transport;
+    tr.sender.rtx_ssrc = 424242;
+
+    var offer_media = SDPSession.SDPMedia.empty;
+    offer_media.kind = .video;
+    offer_media.direction = .sendrecv;
+    offer_media.port = 9;
+    offer_media.rtp_codec_parameters = try synthesizeRtxCodecs(testing.allocator, webrtc.getCodecCapabilities(.video));
+    defer offer_media.deinit(testing.allocator);
+
+    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, false);
+    defer answer_media.deinit(testing.allocator);
+
+    for (answer_media.rtp_codec_parameters) |codec| try testing.expect(!codec.isRtx());
+    try testing.expectEqual(null, answer_media.rtx_ssrc);
+}
+
+test "toSdpMedia: includes rtx_ssrc when enable_rtx synthesizes an rtx codec" {
+    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    defer transport.deinit();
+
+    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
+    defer tr.deinit(testing.io, testing.allocator);
+    tr.transport = &transport;
+    tr.sender.rtx_ssrc = 424242;
+
+    var media = try tr.toSdpMedia(testing.allocator, true);
+    defer media.deinit(testing.allocator);
+
+    try testing.expectEqual(424242, media.rtx_ssrc);
+
+    var saw_rtx = false;
+    for (media.rtp_codec_parameters) |codec| {
+        if (codec.isRtx()) saw_rtx = true else try testing.expect(codec.rtcp_feedbacks.nack);
+    }
+    try testing.expect(saw_rtx);
+}
+
+test "toSdpMedia: leaves rtx_ssrc unset for audio, which has no rtx codec, even with enable_rtx" {
+    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    defer transport.deinit();
+
+    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
+    defer tr.deinit(testing.io, testing.allocator);
+    tr.kind = .audio;
+    tr.sender.track = .init(testing.io, .audio);
+    tr.transport = &transport;
+    tr.sender.rtx_ssrc = 424242;
+
+    var media = try tr.toSdpMedia(testing.allocator, true);
+    defer media.deinit(testing.allocator);
+
+    try testing.expectEqual(null, media.rtx_ssrc);
+}
+
+test "synthesizeRtxCodecs: adds an rtx companion with an unused payload type and enables nack" {
+    const codecs = [_]webrtc.RtpCodecParameters{
+        .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack_pli = true } },
+        .{ .payload_type = 104, .mime_type = webrtc.MimeType.H264, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack_pli = true } },
+    };
+
+    const result = try synthesizeRtxCodecs(testing.allocator, &codecs);
+    defer testing.allocator.free(result);
+
+    try testing.expectEqual(4, result.len);
+
+    try testing.expectEqual(96, result[0].payload_type);
+    try testing.expect(result[0].rtcp_feedbacks.nack);
+    try testing.expect(result[0].rtcp_feedbacks.nack_pli);
+
+    try testing.expect(result[1].isRtx());
+    try testing.expectEqual(97, result[1].payload_type);
+    try testing.expectEqual(96, result[1].fmtp_params.?.rtx.apt);
+
+    try testing.expectEqual(104, result[2].payload_type);
+    try testing.expect(result[2].rtcp_feedbacks.nack);
+
+    try testing.expect(result[3].isRtx());
+    try testing.expectEqual(98, result[3].payload_type);
+    try testing.expectEqual(104, result[3].fmtp_params.?.rtx.apt);
+}
+
+test "synthesizeRtxCodecs: picks the next free payload type, skipping ones already in use" {
+    const codecs = [_]webrtc.RtpCodecParameters{
+        .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000 },
+        .{ .payload_type = 97, .mime_type = webrtc.MimeType.H264, .clock_rate = 90_000 },
+    };
+
+    const result = try synthesizeRtxCodecs(testing.allocator, &codecs);
+    defer testing.allocator.free(result);
+
+    try testing.expectEqual(4, result.len);
+    try testing.expectEqual(98, result[1].payload_type);
+    try testing.expectEqual(99, result[3].payload_type);
 }
 
 test "toSdpMediaAnswer: negotiates header extensions, keeping the offerer's id" {
@@ -415,7 +589,7 @@ test "toSdpMediaAnswer: negotiates header extensions, keeping the offerer's id" 
         .{ .id = 9, .uri = "some-unsupported-uri" },
     });
 
-    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media);
+    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, false);
     defer answer_media.deinit(testing.allocator);
 
     try testing.expectEqual(1, answer_media.rtp_header_extensions.len);
@@ -433,7 +607,7 @@ test "toSdpMediaAnswer: reject offer" {
     // Offer port == 0
     {
         offer_media.port = 0;
-        var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media);
+        var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, false);
         defer answer_media.deinit(testing.allocator);
         try testing.expectEqual(.video, answer_media.kind);
         try testing.expectEqual(0, answer_media.port);
@@ -447,7 +621,7 @@ test "toSdpMediaAnswer: reject offer" {
         offer_media.port = 9;
         offer_media.rtp_codec_parameters = &.{};
 
-        var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media);
+        var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, false);
         defer answer_media.deinit(testing.allocator);
         try testing.expectEqual(.video, answer_media.kind);
         try testing.expectEqual(0, answer_media.port);

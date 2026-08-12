@@ -26,7 +26,7 @@ pub fn init(track: webrtc.MediaStreamTrack, allocator: std.mem.Allocator) !RtpRe
 
     return .{
         .track = track,
-        .queue = .init(queue_buffer),
+        .queue = Io.Queue(TrackEvent).init(queue_buffer),
         .queue_buffer = queue_buffer,
         .ssrc = 0,
     };

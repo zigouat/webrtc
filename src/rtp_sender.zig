@@ -2,6 +2,8 @@ const std = @import("std");
 const webrtc = @import("webrtc.zig");
 const rtp = @import("rtp");
 const rtcp = @import("rtcp");
+const SendBuffer = @import("utils/send_buffer.zig");
+const Demuxer = @import("pc/demuxer.zig");
 
 const Io = std.Io;
 const RtpSender = @This();
@@ -12,25 +14,41 @@ const RtpTransceiver = @import("rtp_transceiver.zig");
 const Mid = @import("mid.zig");
 
 const rtp_default_header_size = 12;
-const rtp_payload_max_size = 1200;
+const max_rtp_payload_size = 1200;
+
+pub const SendError = DtlsTransport.SendError || Io.Reader.Error || error{ NoAssociatedTrack, InvalidDirection };
 
 const RtpHeaderExtensions = struct {
     mid: u16 = 0,
 };
 
-track: ?MediaStreamTrack,
-codecs: []const webrtc.RtpCodecParameters,
-header_extensions: RtpHeaderExtensions,
-ssrc: u32,
-report: Report,
-packetizer: union(enum) {
+const Packetizer = union(enum) {
     vp8: rtp.packetizer.VP8,
     h264: rtp.packetizer.H264,
     opus: rtp.packetizer.Opus,
     none: void,
-},
 
-pub const SendError = DtlsTransport.SendError || Io.Reader.Error || error{ NoAssociatedTrack, InvalidDirection };
+    fn init(io: Io, ssrc: u32, codec: webrtc.RtpCodecParameters) @This() {
+        var rtp_config = rtp.packetizer.RtpConfig.init(io);
+        rtp_config.payload_type = @intCast(codec.payload_type);
+        rtp_config.ssrc = ssrc;
+
+        if (std.mem.eql(u8, codec.mime_type, webrtc.MimeType.VP8)) {
+            return .{ .vp8 = .init(rtp_config) };
+        } else if (std.mem.eql(u8, codec.mime_type, webrtc.MimeType.H264)) {
+            return .{ .h264 = .init(rtp_config) };
+        } else if (std.mem.eql(u8, codec.mime_type, webrtc.MimeType.Opus)) {
+            return .{ .opus = .init(rtp_config) };
+        }
+
+        return .none;
+    }
+};
+
+const RtxConfig = struct {
+    sequence_number: u16,
+    payload_type: u8,
+};
 
 const Report = struct {
     last_sequence_number: ?u16,
@@ -63,15 +81,35 @@ const Report = struct {
     }
 };
 
+track: ?MediaStreamTrack,
+codecs: []const webrtc.RtpCodecParameters,
+header_extensions: RtpHeaderExtensions,
+ssrc: u32,
+rtx_ssrc: u32,
+report: Report,
+packetizer: Packetizer,
+rtx_config: ?RtxConfig,
+send_buffer: ?SendBuffer,
+
 pub fn init(track: ?MediaStreamTrack) RtpSender {
     return .{
         .track = track,
         .codecs = &.{},
         .header_extensions = .{},
         .ssrc = 0,
+        .rtx_ssrc = 0,
         .report = .empty,
         .packetizer = .none,
+        .rtx_config = null,
+        .send_buffer = null,
     };
+}
+
+pub fn deinit(sender: *RtpSender, allocator: std.mem.Allocator) void {
+    if (sender.send_buffer) |*send_buffer| {
+        send_buffer.deinit(allocator);
+        sender.send_buffer = null;
+    }
 }
 
 pub fn replaceTrack(sender: *RtpSender, new_track: MediaStreamTrack) !void {
@@ -82,7 +120,7 @@ pub fn setStream(sender: *RtpSender, stream: webrtc.MediaStream) void {
     if (sender.track) |*track| track.stream_id = stream.id;
 }
 
-pub fn setCodecs(sender: *RtpSender, io: std.Io, codecs: []const webrtc.RtpCodecParameters) void {
+pub fn setCodecs(sender: *RtpSender, io: std.Io, allocator: std.mem.Allocator, codecs: []const webrtc.RtpCodecParameters) !void {
     if (sender.codecs.len != 0) {
         // TODO: Handle this use case better. What if the codec is changed?
         // For now do not allow changing codecs after they have been set
@@ -93,17 +131,16 @@ pub fn setCodecs(sender: *RtpSender, io: std.Io, codecs: []const webrtc.RtpCodec
     sender.packetizer = .none;
 
     if (codecs.len > 0) {
-        const codec = codecs[0];
-        var rtp_config = rtp.packetizer.RtpConfig.init(io);
-        rtp_config.payload_type = @intCast(codec.payload_type);
-        rtp_config.ssrc = sender.ssrc;
+        const chosen_codec = codecs[0];
+        sender.packetizer = .init(io, sender.ssrc, chosen_codec);
+        const rtx_codec = webrtc.RtpCodecParameters.findRtx(codecs, chosen_codec.payload_type);
 
-        if (std.mem.eql(u8, codec.mime_type, webrtc.MimeType.VP8)) {
-            sender.packetizer = .{ .vp8 = .init(rtp_config) };
-        } else if (std.mem.eql(u8, codec.mime_type, webrtc.MimeType.H264)) {
-            sender.packetizer = .{ .h264 = .init(rtp_config) };
-        } else if (std.mem.eql(u8, codec.mime_type, webrtc.MimeType.Opus)) {
-            sender.packetizer = .{ .opus = .init(rtp_config) };
+        if (rtx_codec != null and chosen_codec.rtcp_feedbacks.nack) {
+            sender.send_buffer = try .init(allocator, 1024, max_rtp_payload_size);
+            sender.rtx_config = .{
+                .payload_type = rtx_codec.?.payload_type,
+                .sequence_number = 0,
+            };
         }
     }
 }
@@ -125,7 +162,7 @@ pub fn sendSample(sender: *RtpSender, sample: *const MediaPacket) SendError!void
     defer tr.transport.ice_agent.destroyPacket(buffer);
 
     const header_size = rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[rtp_default_header_size..]);
-    buffer = buffer[0 .. header_size + rtp_payload_max_size];
+    buffer = buffer[0 .. header_size + max_rtp_payload_size];
 
     //TODO: refactor this mess
     switch (sender.packetizer) {
@@ -171,9 +208,8 @@ pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) SendError!void {
     };
 
     @memcpy(buffer[header_size .. packet.payload.len + header_size], packet.payload);
-    std.mem.writeInt(u96, buffer[0..rtp_default_header_size], @bitCast(header), .big);
-    try tr.transport.sendRtp(buffer[0 .. packet.payload.len + header_size]);
-    sender.report.recordPacket(packet, timestamp);
+    try writeHeaderAndSend(tr, header, header_size, packet.payload.len, buffer);
+    sender.recordSent(packet, timestamp);
 }
 
 pub fn writeReport(sender: *const RtpSender, timestamp: i64, buffer: []u8) []const u8 {
@@ -206,6 +242,51 @@ pub fn writeReport(sender: *const RtpSender, timestamp: i64, buffer: []u8) []con
     return buffer[0..length];
 }
 
+pub fn handleNack(sender: *RtpSender, nack: rtcp.Nack) !void {
+    const send_buffer = if (sender.send_buffer) |*sb| sb else return;
+    const rtx_config = if (sender.rtx_config) |*rc| rc else return;
+    const tr = try checkAndGetTransceiver(sender);
+
+    var it = nack.iterateSequenceNumbers();
+    while (it.next()) |seq| {
+        const packet = send_buffer.get(seq) orelse continue;
+
+        std.debug.print("Send rtx packet: {}\n", .{seq});
+
+        var buffer = try tr.transport.ice_agent.createPacket();
+        defer tr.transport.ice_agent.destroyPacket(buffer);
+
+        const header_size = rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[rtp_default_header_size..]);
+
+        const header: rtp.Packet.Header = .{
+            .extension = header_size != rtp_default_header_size,
+            .marker = packet.header.marker,
+            .padding = false,
+            .payload_type = @intCast(rtx_config.payload_type),
+            .sequence_number = rtx_config.sequence_number,
+            .ssrc = sender.rtx_ssrc,
+            .timestamp = packet.header.timestamp,
+        };
+
+        // RFC 4588: RTX payload is the original sequence number followed by the original payload.
+        std.mem.writeInt(u16, buffer[header_size..][0..2], seq, .big);
+        @memcpy(buffer[header_size + 2 ..][0..packet.payload.len], packet.payload);
+
+        try writeHeaderAndSend(tr, header, header_size, 2 + packet.payload.len, buffer);
+        rtx_config.sequence_number +%= 1;
+    }
+}
+
+pub fn generateSsrc(sender: *RtpSender, io: Io, demuxer: *Demuxer) !void {
+    sender.ssrc = try demuxer.registerRandomSsrc(io);
+    sender.rtx_ssrc = try demuxer.registerRandomSsrc(io);
+}
+
+fn recordSent(sender: *RtpSender, packet: *const rtp.Packet, timestamp: i64) void {
+    sender.report.recordPacket(packet, timestamp);
+    if (sender.send_buffer) |*send_buffer| send_buffer.add(packet);
+}
+
 fn checkAndGetTransceiver(sender: *RtpSender) !*RtpTransceiver {
     if (sender.track == null) {
         @branchHint(.cold);
@@ -231,14 +312,17 @@ fn writeHeaderExtensions(sender: *RtpSender, mid: Mid.Int, buffer: []u8) !usize 
     return w.buffered().len;
 }
 
+fn writeHeaderAndSend(tr: *RtpTransceiver, header: rtp.Packet.Header, header_size: usize, payload_len: usize, buffer: []u8) SendError!void {
+    std.mem.writeInt(u96, buffer[0..rtp_default_header_size], @bitCast(header), .big);
+    try tr.transport.sendRtp(buffer[0 .. header_size + payload_len]);
+}
+
 fn sendAndRecord(tr: *RtpTransceiver, rtp_packet: *const rtp.Packet, header_size: usize, buffer: []u8, timestamp: i64) !void {
-    const payload_len = rtp_packet.payload.len;
     var header = rtp_packet.header;
     header.extension = header_size != rtp_default_header_size;
 
-    std.mem.writeInt(u96, buffer[0..rtp_default_header_size], @bitCast(header), .big);
-    try tr.transport.sendRtp(buffer[0 .. header_size + payload_len]);
-    tr.sender.report.recordPacket(rtp_packet, timestamp);
+    try writeHeaderAndSend(tr, header, header_size, rtp_packet.payload.len, buffer);
+    tr.sender.recordSent(rtp_packet, timestamp);
 }
 
 fn microsecondsToNtp(timestamp: i64) u64 {
@@ -249,8 +333,22 @@ fn microsecondsToNtp(timestamp: i64) u64 {
 
 const testing = std.testing;
 
-test "setHeaderExtensions: picks the mid extension id, ignores others" {
+test "generateSsrc: assigns distinct ssrc and rtx_ssrc" {
+    var demuxer = Demuxer.init(testing.allocator);
+    defer demuxer.deinit();
+
     var sender: RtpSender = .init(null);
+    try sender.generateSsrc(testing.io, &demuxer);
+
+    try testing.expect(sender.ssrc != 0);
+    try testing.expect(sender.rtx_ssrc != 0);
+    try testing.expect(sender.ssrc != sender.rtx_ssrc);
+    try testing.expect(demuxer.generated_ssrc.contains(sender.ssrc));
+    try testing.expect(demuxer.generated_ssrc.contains(sender.rtx_ssrc));
+}
+
+test "setHeaderExtensions: picks the mid extension id, ignores others" {
+    var sender = RtpSender.init(null);
     sender.setHeaderExtensions(&.{
         .{ .id = 9, .uri = "some-other-uri" },
         .{ .id = 3, .uri = webrtc.mid_extension_uri },
@@ -260,21 +358,21 @@ test "setHeaderExtensions: picks the mid extension id, ignores others" {
 }
 
 test "setHeaderExtensions: no mid extension leaves it unset" {
-    var sender: RtpSender = .init(null);
+    var sender = RtpSender.init(null);
     sender.setHeaderExtensions(&.{.{ .id = 9, .uri = "some-other-uri" }});
 
     try testing.expectEqual(0, sender.header_extensions.mid);
 }
 
 test "writeHeaderExtensions: not negotiated writes nothing" {
-    var sender: RtpSender = .init(null);
+    var sender = RtpSender.init(null);
     var buffer: [64]u8 = undefined;
 
     try testing.expectEqual(0, try sender.writeHeaderExtensions(try Mid.fromInt(1), &buffer));
 }
 
 test "writeHeaderExtensions: writes a one-byte mid extension" {
-    var sender: RtpSender = .init(null);
+    var sender = RtpSender.init(null);
     sender.header_extensions.mid = 3;
 
     var buffer: [64]u8 = undefined;
