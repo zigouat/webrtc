@@ -313,9 +313,9 @@ pub fn processRemoteTrack(tr: *RtpTransceiver, direction: Direction, msid: ?Medi
 /// Get rtcp report of the transceiver.
 ///
 /// For now it only gets sender report
-pub fn getRtcpReport(tr: *const RtpTransceiver, timestamp: i64, buffer: []u8) []const u8 {
+pub fn getRtcpReport(tr: *RtpTransceiver, io: Io, timestamp: i64, buffer: []u8) []const u8 {
     return switch (tr.direction) {
-        .sendrecv, .sendonly => tr.sender.writeReport(timestamp, buffer),
+        .sendrecv, .sendonly => tr.sender.writeRtcpSenderReport(io, timestamp, buffer),
         else => &.{},
     };
 }
@@ -695,6 +695,7 @@ test "removeTrack" {
 test "getRtcpReport" {
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
     defer tr.deinit(testing.io, testing.allocator);
+
     tr.sender.codecs = webrtc.getCodecCapabilities(.video);
     var buffer: [64]u8 = @splat(0);
 
@@ -706,7 +707,7 @@ test "getRtcpReport" {
         .packet_count = 100,
     };
 
-    const data = tr.getRtcpReport(1782239530300000, &buffer);
+    const data = tr.getRtcpReport(testing.io, 1782239530300000, &buffer);
     const packet = try rtcp.Packet.decode(data);
     try testing.expectEqual(.sender_report, packet.header.payload_type);
     try testing.expectEqual(tr.sender.ssrc, packet.payload.sr.ssrc);
