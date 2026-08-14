@@ -29,7 +29,7 @@ pub const Error = SDPError || std.mem.Allocator.Error;
 fingerprint: [32]u8,
 bundle: []const u8,
 ice_lite: bool,
-medias: std.ArrayList(SDPMedia),
+medias: std.ArrayList(Media),
 
 pub const empty: SDPSession = .{
     .fingerprint = @splat(0),
@@ -38,8 +38,8 @@ pub const empty: SDPSession = .{
     .medias = .empty,
 };
 
-pub const SDPMedia = struct {
-    kind: webrtc.TrackKind,
+pub const Media = struct {
+    kind: sdp.Media.MediaType,
     port: u16,
     bundle_only: bool,
     rtp_codec_parameters: []RtpCodec,
@@ -58,8 +58,10 @@ pub const SDPMedia = struct {
     msid: ?webrtc.MediaStream,
     ssrc: ?u32,
     rtx_ssrc: ?u32,
+    sctp_port: ?u16,
+    max_message_size: ?u32,
 
-    pub const empty: SDPMedia = .{
+    pub const empty: Media = .{
         .kind = .video,
         .port = 0,
         .bundle_only = false,
@@ -79,19 +81,118 @@ pub const SDPMedia = struct {
         .msid = null,
         .ssrc = null,
         .rtx_ssrc = null,
+        .sctp_port = null,
+        .max_message_size = null,
     };
 
-    pub fn parse(allocator: std.mem.Allocator, media: sdp.Media, fingerprint: *[32]u8) !SDPMedia {
-        var sdp_media: SDPMedia = .empty;
+    pub fn getKind(media: *const Media) webrtc.TrackKind {
+        return if (media.kind == .audio) .audio else .video;
+    }
+
+    pub fn setKind(media: *Media, kind: webrtc.TrackKind) void {
+        media.kind = if (kind == .audio) .audio else .video;
+    }
+
+    pub fn parse(allocator: std.mem.Allocator, media: sdp.Media, fingerprint: *[32]u8) !Media {
+        var sdp_media: Media = .empty;
         errdefer sdp_media.deinit(allocator);
 
-        sdp_media.kind = switch (media.media_type) {
-            .audio => .audio,
-            .video => .video,
-            else => unreachable,
-        };
+        sdp_media.kind = media.media_type;
         sdp_media.port = media.port_range.port;
 
+        switch (media.media_type) {
+            .audio, .video => try sdp_media.parseRtpMedia(allocator, &media, fingerprint),
+            .application => try sdp_media.parseDataChannel(&media),
+            else => return error.UnsupportedMediaType,
+        }
+
+        return sdp_media;
+    }
+
+    pub fn deinit(m: *Media, allocator: std.mem.Allocator) void {
+        allocator.free(m.rtp_codec_parameters);
+        allocator.free(m.rtp_header_extensions);
+        allocator.free(m.candidates);
+        if (m.track_id) |track_id| allocator.free(track_id);
+    }
+
+    pub fn hasPayload(media: *const Media, pt: u8) bool {
+        for (media.rtp_codec_parameters) |*codec| if (codec.payload_type == pt) return true;
+        return false;
+    }
+
+    pub fn write(media: *const Media, w: *std.Io.Writer) !void {
+        if (media.isDataChannel()) {
+            try w.print("m=application {} UDP/DTLS/SCTP webrtc-datachannel\r\n", .{media.port});
+        } else {
+            try w.print("m={s} {} UDP/TLS/RTP/SAVPF", .{ @tagName(media.kind), media.port });
+            for (media.rtp_codec_parameters) |*codec| if (!codec.isUnknown()) {
+                try w.print(" {}", .{codec.payload_type});
+            };
+            try w.writeAll("\r\n");
+        }
+
+        try w.writeAll("c=IN IP4 0.0.0.0\r\n");
+        if (media.bundle_only) try SDPAttribute.write(.bundle_only, w);
+        for (media.rtp_codec_parameters) |*codec| if (!codec.isUnknown()) try codec.format(w);
+        for (media.rtp_header_extensions) |*ext| try ext.format(w);
+        try SDPAttribute.write(.{ .setup = media.setup }, w);
+        try SDPAttribute.write(.{ .direction = @tagName(media.direction) }, w);
+        if (media.mid != 0) {
+            const bytes = Mid.toBytes(media.mid);
+            try SDPAttribute.write(.{ .mid = std.mem.sliceTo(&bytes, 0) }, w);
+        }
+
+        if (media.port != 0) {
+            if (media.rtcp_mux) try SDPAttribute.write(.rtcp_mux, w);
+            if (media.rtcp_rsize) try SDPAttribute.write(.rtcp_rsize, w);
+
+            if (media.ice_ufrag.len != 0) try SDPAttribute.write(.{ .ice_ufrag = media.ice_ufrag }, w);
+            if (media.ice_pwd.len != 0) try SDPAttribute.write(.{ .ice_pwd = media.ice_pwd }, w);
+            for (media.candidates) |candidate| try w.print("a=candidate:{f}\r\n", .{candidate});
+            if (media.end_of_candidates) try SDPAttribute.write(.end_of_candidates, w);
+
+            if (media.msid) |msid| {
+                const msid_attr = SDPAttribute{ .msid = .{ .id = msid.id, .app_data = media.track_id } };
+                try msid_attr.write(w);
+            }
+
+            if (media.ssrc) |ssrc| {
+                const msid = if (media.msid) |m| m.id else "-";
+                const track_id = if (media.track_id) |track_id| track_id else "";
+                if (media.rtx_ssrc) |rtx_ssrc| try w.print("a=ssrc-group:FID {} {}\r\n", .{ ssrc, rtx_ssrc });
+                try w.print("a=ssrc:{} msid:{s} {s}\r\n", .{ ssrc, msid, track_id });
+                if (media.rtx_ssrc) |rtx_ssrc| try w.print("a=ssrc:{} msid:{s} {s}\r\n", .{ rtx_ssrc, msid, track_id });
+            }
+        }
+    }
+
+    pub fn setIceCredentials(media: *Media, credens: ice.Credentials) void {
+        media.ice_ufrag = credens.username;
+        media.ice_pwd = credens.password;
+    }
+
+    pub fn isRejected(media: *const Media) bool {
+        return media.port == 0 and !media.bundle_only;
+    }
+
+    pub fn clone(media: *const Media, allocator: std.mem.Allocator) !Media {
+        var new_media = media.*;
+        new_media.rtp_codec_parameters = try allocator.dupe(RtpCodec, media.rtp_codec_parameters);
+        errdefer allocator.free(new_media.rtp_codec_parameters);
+        new_media.rtp_header_extensions = try allocator.dupe(webrtc.RtpHeaderExtensionParameter, media.rtp_header_extensions);
+        errdefer allocator.free(new_media.rtp_header_extensions);
+        new_media.candidates = try allocator.dupe(ice.Candidate, media.candidates);
+        errdefer allocator.free(new_media.candidates);
+        if (media.track_id) |track_id| new_media.track_id = try allocator.dupe(u8, track_id);
+        return new_media;
+    }
+
+    pub fn isDataChannel(media: *const Media) bool {
+        return media.kind == .application;
+    }
+
+    fn parseRtpMedia(sdp_media: *Media, allocator: std.mem.Allocator, media: *const sdp.Media, fingerprint: *[32]u8) !void {
         // Parse formats
         sdp_media.rtp_codec_parameters = try allocRtpCodecsParameters(allocator, media.formats);
 
@@ -127,7 +228,7 @@ pub const SDPMedia = struct {
 
                 rtp_codec.clock_rate = rtpmap.clock_rate;
                 rtp_codec.channels = rtpmap.channels;
-                rtp_codec.mime_type = webrtc.MimeType.fromKindAndCodec(sdp_media.kind, rtpmap.encoding);
+                rtp_codec.mime_type = webrtc.MimeType.fromKindAndCodec(sdp_media.getKind(), rtpmap.encoding);
             },
             .fmtp => |fmtp| {
                 const pt, const fmtp_line = fmtp;
@@ -179,82 +280,27 @@ pub const SDPMedia = struct {
 
         sdp_media.rtp_header_extensions = try rtp_header_extensions.toOwnedSlice(allocator);
         sdp_media.candidates = try candidates.toOwnedSlice(allocator);
-        return sdp_media;
     }
 
-    pub fn deinit(m: *SDPMedia, allocator: std.mem.Allocator) void {
-        allocator.free(m.rtp_codec_parameters);
-        allocator.free(m.rtp_header_extensions);
-        allocator.free(m.candidates);
-        if (m.track_id) |track_id| allocator.free(track_id);
-    }
+    fn parseDataChannel(sdp_media: *Media, media: *const sdp.Media) !void {
+        if (!std.ascii.eqlIgnoreCase(media.formats, "webrtc-datachannel")) return error.InvalidMedia;
 
-    pub fn hasPayload(media: *const SDPMedia, pt: u8) bool {
-        for (media.rtp_codec_parameters) |*codec| if (codec.payload_type == pt) return true;
-        return false;
-    }
-
-    pub fn write(media: *const SDPMedia, w: *std.Io.Writer) !void {
-        try w.print("m={s} {} UDP/TLS/RTP/SAVPF", .{ @tagName(media.kind), media.port });
-        for (media.rtp_codec_parameters) |*codec| if (!codec.isUnknown()) {
-            try w.print(" {}", .{codec.payload_type});
+        var attr_it = media.attributeIterator();
+        while (try attr_it.next()) |attr| switch (try attr.parse()) {
+            .bundle_only => sdp_media.bundle_only = true,
+            .mid => |v| sdp_media.mid = Mid.fromBytes(v) catch return error.InvalidSDP,
+            .setup => |v| sdp_media.setup = v,
+            .direction => |v| sdp_media.direction = std.meta.stringToEnum(Direction, v) orelse .sendrecv,
+            .ice_ufrag => |v| sdp_media.ice_ufrag = v,
+            .ice_pwd => |v| sdp_media.ice_pwd = v,
+            .end_of_candidates => sdp_media.end_of_candidates = true,
+            .sctp_port => |port| sdp_media.sctp_port = port,
+            .max_message_size => |size| sdp_media.max_message_size = size,
+            else => {},
         };
-        try w.writeAll("\r\n");
 
-        try w.writeAll("c=IN IP4 0.0.0.0\r\n");
-        if (media.bundle_only) try SDPAttribute.write(.bundle_only, w);
-        for (media.rtp_codec_parameters) |*codec| if (!codec.isUnknown()) try codec.format(w);
-        for (media.rtp_header_extensions) |*ext| try ext.format(w);
-        try SDPAttribute.write(.{ .setup = media.setup }, w);
-        try SDPAttribute.write(.{ .direction = @tagName(media.direction) }, w);
-        if (media.mid != 0) {
-            const bytes = Mid.toBytes(media.mid);
-            try SDPAttribute.write(.{ .mid = std.mem.sliceTo(&bytes, 0) }, w);
-        }
-
-        if (media.port != 0) {
-            if (media.rtcp_mux) try SDPAttribute.write(.rtcp_mux, w);
-            if (media.rtcp_rsize) try SDPAttribute.write(.rtcp_rsize, w);
-
-            if (media.ice_ufrag.len != 0) try SDPAttribute.write(.{ .ice_ufrag = media.ice_ufrag }, w);
-            if (media.ice_pwd.len != 0) try SDPAttribute.write(.{ .ice_pwd = media.ice_pwd }, w);
-            for (media.candidates) |candidate| try w.print("a=candidate:{f}\r\n", .{candidate});
-            if (media.end_of_candidates) try SDPAttribute.write(.end_of_candidates, w);
-
-            if (media.msid) |msid| {
-                const msid_attr = SDPAttribute{ .msid = .{ .id = msid.id, .app_data = media.track_id } };
-                try msid_attr.write(w);
-            }
-
-            if (media.ssrc) |ssrc| {
-                const msid = if (media.msid) |m| m.id else "-";
-                const track_id = if (media.track_id) |track_id| track_id else "";
-                if (media.rtx_ssrc) |rtx_ssrc| try w.print("a=ssrc-group:FID {} {}\r\n", .{ ssrc, rtx_ssrc });
-                try w.print("a=ssrc:{} msid:{s} {s}\r\n", .{ ssrc, msid, track_id });
-                if (media.rtx_ssrc) |rtx_ssrc| try w.print("a=ssrc:{} msid:{s} {s}\r\n", .{ rtx_ssrc, msid, track_id });
-            }
-        }
-    }
-
-    pub fn setIceCredentials(media: *SDPMedia, credens: ice.Credentials) void {
-        media.ice_ufrag = credens.username;
-        media.ice_pwd = credens.password;
-    }
-
-    pub fn isRejected(media: *const SDPMedia) bool {
-        return media.port == 0 and !media.bundle_only;
-    }
-
-    pub fn clone(media: *const SDPMedia, allocator: std.mem.Allocator) !SDPMedia {
-        var new_media = media.*;
-        new_media.rtp_codec_parameters = try allocator.dupe(RtpCodec, media.rtp_codec_parameters);
-        errdefer allocator.free(new_media.rtp_codec_parameters);
-        new_media.rtp_header_extensions = try allocator.dupe(webrtc.RtpHeaderExtensionParameter, media.rtp_header_extensions);
-        errdefer allocator.free(new_media.rtp_header_extensions);
-        new_media.candidates = try allocator.dupe(ice.Candidate, media.candidates);
-        errdefer allocator.free(new_media.candidates);
-        if (media.track_id) |track_id| new_media.track_id = try allocator.dupe(u8, track_id);
-        return new_media;
+        if (sdp_media.mid == 0) return error.MidAttributeRequired;
+        if (sdp_media.sctp_port == null) return error.SctpPortRequired;
     }
 
     fn allocRtpCodecsParameters(allocator: std.mem.Allocator, formats: []const u8) ![]RtpCodec {
@@ -306,7 +352,7 @@ pub const SDPMedia = struct {
     }
 };
 
-pub inline fn getMedias(session: *const SDPSession) []SDPMedia {
+pub inline fn getMedias(session: *const SDPSession) []Media {
     return session.medias.items;
 }
 
@@ -330,7 +376,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !SDPSession {
         else => {},
     };
 
-    var medias: std.ArrayList(SDPMedia) = .empty;
+    var medias: std.ArrayList(Media) = .empty;
     errdefer {
         for (medias.items) |*m| m.deinit(allocator);
         medias.deinit(allocator);
@@ -338,7 +384,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !SDPSession {
 
     var media_it = session.mediaIterator();
     while (try media_it.next()) |media| {
-        var parsed_media = try SDPMedia.parse(allocator, media, &result.fingerprint);
+        var parsed_media = try Media.parse(allocator, media, &result.fingerprint);
         errdefer parsed_media.deinit(allocator);
         try medias.append(allocator, parsed_media);
     }
@@ -404,7 +450,7 @@ fn writeFingerprint(s: *const SDPSession, w: *std.Io.Writer) !void {
     try attr.write(w);
 }
 
-fn validateIceCredentials(medias: []SDPMedia) !void {
+fn validateIceCredentials(medias: []Media) !void {
     if (medias.len == 0) return;
     const ice_ufrag = medias[0].ice_ufrag;
     const ice_pwd = medias[0].ice_pwd;

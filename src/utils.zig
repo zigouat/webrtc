@@ -10,8 +10,8 @@ const RtpHeaderExtension = webrtc.RtpHeaderExtensionParameter;
 pub fn getCodecIntersection(allocator: std.mem.Allocator, a: []const RtpCodec, b: []const RtpCodec) ![]RtpCodec {
     var result_a: std.ArrayList(RtpCodec) = .empty;
     var result_b: std.ArrayList(RtpCodec) = .empty;
-    errdefer result_a.deinit(allocator);
-    defer result_b.deinit(allocator);
+    defer result_a.deinit(allocator);
+    errdefer result_b.deinit(allocator);
 
     for (b) |codec_b| if (!codec_b.isRtx()) {
         for (a) |codec_a| if (!codec_a.isRtx()) {
@@ -49,7 +49,7 @@ pub fn getCodecIntersection(allocator: std.mem.Allocator, a: []const RtpCodec, b
         };
     };
 
-    return try result_a.toOwnedSlice(allocator);
+    return try result_b.toOwnedSlice(allocator);
 }
 
 /// Reorders `a` and `b` in place so matched codecs (and their RTX pairs) line up by index, then
@@ -172,7 +172,7 @@ test "getCodecIntersection: keeps matching a-side codecs, in b order" {
     // Follows b's order (opus, then vp8) but carries a's payload types.
     try testing.expectEqual(2, result.len);
     try testing.expectEqual(111, result[0].payload_type);
-    try testing.expectEqual(96, result[1].payload_type);
+    try testing.expectEqual(100, result[1].payload_type);
 }
 
 test "getCodecIntersection: no common codecs returns empty" {
@@ -193,10 +193,10 @@ test "getCodecIntersection: includes the associated rtx codec" {
     defer testing.allocator.free(result);
 
     try testing.expectEqual(2, result.len);
-    try testing.expectEqual(96, result[0].payload_type);
+    try testing.expectEqual(100, result[0].payload_type);
     try testing.expect(result[1].isRtx());
-    try testing.expectEqual(97, result[1].payload_type);
-    try testing.expectEqual(96, result[1].fmtp_params.?.rtx.apt);
+    try testing.expectEqual(101, result[1].payload_type);
+    try testing.expectEqual(100, result[1].fmtp_params.?.rtx.apt);
 }
 
 test "intersectCodecs: aligns the matched codec on both sides" {

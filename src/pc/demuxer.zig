@@ -105,7 +105,7 @@ const mid_2: u24 = @bitCast([3]u8{ '2', 0, 0 });
 const mid_3: u24 = @bitCast([3]u8{ '3', 0, 0 });
 
 fn testSdpSession(alloc: std.mem.Allocator) !SDPSession {
-    var medias = try alloc.alloc(SDPSession.SDPMedia, 3);
+    var medias = try alloc.alloc(SDPSession.Media, 3);
     for (medias) |*m| m.* = .empty;
 
     var session: SDPSession = .empty;

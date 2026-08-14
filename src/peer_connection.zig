@@ -334,14 +334,16 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
     pc.dtls_transport.session.getFingerprint(&sdp_session.fingerprint);
 
     for (offer.session.getMedias()) |*media| {
-        const tr = pc.findTransceiverByMid(media.mid) orelse return error.NotExistingTransceiver;
         const new_media = sdp_session.medias.addOneAssumeCapacity();
-        new_media.* = if (media.isRejected()) blk: {
+        new_media.* = if (media.isDataChannel() or media.isRejected()) blk: {
             var cloned = try media.clone(pc.allocator);
             cloned.port = 0;
             cloned.bundle_only = false;
             break :blk cloned;
-        } else try tr.toSdpMediaAnswer(pc.allocator, media, pc.enable_rtx);
+        } else blk: {
+            const tr = pc.findTransceiverByMid(media.mid) orelse return error.NotExistingTransceiver;
+            break :blk try tr.toSdpMediaAnswer(pc.allocator, media, pc.enable_rtx);
+        };
     }
 
     try sdp_session.write(&w.writer);
@@ -541,6 +543,7 @@ fn createSubsequentOffer(pc: *PeerConnection) !webrtc.SessionDescription {
         // Check if we can recycle a media
         const media = blk: {
             for (sdp_session.getMedias(), 0..) |*media, idx| {
+                if (media.isDataChannel()) continue;
                 const remote_rejected = remote_desc != null and remote_desc.?.session.getMedias()[idx].port == 0;
                 if (media.port == 0 or remote_rejected) {
                     media.deinit(pc.allocator);
@@ -689,6 +692,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
 
     var media_exists: bool = false;
     for (sdp_session.getMedias()) |*media| {
+        if (media.isDataChannel()) continue;
         const tr = pc.findTransceiverByMid(media.mid).?;
         if (media.port == 0) continue;
 
@@ -736,10 +740,15 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
 
     // TODO: Add rtcp feedback
 
-    var first_media: ?*SDPSession.SDPMedia = null;
+    var first_media: ?*SDPSession.Media = null;
     var track_events: std.ArrayList(RtpTransceiver.TrackEventInit) = .empty;
     defer track_events.deinit(pc.allocator);
     for (remote_sdp.getMedias(), 0..) |*media, idx| {
+        if (media.isDataChannel()) {
+            if (!media.isRejected()) first_media = first_media orelse media;
+            continue;
+        }
+
         var transceiver = blk: {
             switch (session_desc.type) {
                 .answer => {
