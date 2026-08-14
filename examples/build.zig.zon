@@ -8,17 +8,16 @@
             .path = "..",
         },
         .media = .{
-            .url = "git+https://github.com/zigouat/media.git#2f159b0b0fcff25d0b193ecaa827a6b2bbbb147f",
-            .hash = "media-0.2.0-qc-dCGkfAQB6KYTjxevH6rY3DNrpzkDZxL6eQMopzViy",
+            .url = "git+https://github.com/zigouat/media.git#139eb4ab44e3fd0b435c77122211c66e1993dcce",
+            .hash = "media-0.2.0-qc-dCC4pAQASICnl_iTMuVeU7NIs-LuiAcSY0gRRyOjc",
         },
         .media_protocols = .{
-            .url = "git+https://github.com/zigouat/media-protocols.git#c1c9074ac58e008920ce30864083ca10cc479beb",
-            .hash = "media_protocols-0.1.0-WF_ij7VABgDBxgJwKI4kKGVNlPPYVFd9eVhq0ln0fJhJ",
+            .url = "git+https://github.com/zigouat/media-protocols.git#04d23a2ac5fd82d4b6cb821509bcba0e027d4b16",
+            .hash = "media_protocols-0.1.0-WF_ij7BUBgBvpz_9AIriqyKBBL94cNwC3kyFx-fKgxjk",
         },
         .media_formats = .{
-            .url = "git+https://github.com/zigouat/media-formats.git#4db9074b9745d43f665d870630f3166abb00a093",
-            .hash = "media_formats-0.1.0-7eZgYVblDwC3ThXyOhqtn3imeBpdYTPOQ3NpLfBwThDB",
-        },
+            .url = "git+https://github.com/zigouat/media-formats.git#0b144051a6b152922116c3f30aa066b55f0ad052",
+            .hash = "media_formats-0.1.0-7eZgYcTtDwClKd7wfXgR1ECHhAKAJ8iTMi8RwNoKjrBb",
     },
     .paths = .{
         "build.zig",
