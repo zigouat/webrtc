@@ -18,6 +18,7 @@
         .media_formats = .{
             .url = "git+https://github.com/zigouat/media-formats.git#0b144051a6b152922116c3f30aa066b55f0ad052",
             .hash = "media_formats-0.1.0-7eZgYcTtDwClKd7wfXgR1ECHhAKAJ8iTMi8RwNoKjrBb",
+        },
     },
     .paths = .{
         "build.zig",
