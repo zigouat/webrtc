@@ -83,7 +83,7 @@ pub fn setPeerFingerprint(transport: *DtlsTransport, fingerprint: *const [32]u8)
     transport.session.setPeerFingerprint(fingerprint);
 }
 
-pub fn applyIceAttributes(transport: *DtlsTransport, media: *SDPSession.SDPMedia) !void {
+pub fn applyIceAttributes(transport: *DtlsTransport, media: *SDPSession.Media) !void {
     Logger.debug("Apply remote credentials and candidates...", .{});
     const remote_credens = transport.ice_agent.remoteCredentials();
     if (remote_credens) |credens| {

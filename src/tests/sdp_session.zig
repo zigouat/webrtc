@@ -429,8 +429,83 @@ test "parse: no leak on allocation failure" {
     }.run, .{});
 }
 
+test "parse: data channel media" {
+    const sdp = head ++
+        \\a=group:BUNDLE 0
+        \\a=fingerprint:sha-256 A4:14:A3:5D:02:35:5B:E0:C6:E0:EF:7D:D9:63:3F:30:D4:FD:43:76:50:A8:25:4A:96:25:F1:8A:0A:DC:F4:26
+        \\m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+        \\c=IN IP4 0.0.0.0
+        \\a=setup:actpass
+        \\a=mid:0
+        \\a=ice-ufrag:YBvMzurJIEpKGlbQ
+        \\a=ice-pwd:xWVHffXavbkalUfEXPyeKkyMRnyyYggx
+        \\a=sctp-port:5000
+        \\a=max-message-size:262144
+        \\
+    ;
+
+    var session: SDPSession = try .parse(testing.allocator, sdp);
+    defer session.deinit(testing.allocator);
+
+    try testing.expectEqual(1, session.getMedias().len);
+    const media = &session.getMedias()[0];
+    try testing.expect(media.isDataChannel());
+    try testing.expectEqual(5000, media.sctp_port);
+    try testing.expectEqual(262144, media.max_message_size);
+    try testing.expectEqual(try Mid.fromInt(0), media.mid);
+}
+
+test "parse: data channel media requires webrtc-datachannel format" {
+    const sdp = head ++
+        \\a=group:BUNDLE 0
+        \\a=fingerprint:sha-256 A4:14:A3:5D:02:35:5B:E0:C6:E0:EF:7D:D9:63:3F:30:D4:FD:43:76:50:A8:25:4A:96:25:F1:8A:0A:DC:F4:26
+        \\m=application 9 UDP/DTLS/SCTP unknown-format
+        \\c=IN IP4 0.0.0.0
+        \\a=setup:actpass
+        \\a=mid:0
+        \\a=ice-ufrag:YBvMzurJIEpKGlbQ
+        \\a=ice-pwd:xWVHffXavbkalUfEXPyeKkyMRnyyYggx
+        \\a=sctp-port:5000
+        \\
+    ;
+
+    try testing.expectError(error.InvalidMedia, SDPSession.parse(testing.allocator, sdp));
+}
+
+test "parse: data channel media requires mid" {
+    const sdp = head ++
+        \\a=group:BUNDLE 0
+        \\a=fingerprint:sha-256 A4:14:A3:5D:02:35:5B:E0:C6:E0:EF:7D:D9:63:3F:30:D4:FD:43:76:50:A8:25:4A:96:25:F1:8A:0A:DC:F4:26
+        \\m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+        \\c=IN IP4 0.0.0.0
+        \\a=setup:actpass
+        \\a=ice-ufrag:YBvMzurJIEpKGlbQ
+        \\a=ice-pwd:xWVHffXavbkalUfEXPyeKkyMRnyyYggx
+        \\a=sctp-port:5000
+        \\
+    ;
+
+    try testing.expectError(error.MidAttributeRequired, SDPSession.parse(testing.allocator, sdp));
+}
+
+test "parse: data channel media requires sctp-port" {
+    const sdp = head ++
+        \\a=group:BUNDLE 0
+        \\a=fingerprint:sha-256 A4:14:A3:5D:02:35:5B:E0:C6:E0:EF:7D:D9:63:3F:30:D4:FD:43:76:50:A8:25:4A:96:25:F1:8A:0A:DC:F4:26
+        \\m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+        \\c=IN IP4 0.0.0.0
+        \\a=setup:actpass
+        \\a=mid:0
+        \\a=ice-ufrag:YBvMzurJIEpKGlbQ
+        \\a=ice-pwd:xWVHffXavbkalUfEXPyeKkyMRnyyYggx
+        \\
+    ;
+
+    try testing.expectError(error.SctpPortRequired, SDPSession.parse(testing.allocator, sdp));
+}
+
 test "write: media" {
-    var media: SDPSession.SDPMedia = .empty;
+    var media: SDPSession.Media = .empty;
     media.kind = .audio;
     media.port = 9;
     media.mid = try Mid.fromInt(0);
@@ -487,7 +562,7 @@ test "write: media" {
 }
 
 test "write: media with rtx ssrc emits ssrc-group:FID and a second ssrc line" {
-    var media: SDPSession.SDPMedia = .empty;
+    var media: SDPSession.Media = .empty;
     media.kind = .video;
     media.port = 9;
     media.mid = try Mid.fromInt(0);
@@ -517,7 +592,7 @@ test "write: media with rtx ssrc emits ssrc-group:FID and a second ssrc line" {
 }
 
 test "write: rejected media" {
-    var media: SDPSession.SDPMedia = .empty;
+    var media: SDPSession.Media = .empty;
     media.kind = .video;
     media.bundle_only = true;
     media.mid = try Mid.fromInt(1);
@@ -535,6 +610,29 @@ test "write: rejected media" {
             "a=setup:actpass\r\n" ++
             "a=sendrecv\r\n" ++
             "a=mid:1\r\n",
+        w.buffered(),
+    );
+}
+
+test "write: rejected data channel media" {
+    var media: SDPSession.Media = .empty;
+    media.kind = .application;
+    media.port = 0;
+    media.mid = try Mid.fromInt(0);
+    media.direction = .sendrecv;
+    media.setup = .actpass;
+    media.sctp_port = 5000;
+
+    var buffer: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buffer);
+    try media.write(&w);
+
+    try testing.expectEqualStrings(
+        "m=application 0 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+            "c=IN IP4 0.0.0.0\r\n" ++
+            "a=setup:actpass\r\n" ++
+            "a=sendrecv\r\n" ++
+            "a=mid:0\r\n",
         w.buffered(),
     );
 }

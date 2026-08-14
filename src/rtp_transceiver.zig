@@ -83,18 +83,18 @@ stopped: bool = false,
 added_by_add_track: bool = false,
 transport: *DtlsTransport,
 
-pub fn initFromSdpMedia(allocator: std.mem.Allocator, io: Io, sdp_media: *const SDPSession.SDPMedia, index: u8) !*RtpTransceiver {
+pub fn initFromSdpMedia(allocator: std.mem.Allocator, io: Io, sdp_media: *const SDPSession.Media, index: u8) !*RtpTransceiver {
     const tr = try allocator.create(RtpTransceiver);
     errdefer allocator.destroy(tr);
 
     const track = if (sdp_media.track_id) |track_id|
-        MediaStreamTrack.initWithId(track_id, sdp_media.kind)
+        MediaStreamTrack.initWithId(track_id, sdp_media.getKind())
     else
-        MediaStreamTrack.init(io, sdp_media.kind);
+        MediaStreamTrack.init(io, sdp_media.getKind());
 
     tr.* = .{
         .direction = .recvonly,
-        .kind = sdp_media.kind,
+        .kind = sdp_media.getKind(),
         .receiver = try RtpReceiver.init(track, allocator),
         .sender = RtpSender.init(null),
         .mid = sdp_media.mid,
@@ -114,10 +114,10 @@ pub fn deinit(tr: *RtpTransceiver, io: Io, allocator: std.mem.Allocator) void {
 /// Creates an SDP media description from the transceiver.
 ///
 /// Called when creating offers.
-pub fn toSdpMedia(tr: *RtpTransceiver, allocator: std.mem.Allocator, enable_rtx: bool) std.mem.Allocator.Error!SDPSession.SDPMedia {
-    var media: SDPSession.SDPMedia = .empty;
+pub fn toSdpMedia(tr: *RtpTransceiver, allocator: std.mem.Allocator, enable_rtx: bool) std.mem.Allocator.Error!SDPSession.Media {
+    var media: SDPSession.Media = .empty;
 
-    media.kind = tr.kind;
+    media.setKind(tr.kind);
     media.port = if (tr.stopping) 0 else 9;
     media.direction = tr.direction;
     media.rtp_codec_parameters = if (enable_rtx and tr.kind == .video)
@@ -142,10 +142,10 @@ pub fn toSdpMedia(tr: *RtpTransceiver, allocator: std.mem.Allocator, enable_rtx:
 pub fn toSdpMediaAnswer(
     tr: *const RtpTransceiver,
     allocator: std.mem.Allocator,
-    media: *const SDPSession.SDPMedia,
+    media: *const SDPSession.Media,
     enable_rtx: bool,
-) std.mem.Allocator.Error!SDPSession.SDPMedia {
-    var answer: SDPSession.SDPMedia = .empty;
+) std.mem.Allocator.Error!SDPSession.Media {
+    var answer: SDPSession.Media = .empty;
     errdefer answer.deinit(allocator);
 
     const local_capabilities = webrtc.getCodecCapabilities(tr.kind);
@@ -164,7 +164,7 @@ pub fn toSdpMediaAnswer(
 
     const rejected = codecs.len == 0 or tr.isStopped() or media.isRejected();
 
-    answer.kind = tr.kind;
+    answer.setKind(tr.kind);
     answer.port = if (rejected) 0 else 9;
     answer.rtcp_mux = true;
     answer.rtcp_rsize = false;
@@ -231,9 +231,9 @@ pub fn canAssociateTrack(tr: *const RtpTransceiver, kind: TrackKind) bool {
 }
 
 /// Check if a remote media description can be associated with this transceiver.
-pub fn canAssociateMedia(tr: *const RtpTransceiver, media: *const SDPSession.SDPMedia) bool {
+pub fn canAssociateMedia(tr: *const RtpTransceiver, media: *const SDPSession.Media) bool {
     return (media.direction == .sendrecv or media.direction == .recvonly) and
-        tr.kind == media.kind and
+        tr.kind == media.getKind() and
         tr.mid == null and
         !tr.stopping;
 }
@@ -320,7 +320,7 @@ pub fn getRtcpReport(tr: *RtpTransceiver, io: Io, timestamp: i64, buffer: []u8) 
     };
 }
 
-fn addSenderFields(tr: *const RtpTransceiver, allocator: std.mem.Allocator, media: *SDPSession.SDPMedia) !void {
+fn addSenderFields(tr: *const RtpTransceiver, allocator: std.mem.Allocator, media: *SDPSession.Media) !void {
     switch (tr.direction) {
         .sendonly, .sendrecv => {
             const track = &tr.sender.track.?;
@@ -354,7 +354,7 @@ const testing = std.testing;
 const rtcp = @import("rtcp");
 
 test "initFromSdpMedia" {
-    var sdp_media = SDPSession.SDPMedia.empty;
+    var sdp_media = SDPSession.Media.empty;
     sdp_media.mid = 1;
 
     var tr = try RtpTransceiver.initFromSdpMedia(testing.allocator, testing.io, &sdp_media, 0);
@@ -416,7 +416,7 @@ test "toSdpMediaAnswer: answer to offer" {
     tr.mid = 0x30;
     tr.transport = &transport;
 
-    var offer_media = SDPSession.SDPMedia.empty;
+    var offer_media = SDPSession.Media.empty;
     offer_media.kind = .video;
     offer_media.direction = .sendrecv;
     offer_media.port = 9;
@@ -452,7 +452,7 @@ test "toSdpMediaAnswer: includes rtx_ssrc when the negotiated codecs include rtx
     tr.transport = &transport;
     tr.sender.rtx_ssrc = 424242;
 
-    var offer_media = SDPSession.SDPMedia.empty;
+    var offer_media = SDPSession.Media.empty;
     offer_media.kind = .video;
     offer_media.direction = .sendrecv;
     offer_media.port = 9;
@@ -475,7 +475,7 @@ test "toSdpMediaAnswer: enable_rtx=false ignores an rtx-capable offer" {
     tr.transport = &transport;
     tr.sender.rtx_ssrc = 424242;
 
-    var offer_media = SDPSession.SDPMedia.empty;
+    var offer_media = SDPSession.Media.empty;
     offer_media.kind = .video;
     offer_media.direction = .sendrecv;
     offer_media.port = 9;
@@ -577,7 +577,7 @@ test "toSdpMediaAnswer: negotiates header extensions, keeping the offerer's id" 
     tr.mid = 0x30;
     tr.transport = &transport;
 
-    var offer_media = SDPSession.SDPMedia.empty;
+    var offer_media = SDPSession.Media.empty;
     offer_media.kind = .video;
     offer_media.direction = .sendrecv;
     offer_media.port = 9;
@@ -602,7 +602,7 @@ test "toSdpMediaAnswer: reject offer" {
     defer tr.deinit(testing.io, testing.allocator);
     tr.mid = 0x30;
 
-    var offer_media = SDPSession.SDPMedia.empty;
+    var offer_media = SDPSession.Media.empty;
 
     // Offer port == 0
     {
