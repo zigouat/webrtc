@@ -1044,6 +1044,7 @@ test {
     _ = @import("dtls/dtls.zig");
     _ = @import("nack/send_buffer.zig");
     _ = @import("nack/receive_log.zig");
+    _ = @import("nack/generator.zig");
 }
 
 test "nextPeerConnectionState" {
