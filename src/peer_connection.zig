@@ -1042,7 +1042,8 @@ test {
     _ = @import("tests/peer_connection.zig");
     _ = @import("pc/demuxer.zig");
     _ = @import("dtls/dtls.zig");
-    _ = @import("utils/send_buffer.zig");
+    _ = @import("nack/send_buffer.zig");
+    _ = @import("nack/receive_log.zig");
 }
 
 test "nextPeerConnectionState" {
