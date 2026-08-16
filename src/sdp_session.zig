@@ -103,8 +103,7 @@ pub const Media = struct {
         sdp_media.port = media.port_range.port;
 
         switch (media.media_type) {
-            .audio, .video => try sdp_media.parseRtpMedia(allocator, &media, fingerprint),
-            .application => try sdp_media.parseDataChannel(&media),
+            .audio, .video, .application => try sdp_media.parseMedia(allocator, &media, fingerprint),
             else => return error.UnsupportedMediaType,
         }
 
@@ -166,6 +165,9 @@ pub const Media = struct {
                 try w.print("a=ssrc:{} msid:{s} {s}\r\n", .{ ssrc, msid, track_id });
                 if (media.rtx_ssrc) |rtx_ssrc| try w.print("a=ssrc:{} msid:{s} {s}\r\n", .{ rtx_ssrc, msid, track_id });
             }
+
+            if (media.sctp_port) |sctp_port| try SDPAttribute.write(.{ .sctp_port = sctp_port }, w);
+            if (media.max_message_size) |max_message_size| try SDPAttribute.write(.{ .max_message_size = max_message_size }, w);
         }
     }
 
@@ -184,8 +186,8 @@ pub const Media = struct {
         errdefer allocator.free(new_media.rtp_codec_parameters);
         new_media.rtp_header_extensions = try allocator.dupe(webrtc.RtpHeaderExtensionParameter, media.rtp_header_extensions);
         errdefer allocator.free(new_media.rtp_header_extensions);
-        new_media.candidates = try allocator.dupe(ice.Candidate, media.candidates);
-        errdefer allocator.free(new_media.candidates);
+        // new_media.candidates = try allocator.dupe(ice.Candidate, media.candidates);
+        // errdefer allocator.free(new_media.candidates);
         if (media.track_id) |track_id| new_media.track_id = try allocator.dupe(u8, track_id);
         return new_media;
     }
@@ -194,12 +196,17 @@ pub const Media = struct {
         return media.kind == .application;
     }
 
-    fn parseRtpMedia(sdp_media: *Media, allocator: std.mem.Allocator, media: *const sdp.Media, fingerprint: *[32]u8) !void {
-        // Parse formats
-        sdp_media.rtp_codec_parameters = allocRtpCodecsParameters(allocator, media.formats) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.InvalidMedia,
-        };
+    fn parseMedia(sdp_media: *Media, allocator: std.mem.Allocator, media: *const sdp.Media, fingerprint: *[32]u8) !void {
+        const is_data_channel = sdp_media.isDataChannel();
+
+        if (is_data_channel) {
+            if (!std.ascii.eqlIgnoreCase(media.formats, "webrtc-datachannel")) return error.InvalidMedia;
+        } else {
+            sdp_media.rtp_codec_parameters = allocRtpCodecsParameters(allocator, media.formats) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidMedia,
+            };
+        }
 
         var rtp_header_extensions: std.ArrayList(webrtc.RtpHeaderExtensionParameter) = .empty;
         errdefer rtp_header_extensions.deinit(allocator);
@@ -223,9 +230,24 @@ pub const Media = struct {
                 try candidates.append(allocator, candidate);
             },
             .end_of_candidates => sdp_media.end_of_candidates = true,
-            .rtcp_mux => sdp_media.rtcp_mux = true,
-            .rtcp_rsize => sdp_media.rtcp_rsize = true,
+            .sctp_port => |port| {
+                if (!is_data_channel) return error.InvalidAttribute;
+                sdp_media.sctp_port = port;
+            },
+            .max_message_size => |size| {
+                if (!is_data_channel) return error.InvalidAttribute;
+                sdp_media.max_message_size = size;
+            },
+            .rtcp_mux => {
+                if (is_data_channel) return error.InvalidAttribute;
+                sdp_media.rtcp_mux = true;
+            },
+            .rtcp_rsize => {
+                if (is_data_channel) return error.InvalidAttribute;
+                sdp_media.rtcp_rsize = true;
+            },
             .rtpmap => |rtpmap| {
+                if (is_data_channel) return error.InvalidAttribute;
                 const codec_params = findRtpCodecParameters(
                     sdp_media.rtp_codec_parameters,
                     rtpmap.payload_type,
@@ -236,6 +258,7 @@ pub const Media = struct {
                 codec_params.rtp_codec.mime_type = webrtc.MimeType.fromKindAndCodec(sdp_media.getKind(), rtpmap.encoding);
             },
             .fmtp => |fmtp| {
+                if (is_data_channel) return error.InvalidAttribute;
                 const pt, const fmtp_line = fmtp;
                 const codec_params = findRtpCodecParameters(
                     sdp_media.rtp_codec_parameters,
@@ -247,27 +270,36 @@ pub const Media = struct {
                 .sha_256 => |f| @memcpy(fingerprint, &f),
                 else => {},
             },
-            .extmap => |extmap| try rtp_header_extensions.append(allocator, .{
-                .id = @intCast(extmap.id),
-                .uri = extmap.uri,
-            }),
+            .extmap => |extmap| {
+                if (is_data_channel) return error.InvalidAttribute;
+                try rtp_header_extensions.append(allocator, .{
+                    .id = @intCast(extmap.id),
+                    .uri = extmap.uri,
+                });
+            },
             .msid => |msid| {
+                if (is_data_channel) return error.InvalidAttribute;
                 if (sdp_media.msid == null) sdp_media.msid = .{ .id = msid.id };
                 if (sdp_media.track_id == null) if (msid.app_data) |track_id| {
                     if (track_id.len > max_track_id_length) return error.InvalidSDP;
                     sdp_media.track_id = try allocator.dupe(u8, track_id);
                 };
             },
-            .ssrc => |ssrc| if (sdp_media.ssrc == null) {
-                sdp_media.ssrc = ssrc.id;
+            .ssrc => |ssrc| {
+                if (is_data_channel) return error.InvalidAttribute;
+                if (sdp_media.ssrc == null) sdp_media.ssrc = ssrc.id;
             },
-            .ssrc_group => |group| if (group.semantics == .FID) {
-                var ssrc_it = std.mem.tokenizeScalar(u8, group.mids, ' ');
-                _ = ssrc_it.next() orelse return error.InvalidSDP;
-                const rtx_ssrc = ssrc_it.next() orelse return error.InvalidSDP;
-                sdp_media.rtx_ssrc = std.fmt.parseInt(u32, rtx_ssrc, 10) catch return error.InvalidSDP;
+            .ssrc_group => |group| {
+                if (is_data_channel) return error.InvalidAttribute;
+                if (group.semantics == .FID) {
+                    var ssrc_it = std.mem.tokenizeScalar(u8, group.mids, ' ');
+                    _ = ssrc_it.next() orelse return error.InvalidSDP;
+                    const rtx_ssrc = ssrc_it.next() orelse return error.InvalidSDP;
+                    sdp_media.rtx_ssrc = std.fmt.parseInt(u32, rtx_ssrc, 10) catch return error.InvalidSDP;
+                }
             },
             .rtcp_fb => |fb| {
+                if (is_data_channel) return error.InvalidAttribute;
                 const codecs = sdp_media.rtp_codec_parameters;
                 switch (fb.payload_type) {
                     .all => for (codecs) |*codec| codec.rtp_codec.rtcp_feedbacks.fromSdpRtcpFb(fb),
@@ -279,34 +311,17 @@ pub const Media = struct {
             else => {},
         };
 
-        if (sdp_media.port != 0 and !sdp_media.rtcp_mux) return error.RtcpMuxRequired;
         if (sdp_media.mid == 0) return error.MidAttributeRequired;
 
-        try validateRtpCodecParameters(sdp_media.rtp_codec_parameters);
+        if (is_data_channel) {
+            if (sdp_media.sctp_port == null) return error.SctpPortRequired;
+        } else {
+            if (sdp_media.port != 0 and !sdp_media.rtcp_mux) return error.RtcpMuxRequired;
+            try validateRtpCodecParameters(sdp_media.rtp_codec_parameters);
+        }
 
         sdp_media.rtp_header_extensions = try rtp_header_extensions.toOwnedSlice(allocator);
         sdp_media.candidates = try candidates.toOwnedSlice(allocator);
-    }
-
-    fn parseDataChannel(sdp_media: *Media, media: *const sdp.Media) !void {
-        if (!std.ascii.eqlIgnoreCase(media.formats, "webrtc-datachannel")) return error.InvalidMedia;
-
-        var attr_it = media.attributeIterator();
-        while (try attr_it.next()) |attr| switch (try attr.parse()) {
-            .bundle_only => sdp_media.bundle_only = true,
-            .mid => |v| sdp_media.mid = Mid.fromBytes(v) catch return error.InvalidSDP,
-            .setup => |v| sdp_media.setup = v,
-            .direction => |v| sdp_media.direction = std.meta.stringToEnum(Direction, v) orelse .sendrecv,
-            .ice_ufrag => |v| sdp_media.ice_ufrag = v,
-            .ice_pwd => |v| sdp_media.ice_pwd = v,
-            .end_of_candidates => sdp_media.end_of_candidates = true,
-            .sctp_port => |port| sdp_media.sctp_port = port,
-            .max_message_size => |size| sdp_media.max_message_size = size,
-            else => {},
-        };
-
-        if (sdp_media.mid == 0) return error.MidAttributeRequired;
-        if (sdp_media.sctp_port == null) return error.SctpPortRequired;
     }
 
     fn allocRtpCodecsParameters(allocator: std.mem.Allocator, formats: []const u8) ![]RtpCodecParameters {

@@ -7,6 +7,7 @@ pub fn build(b: *std.Build) void {
     const media = b.dependency("media", .{ .target = target, .optimize = optimize });
     const media_protocols = b.dependency("media_protocols", .{ .target = target, .optimize = optimize });
     const mbedtls = b.dependency("mbedtls", .{ .target = target, .optimize = .ReleaseFast });
+    const usrsctp = b.dependency("usrsctp", .{ .target = target, .optimize = .ReleaseFast });
 
     const config_header = mbedtls_config(b);
 
@@ -25,10 +26,12 @@ pub fn build(b: *std.Build) void {
             .{ .name = "rtp", .module = media_protocols.module("rtp") },
             .{ .name = "rtcp", .module = media_protocols.module("rtcp") },
             .{ .name = "srtp", .module = media_protocols.module("srtp") },
+            .{ .name = "sctp", .module = usrsctp.module("sctp") },
         },
     });
 
     mod.linkLibrary(mbedtls_artifact);
+    mod.linkLibrary(usrsctp.artifact("sctp"));
     mod.addIncludePath(config_header.getOutputDir());
 
     if (target.result.os.tag == .windows) {

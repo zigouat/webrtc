@@ -4,6 +4,7 @@ pub const PeerConnectionHandler = @import("pc/handler.zig");
 pub const RtpTransceiver = @import("rtp_transceiver.zig");
 pub const RtpSender = @import("rtp_sender.zig");
 pub const RtpReceiver = @import("rtp_receiver.zig");
+pub const SctpTransport = @import("sctp_transport.zig");
 pub const SDPSession = @import("sdp_session.zig");
 
 const std = @import("std");
@@ -344,6 +345,31 @@ pub fn getHeaderExtensionCapabilities(kind: TrackKind) []const RtpHeaderExtensio
         .audio => &default_audio_extensions,
         .video => &default_video_extensions,
     };
+}
+
+const c = @import("sctp");
+
+pub fn initSctpRuntime() void {
+    c.usrsctp_init(0, sendSctpData, null);
+}
+
+pub fn deinitSctpRuntime() void {
+    _ = c.usrsctp_finish();
+}
+
+fn sendSctpData(addr: ?*anyopaque, buffer: ?*anyopaque, len: usize, _: u8, _: u8) callconv(.c) c_int {
+    const sctp_transport: *SctpTransport = @ptrCast(@alignCast(addr.?));
+
+    if (buffer) |b| {
+        const buf: [*]const u8 = @ptrCast(@alignCast(b));
+        const data = buf[0..len];
+        sctp_transport.sendData(data) catch |err| {
+            std.log.err("Failed to send data: {}", .{err});
+            return c.EIO;
+        };
+    }
+
+    return 0;
 }
 
 test {

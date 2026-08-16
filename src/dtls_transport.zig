@@ -45,6 +45,7 @@ pub const Event = union(enum) {
 pub const DataEvent = union(enum) {
     rtp: []const u8,
     rtcp: []const u8,
+    app_data: []const u8,
 };
 
 pub const Config = struct {
@@ -145,6 +146,12 @@ pub fn sendRtcp(transport: *DtlsTransport, data: []const u8) SendError!void {
     try transport.ice_agent.sendData(encrypted);
 }
 
+pub fn sendData(transport: *DtlsTransport, data: []const u8) !void {
+    const buffer = try transport.ice_agent.createPacket();
+    defer transport.ice_agent.destroyPacket(buffer);
+    try transport.session.writeData(data);
+}
+
 pub fn close(transport: *DtlsTransport) void {
     transport.session.close();
     transport.ice_agent.close();
@@ -196,14 +203,54 @@ fn onIceEvent(_: ?*anyopaque, ice_agent: *ice.Agent, event: ice.Agent.Event) std
         .gathering_state => |state| transport.on_event(transport, .{ .ice_gathering_state = state }),
         .connection_state => |state| {
             if (state == .connected) {
-                try transport.mutex.lock(transport.getIo());
-                defer transport.mutex.unlock(transport.getIo());
-                transport.session.handleData(null) catch |err| switch (err) {
-                    error.WantData => {},
-                    else => |e| Logger.err("Error occurred while handling dtls message: {}", .{e}),
-                };
+                transport.on_event(transport, .{ .ice_connection_state = state });
+                return .{ .ice_connection_state = state };
             }
-            transport.on_event(transport, .{ .ice_connection_state = state });
+        },
+        .gathering_state => |gathering_state| return .{ .ice_gathering_state = gathering_state },
+        .data => |ice_data| {
+            defer transport.ice_agent.destroyPacket(ice_data);
+            switch (getPacketType(ice_data)) {
+                .dtls => {
+                    const current_state = transport.session.connection_state;
+                    const data = transport.handleDtlsData(ice_data) catch |err| switch (err) {
+                        error.WantData => continue,
+                        else => |e| {
+                            Logger.err("Error occurred while handling dtls message: {}", .{e});
+                            return .{ .dtls_connection_state = transport.session.connection_state };
+                        },
+                    };
+
+                    return if (data) |d| .{ .app_data = d } else blk: {
+                        if (current_state != transport.session.connection_state) {
+                            break :blk .{ .dtls_connection_state = transport.session.connection_state };
+                        } else {
+                            continue;
+                        }
+                    };
+                },
+                .rtp => {
+                    switch (transport.session.connection_state) {
+                        .connected => return .{
+                            .rtp = try transport.in_srtp_session.?.decryptRtp(
+                                ice_data,
+                                try transport.ice_agent.createPacket(),
+                            ),
+                        },
+                        else => continue,
+                    }
+                },
+                .rtcp => switch (transport.session.connection_state) {
+                    .connected => return .{
+                        .rtcp = try transport.in_srtp_session.?.decryptRtcp(
+                            ice_data,
+                            try transport.ice_agent.createPacket(),
+                        ),
+                    },
+                    else => continue,
+                },
+                .unknown => Logger.debug("Received unknown packet", .{}),
+            }
         },
         .candidate => |candidate| transport.on_event(transport, .{ .ice_candidate = candidate }),
         else => {},
@@ -254,17 +301,20 @@ fn handleFinTimeout(transport: *DtlsTransport, time_ms: u32) !void {
     try transport.mutex.lock(io);
     defer transport.mutex.unlock(io);
     transport.timer.final_timer_expired = true;
-    transport.session.handleData(null) catch |err| switch (err) {
+    _ = transport.session.handleData(null, &.{}) catch |err| switch (err) {
         error.WantData => {},
         else => |e| Logger.err("Error occurred while handling dtls message: {}", .{e}),
     };
 }
 
-fn handleDtlsData(transport: *DtlsTransport, data: []const u8) !void {
+fn handleDtlsData(transport: *DtlsTransport, data: []const u8) !?[]const u8 {
     try transport.mutex.lock(transport.getIo());
     defer transport.mutex.unlock(transport.getIo());
 
-    try transport.session.handleData(data);
+    const out_data = try transport.ice_agent.createPacket();
+    errdefer transport.ice_agent.destroyPacket(out_data);
+
+    const result = try transport.session.handleData(data, out_data);
     errdefer transport.session.connection_state = .failed;
 
     // TODO: don't set connection state of dtls until we create the whole srtp session.
@@ -284,6 +334,11 @@ fn handleDtlsData(transport: *DtlsTransport, data: []const u8) !void {
         }
         transport.out_srtp_session = try srtp.Session.init(transport.getIo(), transport.allocator, &srtp_profile.local_keying_material, profile);
     }
+
+    return if (result) |buffer| buffer else blk: {
+        transport.ice_agent.destroyPacket(out_data);
+        break :blk null;
+    };
 }
 
 fn getPacketType(data: []const u8) PacketType {
