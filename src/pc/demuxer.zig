@@ -6,6 +6,8 @@ const webrtc = @import("../webrtc.zig");
 
 const Demuxer = @This();
 
+const max_entries = 1000;
+
 generated_ssrc: std.AutoHashMap(u32, void),
 ssrc_to_mid: std.AutoHashMap(u32, Mid.Int),
 pt_to_mid: std.AutoHashMap(u8, Mid.Int),
@@ -31,15 +33,8 @@ pub fn updateMaps(demuxer: *Demuxer, io: std.Io, sdp_session: *const SDPSession)
     defer demuxer.mutex.unlock(io);
 
     for (sdp_session.getMedias()) |*media| {
-        if (media.ssrc) |ssrc| {
-            try demuxer.ssrc_to_mid.put(ssrc, media.mid);
-            try demuxer.generated_ssrc.put(ssrc, {});
-        }
-
-        if (media.rtx_ssrc) |ssrc| {
-            try demuxer.ssrc_to_mid.put(ssrc, media.mid);
-            try demuxer.generated_ssrc.put(ssrc, {});
-        }
+        if (media.ssrc) |ssrc| try demuxer.addEntry(ssrc, media.mid);
+        if (media.rtx_ssrc) |ssrc| try demuxer.addEntry(ssrc, media.mid);
 
         if (demuxer.mid_id == null) for (media.rtp_header_extensions) |ext| if (std.mem.eql(u8, ext.uri, webrtc.mid_extension_uri)) {
             demuxer.mid_id = ext.id;
@@ -66,7 +61,7 @@ pub fn getMid(demuxer: *Demuxer, io: std.Io, packet: *const rtp.Packet) !?Mid.In
     if (demuxer.mid_id != null) if (getMidFromPacket(packet, demuxer.mid_id.?) catch return null) |mid| {
         if (mid.len <= 3) {
             const packed_mid = Mid.fromBytes(mid) catch unreachable;
-            try demuxer.ssrc_to_mid.put(packet.header.ssrc, packed_mid);
+            try demuxer.addEntry(packet.header.ssrc, packed_mid);
             return packed_mid;
         }
     };
@@ -94,6 +89,12 @@ fn getMidFromPacket(packet: *const rtp.Packet, mid_id: u16) !?[]const u8 {
     }
 
     return null;
+}
+
+fn addEntry(demuxer: *Demuxer, ssrc: u32, mid: Mid.Int) !void {
+    if (demuxer.ssrc_to_mid.count() >= max_entries) return error.TooManyEntries;
+    try demuxer.ssrc_to_mid.put(ssrc, mid);
+    try demuxer.generated_ssrc.put(ssrc, {});
 }
 
 const RtpCodecParameters = @import("../webrtc.zig").RtpCodecParameters;
@@ -142,7 +143,22 @@ fn testSdpSession(alloc: std.mem.Allocator) !SDPSession {
     return session;
 }
 
-test "update maps" {
+fn testPacket(ssrc: u32) rtp.Packet {
+    return .{
+        .header = .{
+            .payload_type = 99,
+            .ssrc = ssrc,
+            .sequence_number = 0,
+            .timestamp = 0,
+            .marker = true,
+            .extension = false,
+            .padding = false,
+        },
+        .payload = &.{},
+    };
+}
+
+test "Demuxer.updateMaps" {
     var demuxer = init(std.testing.allocator);
     defer demuxer.deinit();
 
@@ -180,7 +196,7 @@ test "update maps" {
     try std.testing.expectEqual(mid_3, entry.?);
 }
 
-test "getMid" {
+test "Demuxer.getMid" {
     const io = std.testing.io;
 
     var demuxer = init(std.testing.allocator);
@@ -191,18 +207,7 @@ test "getMid" {
 
     try demuxer.updateMaps(io, &session);
 
-    var packet: rtp.Packet = .{
-        .header = .{
-            .payload_type = 99,
-            .ssrc = 0,
-            .sequence_number = 0,
-            .timestamp = 0,
-            .marker = true,
-            .extension = false,
-            .padding = false,
-        },
-        .payload = &.{},
-    };
+    var packet = testPacket(0);
     const mid = try demuxer.getMid(io, &packet);
     try std.testing.expect(mid != null);
 
@@ -214,7 +219,7 @@ test "getMid" {
     try std.testing.expect(try demuxer.getMid(io, &packet) != null);
 }
 
-test "registerRandomSsrc: returns unique ssrcs and tracks them" {
+test "Demuxer.registerRandomSsrc: returns unique ssrcs and tracks them" {
     const io = std.testing.io;
 
     var demuxer = init(std.testing.allocator);
@@ -229,7 +234,7 @@ test "registerRandomSsrc: returns unique ssrcs and tracks them" {
     try std.testing.expectEqual(2, demuxer.generated_ssrc.count());
 }
 
-test "getMid: falls back to the mid header extension when ssrc is unknown" {
+test "Demuxer.getMid: falls back to the mid header extension when ssrc is unknown" {
     const io = std.testing.io;
 
     var demuxer = init(std.testing.allocator);
@@ -264,4 +269,22 @@ test "getMid: falls back to the mid header extension when ssrc is unknown" {
     try std.testing.expectEqual(mid_1, (try demuxer.getMid(io, &packet)).?);
     try std.testing.expect(demuxer.ssrc_to_mid.contains(packet.header.ssrc));
     try std.testing.expectEqual(mid_1, (try demuxer.getMid(io, &packet)).?);
+}
+
+test "Demuxer.getMid: returs error when count entries exceeds max_entries" {
+    var demuxer = init(std.testing.allocator);
+    demuxer.mid_id = mid_ext_id;
+    defer demuxer.deinit();
+
+    var packet = testPacket(0xBEBEBEBE);
+    packet.extension = .{ .profile = .one_byte, .data = &.{ 0x40, '1', 0, 0 } };
+
+    for (0..max_entries) |_| {
+        const mid = try demuxer.getMid(std.testing.io, &packet);
+        try std.testing.expect(mid != null);
+        try std.testing.expectEqual(mid_1, mid.?);
+        packet.header.ssrc += 1;
+    }
+
+    try std.testing.expectError(error.TooManyEntries, demuxer.getMid(std.testing.io, &packet));
 }
