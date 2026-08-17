@@ -699,7 +699,8 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
         media_exists = true;
 
         try tr.sender.setCodecs(pc.dtls_transport.getIo(), pc.allocator, media.rtp_codec_parameters);
-        tr.receiver.codecs = media.rtp_codec_parameters;
+        tr.receiver.setCodecs(media.rtp_codec_parameters);
+
         tr.sender.setHeaderExtensions(media.rtp_header_extensions);
         tr.receiver.header_extensions = media.rtp_header_extensions;
         // TODO: track removal
@@ -737,8 +738,6 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
         const local_session = pc.pending_local_description.?.session;
         if (remote_sdp.getMedias().len != local_session.getMedias().len) return error.InvalidAnswer;
     }
-
-    // TODO: Add rtcp feedback
 
     var first_media: ?*SDPSession.Media = null;
     var track_events: std.ArrayList(RtpTransceiver.TrackEventInit) = .empty;
@@ -802,7 +801,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
             const codecs = try utils.intersectCodecs(remote_codecs, local_codecs);
 
             try transceiver.sender.setCodecs(io, pc.allocator, codecs.@"0");
-            transceiver.receiver.codecs = codecs.@"1";
+            transceiver.receiver.setCodecs(codecs.@"1");
 
             const local_extensions = local_sdp.getMedias()[idx].rtp_header_extensions;
             const remote_extensions = media.rtp_header_extensions;
@@ -939,11 +938,18 @@ fn handleRtcpData(pc: *PeerConnection, data: []const u8) !void {
 fn handleRtpData(pc: *PeerConnection, data: []const u8) !void {
     errdefer pc.dtls_transport.ice_agent.destroyPacket(data);
     const packet = try rtp.Packet.parse(data);
-    if (try pc.demuxer.getMid(pc.dtls_transport.getIo(), &packet)) |mid| {
-        if (pc.findTransceiverByMid(mid)) |tr| {
-            try tr.receiver.handleRtpPacket(pc.dtls_transport.getIo(), packet);
-        } else pc.dtls_transport.ice_agent.destroyPacket(data);
-    } else pc.dtls_transport.ice_agent.destroyPacket(data);
+
+    const mid = try pc.demuxer.getMid(pc.dtls_transport.getIo(), &packet) orelse {
+        pc.dtls_transport.ice_agent.destroyPacket(data);
+        return;
+    };
+
+    const tr = pc.findTransceiverByMid(mid) orelse {
+        pc.dtls_transport.ice_agent.destroyPacket(data);
+        return;
+    };
+
+    try tr.receiver.handleRtpPacket(pc.dtls_transport.getIo(), packet);
 }
 
 fn findSenderBySsrc(pc: *PeerConnection, ssrc: u32) ?*RtpSender {

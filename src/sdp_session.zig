@@ -312,7 +312,7 @@ pub const Media = struct {
         var rtp_codec_parameters = try allocator.alloc(RtpCodec, count);
         var idx: usize = 0;
         while (fmt_iterator.next()) |payload_type| {
-            const pt = try std.fmt.parseInt(u8, payload_type, 10);
+            const pt = try std.fmt.parseInt(u7, payload_type, 10);
             rtp_codec_parameters[idx] = .{ .payload_type = pt, .clock_rate = 0, .mime_type = &.{} };
             idx += 1;
         }
