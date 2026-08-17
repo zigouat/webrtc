@@ -95,7 +95,7 @@ pub fn initFromSdpMedia(allocator: std.mem.Allocator, io: Io, sdp_media: *const 
     tr.* = .{
         .direction = .recvonly,
         .kind = sdp_media.getKind(),
-        .receiver = try RtpReceiver.init(track, allocator),
+        .receiver = try RtpReceiver.init(allocator, track),
         .sender = RtpSender.init(null),
         .mid = sdp_media.mid,
         .sdp_mline_index = index,
@@ -341,7 +341,7 @@ fn newTestRtpTransceiver(io: Io, allocator: std.mem.Allocator) !*RtpTransceiver 
 
     tr.* = .{
         .sender = RtpSender.init(.init(io, .video)),
-        .receiver = try RtpReceiver.init(.init(io, .video), allocator),
+        .receiver = try RtpReceiver.init(allocator, .init(io, .video)),
         .direction = .sendrecv,
         .kind = .video,
         .transport = undefined,

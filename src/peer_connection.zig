@@ -206,10 +206,6 @@ pub fn deinit(pc: *PeerConnection) void {
     pc.demuxer.deinit();
 }
 
-fn deinitDescriptions(pc: *PeerConnection, descriptions: []const *?ParsedSessionDescription) void {
-    for (descriptions) |desc| if (desc.*) |*d| d.deinit(pc.allocator);
-}
-
 /// Adds a new track to the PeerConnection and optionally associates it with a stream.
 pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: ?[]const u8) Error!*RtpSender {
     try pc.checkNotClosed();
@@ -278,7 +274,7 @@ pub fn addTransceiverFromKind(
         .kind = kind,
         .direction = init_config.direction,
         .sender = .init(null),
-        .receiver = try .init(.init(io, kind), pc.allocator),
+        .receiver = try .init(pc.allocator, .init(io, kind)),
         .transport = &pc.dtls_transport,
     };
     errdefer tr.receiver.deinit(io, pc.allocator);
@@ -450,6 +446,10 @@ pub fn close(pc: *PeerConnection) void {
     pc.dtls_transport.close();
 }
 
+fn deinitDescriptions(pc: *PeerConnection, descriptions: []const *?ParsedSessionDescription) void {
+    for (descriptions) |desc| if (desc.*) |*d| d.deinit(pc.allocator);
+}
+
 fn checkNotClosed(pc: *const PeerConnection) !void {
     if (pc.connection_state == .closed) return error.InvalidState;
 }
@@ -467,7 +467,7 @@ fn initTransceiverFromTrack(
         .kind = track.kind,
         .direction = .sendrecv,
         .sender = .init(track),
-        .receiver = try .init(track, pc.allocator),
+        .receiver = try webrtc.RtpReceiver.init(pc.allocator, track),
         .added_by_add_track = added_by_add_track,
         .transport = &pc.dtls_transport,
     };
@@ -921,12 +921,8 @@ fn pollTransport(pc: *PeerConnection) !void {
         .rtcp => |data| pc.handleRtcpData(data) catch |err| {
             Logger.warn("Failed to handle RTCP data: {}", .{err});
         },
-        .rtp => |data| {
-            errdefer pc.dtls_transport.ice_agent.destroyPacket(data);
-            const packet = try rtp.Packet.parse(data);
-            if (try pc.demuxer.getMid(io, &packet)) |mid| if (pc.findTransceiverByMid(mid)) |tr| {
-                try tr.receiver.handleRtpPacket(io, packet);
-            };
+        .rtp => |data| pc.handleRtpData(data) catch |err| {
+            Logger.warn("Failed to handle RTP data: {}", .{err});
         },
     } else |err| return err;
 }
@@ -938,6 +934,16 @@ fn handleRtcpData(pc: *PeerConnection, data: []const u8) !void {
         .nack => |nack| if (pc.findSenderBySsrc(nack.media_ssrc)) |sender| try sender.handleNack(nack),
         else => {},
     };
+}
+
+fn handleRtpData(pc: *PeerConnection, data: []const u8) !void {
+    errdefer pc.dtls_transport.ice_agent.destroyPacket(data);
+    const packet = try rtp.Packet.parse(data);
+    if (try pc.demuxer.getMid(pc.dtls_transport.getIo(), &packet)) |mid| {
+        if (pc.findTransceiverByMid(mid)) |tr| {
+            try tr.receiver.handleRtpPacket(pc.dtls_transport.getIo(), packet);
+        } else pc.dtls_transport.ice_agent.destroyPacket(data);
+    } else pc.dtls_transport.ice_agent.destroyPacket(data);
 }
 
 fn findSenderBySsrc(pc: *PeerConnection, ssrc: u32) ?*RtpSender {

@@ -21,7 +21,7 @@ ssrc: u32,
 queue: Io.Queue(TrackEvent),
 queue_buffer: []TrackEvent,
 
-pub fn init(track: webrtc.MediaStreamTrack, allocator: std.mem.Allocator) !RtpReceiver {
+pub fn init(allocator: std.mem.Allocator, track: webrtc.MediaStreamTrack) !RtpReceiver {
     const queue_buffer = try allocator.alloc(TrackEvent, queue_size);
 
     return .{
@@ -76,12 +76,12 @@ pub fn sendPli(receiver: *RtpReceiver) DtlsTransport.SendError!void {
 const testing = std.testing;
 
 test "init" {
-    var receiver = try RtpReceiver.init(.init(testing.io, .video), testing.allocator);
+    var receiver = try RtpReceiver.init(testing.allocator, .init(testing.io, .video));
     defer receiver.deinit(testing.io, testing.allocator);
 }
 
 test "poll" {
-    var receiver = try RtpReceiver.init(.init(testing.io, .video), testing.allocator);
+    var receiver = try RtpReceiver.init(testing.allocator, .init(testing.io, .video));
     defer receiver.deinit(testing.io, testing.allocator);
 
     const packet: rtp.Packet = .{
