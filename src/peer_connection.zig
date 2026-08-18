@@ -1030,25 +1030,26 @@ fn startRtpRtcpInterceptors(pc: *PeerConnection, renegotiation: bool) !void {
     }
 
     // Nack generators
+    var nack = false;
+    try pc.mutex.lock(io);
+    defer pc.mutex.unlock(io);
 
-    const nack = blk: {
-        try pc.mutex.lock(io);
-        defer pc.mutex.unlock(io);
-        for (pc.getTransceivers()) |tr| {
-            if (tr.receiver.nack) break :blk true;
-        } else break :blk false;
-    };
-    if (nack) {
-        if (pc.nack_generator == null) {
-            pc.nack_generator = .init(pc.allocator, 512);
-            try pc.nack_generator.?.start(&pc.dtls_transport);
-        }
-    } else {
-        if (pc.nack_generator) |*nack_generator| {
-            nack_generator.deinit(io);
-            pc.nack_generator = null;
+    for (pc.getTransceivers()) |tr| {
+        if (tr.receiver.nack) {
+            nack = true;
+            if (pc.nack_generator == null) {
+                pc.nack_generator = .init(pc.allocator, 512);
+                try pc.nack_generator.?.start(&pc.dtls_transport);
+            }
+        } else {
+            if (pc.nack_generator) |*ng| if (tr.receiver.ssrc) |ssrc| ng.deleteSource(io, ssrc);
         }
     }
+
+    if (!nack) if (pc.nack_generator) |*nack_generator| {
+        nack_generator.deinit(io);
+        pc.nack_generator = null;
+    };
 }
 
 fn doSendReports(pc: *PeerConnection) !void {
