@@ -22,7 +22,8 @@ pub const MissingSequenceNumberIterator = struct {
     }
 
     pub fn next(self: *MissingSequenceNumberIterator) ?u16 {
-        while (self.start != self.end) : (self.start +%= 1) {
+        const end = self.end +% 1;
+        while (self.start != end) : (self.start +%= 1) {
             if (!self.log.isReceived(self.start)) {
                 const result = self.start;
                 self.start +%= 1;
@@ -110,7 +111,7 @@ fn isReceived(self: *const ReceiveLog, seq: u16) bool {
 
 fn fixLastConsecutive(self: *ReceiveLog) void {
     var i = self.last_consecutive +% 1;
-    while (i != self.end) : (i +%= 1) {
+    while (i != self.end +% 1) : (i +%= 1) {
         if (!self.isReceived(i)) break;
         self.last_consecutive = i;
     }

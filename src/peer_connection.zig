@@ -948,7 +948,7 @@ fn handleRtpData(pc: *PeerConnection, data: []const u8) !void {
     const io = pc.dtls_transport.getIo();
 
     errdefer pc.dtls_transport.ice_agent.destroyPacket(data);
-    const packet = try rtp.Packet.parse(data);
+    var packet = try rtp.Packet.parse(data);
 
     const mid = try pc.demuxer.getMid(io, &packet) orelse {
         pc.dtls_transport.ice_agent.destroyPacket(data);
@@ -960,10 +960,10 @@ fn handleRtpData(pc: *PeerConnection, data: []const u8) !void {
         return;
     };
 
-    if (try tr.receiver.handleRtpPacket(pc.dtls_transport.getIo(), packet)) |*new_packet| {
+    if (try tr.receiver.handleRtpPacket(pc.dtls_transport.getIo(), &packet)) {
         if (tr.receiver.nack) if (pc.nack_generator) |*nack_generator| {
             // Packet is already delivered
-            nack_generator.handleRtpPacket(io, new_packet) catch return;
+            nack_generator.handleRtpPacket(io, &packet) catch return;
         };
     } else pc.dtls_transport.ice_agent.destroyPacket(data);
 }
