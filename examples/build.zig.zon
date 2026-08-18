@@ -12,8 +12,8 @@
             .hash = "media-0.2.0-qc-dCC4pAQASICnl_iTMuVeU7NIs-LuiAcSY0gRRyOjc",
         },
         .media_protocols = .{
-            .url = "git+https://github.com/zigouat/media-protocols.git#04d23a2ac5fd82d4b6cb821509bcba0e027d4b16",
-            .hash = "media_protocols-0.1.0-WF_ij7BUBgBvpz_9AIriqyKBBL94cNwC3kyFx-fKgxjk",
+            .url = "git+https://github.com/zigouat/media-protocols.git#845d363f78a308bc9f50361221319d7d80dbd9aa",
+            .hash = "media_protocols-0.1.0-WF_ij0RcBgAQNZ-fsgU4_pVZkCVouCzrVqUd0DUc6B69",
         },
         .media_formats = .{
             .url = "git+https://github.com/zigouat/media-formats.git#0b144051a6b152922116c3f30aa066b55f0ad052",
