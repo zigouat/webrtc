@@ -1,23 +1,35 @@
 const std = @import("std");
 const rtp = @import("rtp");
 const rtcp = @import("rtcp");
+const DtlsTransport = @import("../dtls_transport.zig");
 
 const NackGenerator = @This();
 const Io = std.Io;
 const ReceiveLog = @import("receive_log.zig");
 
+const Logger = std.log.scoped(.nack_generator);
+
 receive_logs: std.AutoHashMap(u32, ReceiveLog),
 size: u16,
+group: Io.Group,
+mutex: Io.Mutex,
 
 pub fn init(allocator: std.mem.Allocator, size: u16) NackGenerator {
+    Logger.debug("Init nack generator", .{});
+
     return .{
         .receive_logs = .init(allocator),
         .size = size,
+        .group = .init,
+        .mutex = .init,
     };
 }
 
-pub fn deinit(self: *NackGenerator) void {
+pub fn deinit(self: *NackGenerator, io: Io) void {
+    Logger.debug("Deinit nack generator", .{});
+
     const allocator = self.receive_logs.allocator;
+    self.group.cancel(io);
 
     var it = self.receive_logs.iterator();
     while (it.next()) |entry| {
@@ -26,7 +38,15 @@ pub fn deinit(self: *NackGenerator) void {
     self.receive_logs.deinit();
 }
 
-pub fn handleRtpPacket(self: *NackGenerator, packet: *const rtp.Packet) !void {
+pub fn start(self: *NackGenerator, dtls_transport: *DtlsTransport) !void {
+    Logger.debug("Start sending nack reports", .{});
+    try self.group.concurrent(dtls_transport.getIo(), buildAndSendNack, .{ self, dtls_transport });
+}
+
+pub fn handleRtpPacket(self: *NackGenerator, io: Io, packet: *const rtp.Packet) !void {
+    self.mutex.lockUncancelable(io);
+    defer self.mutex.unlock(io);
+
     const entry = try self.receive_logs.getOrPut(packet.header.ssrc);
     if (!entry.found_existing) {
         entry.value_ptr.* = try ReceiveLog.init(self.receive_logs.allocator, self.size);
@@ -35,18 +55,63 @@ pub fn handleRtpPacket(self: *NackGenerator, packet: *const rtp.Packet) !void {
     entry.value_ptr.add(packet.header.sequence_number);
 }
 
-pub fn generateRtcpNacks(self: *NackGenerator) NackGeneratorIterator {
+fn buildAndSendNack(self: *NackGenerator, dtls_transport: *DtlsTransport) !void {
+    var buffer: [1200]u8 = @splat(0);
+    const io = dtls_transport.getIo();
+
+    const duration = Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(1000) };
+    var timestamp = Io.Clock.Timestamp.now(io, .awake);
+
+    while (true) {
+        timestamp = timestamp.addDuration(duration);
+        try timestamp.wait(io);
+
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
+
+        var it = self.generateRtcpNacks();
+        var slice: []u8 = buffer[0..];
+        while (true) {
+            const msg = it.next(slice) catch {
+                if (slice.len == buffer.len) {
+                    Logger.err("Failed to generate rtcp nack: Buffer too small", .{});
+                    break;
+                }
+
+                dtls_transport.sendRtcp(buffer[0 .. buffer.len - slice.len]) catch |err| {
+                    Logger.err("Failed to send rtcp nack: {}", .{err});
+                };
+                slice = buffer[0..];
+                continue;
+            };
+
+            if (msg) |m| {
+                slice = slice[m.len..];
+                continue;
+            }
+
+            if (slice.len != buffer.len) {
+                dtls_transport.sendRtcp(buffer[0 .. buffer.len - slice.len]) catch |err| {
+                    Logger.err("Failed to send rtcp nack: {}", .{err});
+                };
+            }
+            break;
+        }
+    }
+}
+
+fn generateRtcpNacks(self: *NackGenerator) NackGeneratorIterator {
     return NackGeneratorIterator.init(self);
 }
 
-pub const NackGeneratorIterator = struct {
+const NackGeneratorIterator = struct {
     it: std.AutoHashMap(u32, ReceiveLog).Iterator,
 
-    pub fn init(self: *NackGenerator) NackGeneratorIterator {
+    fn init(self: *NackGenerator) NackGeneratorIterator {
         return .{ .it = self.receive_logs.iterator() };
     }
 
-    pub fn next(self: *NackGeneratorIterator, buffer: []u8) Io.Writer.Error!?[]const u8 {
+    fn next(self: *NackGeneratorIterator, buffer: []u8) Io.Writer.Error!?[]const u8 {
         var rtcp_header = rtcp.Header{
             .payload_type = .rtp_fb,
             .rc = 1, // NACK
@@ -89,24 +154,24 @@ fn testPacket(ssrc: u32, seq: u16) rtp.Packet {
 
 test "handleRtpPacket: creates one receive log per ssrc" {
     var gen = NackGenerator.init(testing.allocator, 128);
-    defer gen.deinit();
+    defer gen.deinit(testing.io);
 
-    try gen.handleRtpPacket(&testPacket(1, 1));
+    try gen.handleRtpPacket(testing.io, &testPacket(1, 1));
     try testing.expectEqual(1, gen.receive_logs.count());
 
-    try gen.handleRtpPacket(&testPacket(1, 2));
+    try gen.handleRtpPacket(testing.io, &testPacket(1, 2));
     try testing.expectEqual(1, gen.receive_logs.count());
 
-    try gen.handleRtpPacket(&testPacket(2, 1));
+    try gen.handleRtpPacket(testing.io, &testPacket(2, 1));
     try testing.expectEqual(2, gen.receive_logs.count());
 }
 
 test "generateRtcpNacks: no packet is emitted when nothing is missing" {
     var gen = NackGenerator.init(testing.allocator, 128);
-    defer gen.deinit();
+    defer gen.deinit(testing.io);
 
-    try gen.handleRtpPacket(&testPacket(1, 1));
-    try gen.handleRtpPacket(&testPacket(1, 2));
+    try gen.handleRtpPacket(testing.io, &testPacket(1, 1));
+    try gen.handleRtpPacket(testing.io, &testPacket(1, 2));
 
     var buffer: [64]u8 = undefined;
     var it = gen.generateRtcpNacks();
@@ -115,11 +180,11 @@ test "generateRtcpNacks: no packet is emitted when nothing is missing" {
 
 test "generateRtcpNacks: emits a NACK listing the missing sequence numbers" {
     var gen = NackGenerator.init(testing.allocator, 128);
-    defer gen.deinit();
+    defer gen.deinit(testing.io);
 
-    try gen.handleRtpPacket(&testPacket(42, 1));
-    try gen.handleRtpPacket(&testPacket(42, 2));
-    try gen.handleRtpPacket(&testPacket(42, 5));
+    try gen.handleRtpPacket(testing.io, &testPacket(42, 1));
+    try gen.handleRtpPacket(testing.io, &testPacket(42, 2));
+    try gen.handleRtpPacket(testing.io, &testPacket(42, 5));
 
     var buffer: [64]u8 = undefined;
     var it = gen.generateRtcpNacks();
@@ -140,13 +205,13 @@ test "generateRtcpNacks: emits a NACK listing the missing sequence numbers" {
 
 test "generateRtcpNacks: only ssrcs with missing packets produce a NACK" {
     var gen = NackGenerator.init(testing.allocator, 128);
-    defer gen.deinit();
+    defer gen.deinit(testing.io);
 
-    try gen.handleRtpPacket(&testPacket(1, 1));
-    try gen.handleRtpPacket(&testPacket(1, 2));
+    try gen.handleRtpPacket(testing.io, &testPacket(1, 1));
+    try gen.handleRtpPacket(testing.io, &testPacket(1, 2));
 
-    try gen.handleRtpPacket(&testPacket(2, 10));
-    try gen.handleRtpPacket(&testPacket(2, 12));
+    try gen.handleRtpPacket(testing.io, &testPacket(2, 10));
+    try gen.handleRtpPacket(testing.io, &testPacket(2, 12));
 
     var buffer: [64]u8 = undefined;
     var it = gen.generateRtcpNacks();
@@ -159,13 +224,13 @@ test "generateRtcpNacks: only ssrcs with missing packets produce a NACK" {
 
 test "generateRtcpNacks: build rtcp compound packet" {
     var gen = NackGenerator.init(testing.allocator, 128);
-    defer gen.deinit();
+    defer gen.deinit(testing.io);
 
-    try gen.handleRtpPacket(&testPacket(1, 1));
-    try gen.handleRtpPacket(&testPacket(1, 4));
+    try gen.handleRtpPacket(testing.io, &testPacket(1, 1));
+    try gen.handleRtpPacket(testing.io, &testPacket(1, 4));
 
-    try gen.handleRtpPacket(&testPacket(2, 10));
-    try gen.handleRtpPacket(&testPacket(2, 12));
+    try gen.handleRtpPacket(testing.io, &testPacket(2, 10));
+    try gen.handleRtpPacket(testing.io, &testPacket(2, 12));
 
     var buffer: [128]u8 = undefined;
     var written: usize = 0;

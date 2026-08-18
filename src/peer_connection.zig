@@ -14,6 +14,7 @@ const Demuxer = @import("pc/demuxer.zig");
 const RtpTransceiver = @import("rtp_transceiver.zig");
 const RtpSender = @import("rtp_sender.zig");
 const Mid = @import("mid.zig");
+const NackGenerator = @import("nack/generator.zig");
 
 const Io = std.Io;
 const PeerConnection = @This();
@@ -123,6 +124,9 @@ mid: u16 = 0,
 
 enable_rtx: bool = false,
 
+// RTP/RTCP interceptors
+nack_generator: ?NackGenerator = null,
+
 queue_buffer: []Event,
 queue: Io.Queue(Event),
 group: std.Io.Group = .init,
@@ -138,6 +142,14 @@ const ParsedSessionDescription = struct {
             .desc_type = desc_type,
             .sdp = &.{},
             .session = .empty,
+        };
+    }
+
+    fn initAnswer(sdp: []const u8, session: SDPSession) ParsedSessionDescription {
+        return .{
+            .desc_type = .answer,
+            .sdp = sdp,
+            .session = session,
         };
     }
 
@@ -202,6 +214,7 @@ pub fn deinit(pc: *PeerConnection) void {
     pc.last_offer.deinit(pc.allocator);
     pc.last_answer.deinit(pc.allocator);
 
+    if (pc.nack_generator) |*ng| ng.deinit(io);
     pc.dtls_transport.deinit();
     pc.demuxer.deinit();
 }
@@ -720,7 +733,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
     pc.pending_local_description = pc.last_answer;
     try pc.updateSignalingStateToStable();
     // pc.removeTransceivers();
-    try pc.startSenderReports(renegotiation);
+    try pc.startRtpRtcpInterceptors(renegotiation);
 }
 
 fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.SessionDescription) !void {
@@ -824,14 +837,10 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     switch (session_desc.type) {
         .answer => {
             try pc.demuxer.updateMaps(pc.dtls_transport.getIo(), &remote_sdp);
-            pc.pending_remote_description = .{
-                .desc_type = .answer,
-                .sdp = sdp_text,
-                .session = remote_sdp,
-            };
+            pc.pending_remote_description = .initAnswer(sdp_text, remote_sdp);
             try pc.updateSignalingStateToStable();
             // pc.removeTransceivers();
-            try pc.startSenderReports(renegotiation);
+            try pc.startRtpRtcpInterceptors(renegotiation);
         },
         .offer => {
             pc.pending_remote_description = .{
@@ -936,10 +945,12 @@ fn handleRtcpData(pc: *PeerConnection, data: []const u8) !void {
 }
 
 fn handleRtpData(pc: *PeerConnection, data: []const u8) !void {
+    const io = pc.dtls_transport.getIo();
+
     errdefer pc.dtls_transport.ice_agent.destroyPacket(data);
     const packet = try rtp.Packet.parse(data);
 
-    const mid = try pc.demuxer.getMid(pc.dtls_transport.getIo(), &packet) orelse {
+    const mid = try pc.demuxer.getMid(io, &packet) orelse {
         pc.dtls_transport.ice_agent.destroyPacket(data);
         return;
     };
@@ -949,7 +960,12 @@ fn handleRtpData(pc: *PeerConnection, data: []const u8) !void {
         return;
     };
 
-    try tr.receiver.handleRtpPacket(pc.dtls_transport.getIo(), packet);
+    if (try tr.receiver.handleRtpPacket(pc.dtls_transport.getIo(), packet)) |*new_packet| {
+        if (tr.receiver.nack) if (pc.nack_generator) |*nack_generator| {
+            // Packet is already delivered
+            nack_generator.handleRtpPacket(io, new_packet) catch return;
+        };
+    } else pc.dtls_transport.ice_agent.destroyPacket(data);
 }
 
 fn findSenderBySsrc(pc: *PeerConnection, ssrc: u32) ?*RtpSender {
@@ -998,16 +1014,41 @@ fn removeTransceivers(pc: *PeerConnection) void {
     }
 }
 
-fn startSenderReports(pc: *PeerConnection, renegotiation: bool) !void {
-    if (renegotiation) return;
-    try pc.group.concurrent(pc.dtls_transport.getIo(), struct {
-        fn sendReports(p: *PeerConnection) !void {
-            p.doSendReports() catch |err| switch (err) {
-                error.Canceled => return error.Canceled,
-                else => |e| Logger.err("Error occurred while sending report: {}", .{e}),
-            };
+fn startRtpRtcpInterceptors(pc: *PeerConnection, renegotiation: bool) !void {
+    const io = pc.dtls_transport.getIo();
+
+    // Init sender reports
+    if (!renegotiation) {
+        try pc.group.concurrent(io, struct {
+            fn sendReports(p: *PeerConnection) !void {
+                p.doSendReports() catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => |e| Logger.err("Error occurred while sending report: {}", .{e}),
+                };
+            }
+        }.sendReports, .{pc});
+    }
+
+    // Nack generators
+
+    const nack = blk: {
+        try pc.mutex.lock(io);
+        defer pc.mutex.unlock(io);
+        for (pc.getTransceivers()) |tr| {
+            if (tr.receiver.nack) break :blk true;
+        } else break :blk false;
+    };
+    if (nack) {
+        if (pc.nack_generator == null) {
+            pc.nack_generator = .init(pc.allocator, 512);
+            try pc.nack_generator.?.start(&pc.dtls_transport);
         }
-    }.sendReports, .{pc});
+    } else {
+        if (pc.nack_generator) |*nack_generator| {
+            nack_generator.deinit(io);
+            pc.nack_generator = null;
+        }
+    }
 }
 
 fn doSendReports(pc: *PeerConnection) !void {
