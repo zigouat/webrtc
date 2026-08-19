@@ -14,6 +14,7 @@ const Demuxer = @import("pc/demuxer.zig");
 const RtpTransceiver = @import("rtp_transceiver.zig");
 const RtpSender = @import("rtp_sender.zig");
 const Mid = @import("mid.zig");
+const NackConfig = @import("pc/nack_config.zig");
 const NackGenerator = @import("nack/generator.zig");
 
 const Io = std.Io;
@@ -91,8 +92,7 @@ pub const RTCConfiguration = struct {
 
 pub const PeerConfiguration = struct {
     inner_queue_size: usize = 8,
-    /// When true, generates an RTX codec for each video codec and enables nack feedback.
-    enable_rtx: bool = false,
+    nack_config: NackConfig = .{},
 };
 
 pub const Config = struct {
@@ -122,9 +122,8 @@ demuxer: Demuxer,
 /// Used as a counter for generating mid values for transceivers.
 mid: u16 = 0,
 
-enable_rtx: bool = false,
-
 // RTP/RTCP interceptors
+nack_config: NackConfig,
 nack_generator: ?NackGenerator = null,
 
 queue_buffer: []Event,
@@ -188,7 +187,7 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
         .demuxer = .init(allocator),
         .queue_buffer = queue_buffer,
         .queue = .init(queue_buffer),
-        .enable_rtx = config.peer_config.enable_rtx,
+        .nack_config = config.peer_config.nack_config,
     };
 }
 
@@ -351,7 +350,7 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
             break :blk cloned;
         } else blk: {
             const tr = pc.findTransceiverByMid(media.mid) orelse return error.NotExistingTransceiver;
-            break :blk try tr.toSdpMediaAnswer(pc.allocator, media, pc.enable_rtx);
+            break :blk try tr.toSdpMediaAnswer(pc.allocator, media, pc.nack_config);
         };
     }
 
@@ -521,7 +520,7 @@ fn createFirstOffer(pc: *PeerConnection) !webrtc.SessionDescription {
         const media = try medias.addOne(pc.allocator);
         media.* = .empty;
 
-        media.* = try tr.toSdpMedia(pc.allocator, pc.enable_rtx);
+        media.* = try tr.toSdpMedia(pc.allocator, pc.nack_config);
         media.mid = try Mid.fromInt(mid);
 
         tr.sdp_mline_index = @intCast(medias.items.len - 1);
@@ -576,7 +575,7 @@ fn createSubsequentOffer(pc: *PeerConnection) !webrtc.SessionDescription {
             tr.sdp_mline_index = @intCast(sdp_session.medias.items.len - 1);
             break :blk media;
         };
-        media.* = try tr.toSdpMedia(pc.allocator, pc.enable_rtx);
+        media.* = try tr.toSdpMedia(pc.allocator, pc.nack_config);
         media.mid = try Mid.fromInt(pc.mid);
         pc.mid +%= 1;
     };
@@ -1038,7 +1037,7 @@ fn startRtpRtcpInterceptors(pc: *PeerConnection, renegotiation: bool) !void {
         if (tr.receiver.nack) {
             nack = true;
             if (pc.nack_generator == null) {
-                pc.nack_generator = .init(pc.allocator, 512);
+                pc.nack_generator = .init(pc.allocator, .{});
                 try pc.nack_generator.?.start(&pc.dtls_transport);
             }
         } else {

@@ -330,7 +330,7 @@ test "createOffer: m-lines created for each transceiver" {
 
 test "createOffer: enable_rtx synthesizes rtx codecs for video only" {
     var pc = try PeerConnection.init(testing.io, testing.allocator, .{
-        .peer_config = .{ .enable_rtx = true },
+        .peer_config = .{ .nack_config = .{ .enable_rtx = true } },
     });
     defer pc.deinit();
 

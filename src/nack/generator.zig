@@ -10,18 +10,27 @@ const HashMap = std.AutoHashMap(u32, ReceiveLog);
 
 const Logger = std.log.scoped(.nack_generator);
 
-receive_logs: HashMap,
+/// Nack generation config
+pub const Config = struct {
+    /// How many packets to keep in the receive log for each SSRC.
+    size: u16 = 512,
+    /// How often to send NACK reports, in milliseconds.
+    interval: u16 = 100,
+};
+
 size: u16,
+interval: u16,
+receive_logs: HashMap,
 group: Io.Group,
 mutex: Io.Mutex,
-interval: u16 = 100,
 
-pub fn init(allocator: std.mem.Allocator, size: u16) NackGenerator {
+pub fn init(allocator: std.mem.Allocator, config: Config) NackGenerator {
     Logger.debug("Init nack generator", .{});
 
     return .{
         .receive_logs = .init(allocator),
-        .size = size,
+        .size = config.size,
+        .interval = config.interval,
         .group = .init,
         .mutex = .init,
     };
@@ -172,7 +181,7 @@ fn testPacket(ssrc: u32, seq: u16) rtp.Packet {
 }
 
 test "NackGenerator.handleRtpPacket: creates one receive log per ssrc" {
-    var gen = NackGenerator.init(testing.allocator, 128);
+    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
     defer gen.deinit(testing.io);
 
     try gen.handleRtpPacket(testing.io, &testPacket(1, 1));
@@ -186,7 +195,7 @@ test "NackGenerator.handleRtpPacket: creates one receive log per ssrc" {
 }
 
 test "NackGenerator.generateRtcpNacks: no packet is emitted when nothing is missing" {
-    var gen = NackGenerator.init(testing.allocator, 128);
+    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
     defer gen.deinit(testing.io);
 
     try gen.handleRtpPacket(testing.io, &testPacket(1, 1));
@@ -198,7 +207,7 @@ test "NackGenerator.generateRtcpNacks: no packet is emitted when nothing is miss
 }
 
 test "NackGenerator.generateRtcpNacks: emits a NACK listing the missing sequence numbers" {
-    var gen = NackGenerator.init(testing.allocator, 128);
+    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
     defer gen.deinit(testing.io);
 
     try gen.handleRtpPacket(testing.io, &testPacket(42, 1));
@@ -223,7 +232,7 @@ test "NackGenerator.generateRtcpNacks: emits a NACK listing the missing sequence
 }
 
 test "NackGenerator.generateRtcpNacks: only ssrcs with missing packets produce a NACK" {
-    var gen = NackGenerator.init(testing.allocator, 128);
+    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
     defer gen.deinit(testing.io);
 
     try gen.handleRtpPacket(testing.io, &testPacket(1, 1));
@@ -242,7 +251,7 @@ test "NackGenerator.generateRtcpNacks: only ssrcs with missing packets produce a
 }
 
 test "NackGenerator.generateRtcpNacks: build rtcp compound packet" {
-    var gen = NackGenerator.init(testing.allocator, 128);
+    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
     defer gen.deinit(testing.io);
 
     try gen.handleRtpPacket(testing.io, &testPacket(1, 1));
@@ -277,7 +286,7 @@ test "NackGenerator.generateRtcpNacks: build rtcp compound packet" {
 }
 
 test "NackGenerator.deleteSource" {
-    var gen = NackGenerator.init(testing.allocator, 128);
+    var gen = NackGenerator.init(testing.allocator, .{});
     defer gen.deinit(testing.io);
 
     try gen.handleRtpPacket(testing.io, &testPacket(1, 1));
