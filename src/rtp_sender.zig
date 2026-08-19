@@ -2,7 +2,7 @@ const std = @import("std");
 const webrtc = @import("webrtc.zig");
 const rtp = @import("rtp");
 const rtcp = @import("rtcp");
-const SendBuffer = @import("utils/send_buffer.zig");
+const SendBuffer = @import("nack/send_buffer.zig");
 const Demuxer = @import("pc/demuxer.zig");
 
 const Io = std.Io;

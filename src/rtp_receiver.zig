@@ -24,9 +24,10 @@ codecs: []const webrtc.RtpCodecParameters = &.{},
 stream_infos: [128]?StreamInfo,
 header_extensions: []const webrtc.RtpHeaderExtensionParameter = &.{},
 ssrc: ?u32,
-rtx_ssrc: ?u32,
 queue: Io.Queue(TrackEvent),
 queue_buffer: []TrackEvent,
+//Whether nack is configured for this receiver.
+nack: bool,
 
 pub fn init(allocator: std.mem.Allocator, track: webrtc.MediaStreamTrack) !RtpReceiver {
     const queue_buffer = try allocator.alloc(TrackEvent, queue_size);
@@ -36,8 +37,8 @@ pub fn init(allocator: std.mem.Allocator, track: webrtc.MediaStreamTrack) !RtpRe
         .queue = Io.Queue(TrackEvent).init(queue_buffer),
         .queue_buffer = queue_buffer,
         .ssrc = null,
-        .rtx_ssrc = null,
         .stream_infos = @splat(null),
+        .nack = false,
     };
 }
 
@@ -50,11 +51,14 @@ pub fn setCodecs(receiver: *RtpReceiver, codecs: []const webrtc.RtpCodecParamete
     receiver.codecs = codecs;
 
     receiver.stream_infos = @splat(null);
+    receiver.nack = false;
     for (receiver.codecs) |*codec| {
         receiver.stream_infos[codec.payload_type] = .{
             .packet_type = if (codec.isRtx()) .rtx else .media,
             .apt = if (codec.isRtx()) @intCast(codec.fmtp_params.?.rtx.apt) else 0,
         };
+
+        receiver.nack |= codec.rtcp_feedbacks.nack;
     }
 }
 
@@ -74,11 +78,21 @@ pub fn deinitEvent(receiver: *RtpReceiver, event: *const TrackEvent) void {
     }
 }
 
-pub fn handleRtpPacket(receiver: *RtpReceiver, io: Io, packet: rtp.Packet) !void {
-    const stream_info = receiver.stream_infos[packet.header.payload_type] orelse return;
+pub fn handleRtpPacket(receiver: *RtpReceiver, io: Io, packet: *rtp.Packet) !bool {
+    const stream_info = receiver.stream_infos[packet.header.payload_type] orelse return false;
     if (stream_info.packet_type == .rtx) {
         @branchHint(.unlikely);
-        return;
+        if (packet.payload.len < 2 or receiver.ssrc == null) return false;
+        std.log.debug("ssrc={} pt={} received rtx packet", .{ receiver.ssrc.?, packet.header.payload_type });
+
+        const payload = @constCast(packet.payload);
+        const original_seq = std.mem.readInt(u16, payload[0..2], .big);
+        @memmove(payload[0 .. payload.len - 2], payload[2..payload.len]);
+
+        packet.header.payload_type = stream_info.apt;
+        packet.header.sequence_number = original_seq;
+        packet.header.ssrc = receiver.ssrc.?;
+        packet.payload = payload[0 .. payload.len - 2];
     }
 
     if (receiver.ssrc != packet.header.ssrc) {
@@ -86,7 +100,8 @@ pub fn handleRtpPacket(receiver: *RtpReceiver, io: Io, packet: rtp.Packet) !void
         receiver.ssrc = packet.header.ssrc;
     }
 
-    try receiver.queue.putOne(io, .{ .rtp = packet });
+    try receiver.queue.putOne(io, .{ .rtp = packet.* });
+    return true;
 }
 
 /// Sends a Picture Loss Indication (PLI) RTCP packet to the remote peer.
@@ -129,9 +144,8 @@ test "RtpReceiver.poll" {
 
     receiver.setCodecs(&.{.{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90000 }});
 
-    const packet = testPacket(96);
-
-    try receiver.handleRtpPacket(testing.io, packet);
+    var packet = testPacket(96);
+    try testing.expect(try receiver.handleRtpPacket(testing.io, &packet));
     const event = try receiver.poll(testing.io);
     try testing.expectEqual(.rtp, std.meta.activeTag(event));
     try testing.expectEqual(packet.header.ssrc, event.rtp.header.ssrc);
@@ -211,21 +225,54 @@ test "RtpReceiver.setCodecs: clear stream infos before filling" {
     }
 }
 
-test "RtpReceiver.handleRtpPacket: ignore packets not satisfying stream info" {
+test "RtpReceiver.handleRtpPacket: handle rtx packets" {
     var receiver = try RtpReceiver.init(testing.allocator, .init(testing.io, .video));
     defer receiver.deinit(testing.io, testing.allocator);
 
     receiver.stream_infos[96] = .{ .packet_type = .media, .apt = 0 };
     receiver.stream_infos[97] = .{ .packet_type = .rtx, .apt = 96 };
 
-    var packet = testPacket(97);
-    try receiver.handleRtpPacket(testing.io, packet); // ignore rtx packet
-
     var events: [1]TrackEvent = undefined;
-    const received = try receiver.queue.get(testing.io, &events, 0);
+
+    // Ignore rtx packets when ssrc is not yet known (no rtp packet is received yet)
+    var rtx_packet = testPacket(97);
+    try testing.expect(!(try receiver.handleRtpPacket(testing.io, &rtx_packet)));
+
+    var received = try receiver.queue.get(testing.io, &events, 0);
     try testing.expectEqual(0, received);
 
-    packet.header.payload_type = 104;
-    try receiver.handleRtpPacket(testing.io, packet); // ignore unknown payload type
+    var packet = testPacket(96);
+    packet.header.sequence_number = 1000;
+    packet.header.ssrc = 0xDEADDEAD;
+    try testing.expect(try receiver.handleRtpPacket(testing.io, &packet));
+
+    received = try receiver.queue.get(testing.io, &events, 0);
+    try testing.expectEqual(1, received);
+
+    var payload: [10]u8 = undefined;
+    std.mem.writeInt(u16, payload[0..2], 1001, .big);
+    @memcpy(payload[2..], "ZIGLANG-");
+    rtx_packet.payload = payload[0..];
+    rtx_packet.header.sequence_number = 2;
+    try testing.expect(try receiver.handleRtpPacket(testing.io, &rtx_packet));
+
+    try testing.expectEqual(96, rtx_packet.header.payload_type);
+    try testing.expectEqual(0xDEADDEAD, rtx_packet.header.ssrc);
+    try testing.expectEqual(1001, rtx_packet.header.sequence_number);
+    try testing.expectEqualStrings("ZIGLANG-", rtx_packet.payload);
+
+    received = try receiver.queue.get(testing.io, &events, 0);
+    try testing.expectEqual(1, received);
+}
+
+test "RtpReceiver.handleRtpPacket: ignore packets with unknown payload type" {
+    var receiver = try RtpReceiver.init(testing.allocator, .init(testing.io, .video));
+    defer receiver.deinit(testing.io, testing.allocator);
+
+    receiver.stream_infos[96] = .{ .packet_type = .media, .apt = 0 };
+
+    var events: [1]TrackEvent = undefined;
+    var packet = testPacket(104);
+    try testing.expect(!(try receiver.handleRtpPacket(testing.io, &packet)));
     try testing.expectEqual(0, try receiver.queue.get(testing.io, &events, 0));
 }

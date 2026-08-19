@@ -114,7 +114,7 @@ test "setRemoteDescription: set offer - do not reject bundle only m-lines" {
         \\o=- 1000 1779396395 IN IP4 0.0.0.0
         \\s=-
         \\t=0 0
-        \\a=group:BUNDLE 0
+        \\a=group:BUNDLE 0 1
         \\a=ice-options:ice2 
         \\a=fingerprint:sha-256 A4:14:A3:5D:02:35:5B:E0:C6:E0:EF:7D:D9:63:3F:30:D4:FD:43:76:50:A8:25:4A:96:25:F1:8A:0A:DC:F4:26
         \\m=video 9 UDP/TLS/RTP/SAVPF 96
@@ -329,7 +329,9 @@ test "createOffer: m-lines created for each transceiver" {
 }
 
 test "createOffer: enable_rtx synthesizes rtx codecs for video only" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .peer_config = .{ .enable_rtx = true } });
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{
+        .peer_config = .{ .nack_config = .{ .enable_rtx = true } },
+    });
     defer pc.deinit();
 
     _ = try pc.addTrack(.initWithId("video", .video), null);

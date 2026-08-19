@@ -33,7 +33,7 @@ zig fetch --save git+https://github.com/zigouat/webrtc.git#v0.1.0
 Then, in your `build.zig` file, add the following:
 
 ```zig
-const webrtc = b.dependecy("webrtc", .{ .target = .target, .optimize = optimize });
+const webrtc = b.dependency("webrtc", .{ .target = target, .optimize = optimize });
 
 exe.root_module.addImport("webrtc", webrtc.module("webrtc"));
 ```

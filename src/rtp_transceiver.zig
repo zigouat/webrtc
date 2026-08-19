@@ -6,6 +6,7 @@ const SDPSession = @import("sdp_session.zig");
 const RtpSender = @import("rtp_sender.zig");
 const RtpReceiver = @import("rtp_receiver.zig");
 const Mid = @import("mid.zig");
+const NackConfig = @import("pc/nack_config.zig");
 
 const Io = std.Io;
 const RtpTransceiver = @This();
@@ -114,13 +115,13 @@ pub fn deinit(tr: *RtpTransceiver, io: Io, allocator: std.mem.Allocator) void {
 /// Creates an SDP media description from the transceiver.
 ///
 /// Called when creating offers.
-pub fn toSdpMedia(tr: *RtpTransceiver, allocator: std.mem.Allocator, enable_rtx: bool) std.mem.Allocator.Error!SDPSession.Media {
+pub fn toSdpMedia(tr: *RtpTransceiver, allocator: std.mem.Allocator, nack_config: NackConfig) std.mem.Allocator.Error!SDPSession.Media {
     var media: SDPSession.Media = .empty;
 
     media.setKind(tr.kind);
     media.port = if (tr.stopping) 0 else 9;
     media.direction = tr.direction;
-    media.rtp_codec_parameters = if (enable_rtx and tr.kind == .video)
+    media.rtp_codec_parameters = if (nack_config.enable_rtx and tr.kind == .video)
         try synthesizeRtxCodecs(allocator, webrtc.getCodecCapabilities(tr.kind))
     else
         try allocator.dupe(webrtc.RtpCodecParameters, webrtc.getCodecCapabilities(tr.kind));
@@ -143,13 +144,13 @@ pub fn toSdpMediaAnswer(
     tr: *const RtpTransceiver,
     allocator: std.mem.Allocator,
     media: *const SDPSession.Media,
-    enable_rtx: bool,
+    nack_config: NackConfig,
 ) std.mem.Allocator.Error!SDPSession.Media {
     var answer: SDPSession.Media = .empty;
     errdefer answer.deinit(allocator);
 
     const local_capabilities = webrtc.getCodecCapabilities(tr.kind);
-    const capabilities_with_rtx = if (enable_rtx and tr.kind == .video)
+    const capabilities_with_rtx = if (nack_config.enable_rtx and tr.kind == .video)
         try synthesizeRtxCodecs(allocator, local_capabilities)
     else
         null;
@@ -382,7 +383,7 @@ test "toSdpMedia" {
     defer tr.deinit(testing.io, testing.allocator);
     tr.transport = &transport;
 
-    var media = try tr.toSdpMedia(testing.allocator, false);
+    var media = try tr.toSdpMedia(testing.allocator, .{ .enable_rtx = true });
 
     try testing.expectEqual(.video, media.kind);
     try testing.expectEqual(9, media.port);
@@ -400,7 +401,7 @@ test "toSdpMedia" {
     tr.sender.track = null;
 
     media.deinit(testing.allocator);
-    media = try tr.toSdpMedia(testing.allocator, false);
+    media = try tr.toSdpMedia(testing.allocator, .{});
     defer media.deinit(testing.allocator);
 
     try testing.expectEqual(.recvonly, media.direction);
@@ -424,7 +425,7 @@ test "toSdpMediaAnswer: answer to offer" {
     offer_media.rtp_codec_parameters[0].rtcp_feedbacks = .{ .nack = true, .nack_pli = true };
     defer offer_media.deinit(testing.allocator);
 
-    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, false);
+    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, .{});
     defer answer_media.deinit(testing.allocator);
 
     try testing.expectEqual(.video, answer_media.kind);
@@ -459,7 +460,7 @@ test "toSdpMediaAnswer: includes rtx_ssrc when the negotiated codecs include rtx
     offer_media.rtp_codec_parameters = try synthesizeRtxCodecs(testing.allocator, webrtc.getCodecCapabilities(.video));
     defer offer_media.deinit(testing.allocator);
 
-    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, true);
+    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, .{ .enable_rtx = true });
     defer answer_media.deinit(testing.allocator);
 
     try testing.expectEqual(424242, answer_media.rtx_ssrc);
@@ -482,7 +483,7 @@ test "toSdpMediaAnswer: enable_rtx=false ignores an rtx-capable offer" {
     offer_media.rtp_codec_parameters = try synthesizeRtxCodecs(testing.allocator, webrtc.getCodecCapabilities(.video));
     defer offer_media.deinit(testing.allocator);
 
-    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, false);
+    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, .{});
     defer answer_media.deinit(testing.allocator);
 
     for (answer_media.rtp_codec_parameters) |codec| try testing.expect(!codec.isRtx());
@@ -498,7 +499,7 @@ test "toSdpMedia: includes rtx_ssrc when enable_rtx synthesizes an rtx codec" {
     tr.transport = &transport;
     tr.sender.rtx_ssrc = 424242;
 
-    var media = try tr.toSdpMedia(testing.allocator, true);
+    var media = try tr.toSdpMedia(testing.allocator, .{ .enable_rtx = true });
     defer media.deinit(testing.allocator);
 
     try testing.expectEqual(424242, media.rtx_ssrc);
@@ -521,7 +522,7 @@ test "toSdpMedia: leaves rtx_ssrc unset for audio, which has no rtx codec, even 
     tr.transport = &transport;
     tr.sender.rtx_ssrc = 424242;
 
-    var media = try tr.toSdpMedia(testing.allocator, true);
+    var media = try tr.toSdpMedia(testing.allocator, .{ .enable_rtx = true });
     defer media.deinit(testing.allocator);
 
     try testing.expectEqual(null, media.rtx_ssrc);
@@ -589,7 +590,7 @@ test "toSdpMediaAnswer: negotiates header extensions, keeping the offerer's id" 
         .{ .id = 9, .uri = "some-unsupported-uri" },
     });
 
-    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, false);
+    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, .{});
     defer answer_media.deinit(testing.allocator);
 
     try testing.expectEqual(1, answer_media.rtp_header_extensions.len);
@@ -607,7 +608,7 @@ test "toSdpMediaAnswer: reject offer" {
     // Offer port == 0
     {
         offer_media.port = 0;
-        var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, false);
+        var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, .{});
         defer answer_media.deinit(testing.allocator);
         try testing.expectEqual(.video, answer_media.kind);
         try testing.expectEqual(0, answer_media.port);
@@ -621,7 +622,7 @@ test "toSdpMediaAnswer: reject offer" {
         offer_media.port = 9;
         offer_media.rtp_codec_parameters = &.{};
 
-        var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, false);
+        var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, .{});
         defer answer_media.deinit(testing.allocator);
         try testing.expectEqual(.video, answer_media.kind);
         try testing.expectEqual(0, answer_media.port);
