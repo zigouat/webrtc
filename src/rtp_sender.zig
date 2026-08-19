@@ -1,4 +1,5 @@
 const std = @import("std");
+const constants = @import("constants.zig");
 const webrtc = @import("webrtc.zig");
 const rtp = @import("rtp");
 const rtcp = @import("rtcp");
@@ -12,9 +13,6 @@ const MediaStreamTrack = webrtc.MediaStreamTrack;
 const MediaPacket = @import("media").Packet;
 const RtpTransceiver = @import("rtp_transceiver.zig");
 const Mid = @import("mid.zig");
-
-const rtp_default_header_size = 12;
-const max_rtp_payload_size = 1200;
 
 pub const SendError = DtlsTransport.SendError || Io.Reader.Error || error{ NoAssociatedTrack, InvalidDirection };
 
@@ -122,7 +120,13 @@ pub fn setStream(sender: *RtpSender, stream: webrtc.MediaStream) void {
     if (sender.track) |*track| track.stream_id = stream.id;
 }
 
-pub fn setCodecs(sender: *RtpSender, io: std.Io, allocator: std.mem.Allocator, codecs: []const webrtc.RtpCodecParameters) !void {
+pub fn setCodecs(
+    sender: *RtpSender,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    codecs: []const webrtc.RtpCodecParameters,
+    send_buffer_size: u16,
+) !void {
     if (sender.codecs.len != 0) {
         // TODO: Handle this use case better. What if the codec is changed?
         // For now do not allow changing codecs after they have been set
@@ -138,7 +142,7 @@ pub fn setCodecs(sender: *RtpSender, io: std.Io, allocator: std.mem.Allocator, c
         const rtx_codec = webrtc.RtpCodecParameters.findRtx(codecs, chosen_codec.payload_type);
 
         if (rtx_codec != null and chosen_codec.rtcp_feedbacks.nack) {
-            sender.send_buffer = try .init(allocator, 1024, max_rtp_payload_size);
+            sender.send_buffer = try .init(allocator, send_buffer_size, constants.rtp_default_header_size);
             sender.rtx_config = .{
                 .payload_type = rtx_codec.?.payload_type,
                 .sequence_number = 0,
@@ -163,8 +167,8 @@ pub fn sendSample(sender: *RtpSender, sample: *const MediaPacket) SendError!void
     var buffer = try tr.transport.ice_agent.createPacket();
     defer tr.transport.ice_agent.destroyPacket(buffer);
 
-    const header_size = rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[rtp_default_header_size..]);
-    buffer = buffer[0 .. header_size + max_rtp_payload_size];
+    const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[constants.rtp_default_header_size..]);
+    buffer = buffer[0 .. header_size + constants.rtp_default_header_size];
 
     //TODO: refactor this mess
     switch (sender.packetizer) {
@@ -197,10 +201,10 @@ pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) SendError!void {
     defer tr.transport.ice_agent.destroyPacket(buffer);
 
     const timestamp = Io.Timestamp.now(tr.transport.getIo(), .real).toMicroseconds();
-    const header_size = rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[rtp_default_header_size..]);
+    const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[constants.rtp_default_header_size..]);
 
     const header: rtp.Packet.Header = .{
-        .extension = header_size != rtp_default_header_size,
+        .extension = header_size != constants.rtp_default_header_size,
         .marker = packet.header.marker,
         .padding = false,
         .payload_type = @intCast(tr.sender.codecs[0].payload_type),
@@ -266,10 +270,10 @@ pub fn handleNack(sender: *RtpSender, nack: rtcp.Nack) !void {
         var buffer = try tr.transport.ice_agent.createPacket();
         defer tr.transport.ice_agent.destroyPacket(buffer);
 
-        const header_size = rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[rtp_default_header_size..]);
+        const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[constants.rtp_default_header_size..]);
 
         const header: rtp.Packet.Header = .{
-            .extension = header_size != rtp_default_header_size,
+            .extension = header_size != constants.rtp_default_header_size,
             .marker = packet.header.marker,
             .padding = false,
             .payload_type = @intCast(rtx_config.payload_type),
@@ -327,20 +331,20 @@ fn writeHeaderExtensions(sender: *RtpSender, mid: Mid.Int, buffer: []u8) !usize 
 }
 
 fn writeHeaderAndSend(tr: *RtpTransceiver, header: rtp.Packet.Header, header_size: usize, payload_len: usize, buffer: []u8) SendError!void {
-    std.mem.writeInt(u96, buffer[0..rtp_default_header_size], @bitCast(header), .big);
+    std.mem.writeInt(u96, buffer[0..constants.rtp_default_header_size], @bitCast(header), .big);
     try tr.transport.sendRtp(buffer[0 .. header_size + payload_len]);
 }
 
 fn sendAndRecord(tr: *RtpTransceiver, rtp_packet: *const rtp.Packet, header_size: usize, buffer: []u8, timestamp: i64) !void {
     var header = rtp_packet.header;
-    header.extension = header_size != rtp_default_header_size;
+    header.extension = header_size != constants.rtp_default_header_size;
 
     try writeHeaderAndSend(tr, header, header_size, rtp_packet.payload.len, buffer);
     recordSent(tr, rtp_packet, timestamp);
 }
 
 fn microsecondsToNtp(timestamp: i64) u64 {
-    const ntp_seconds = @divTrunc(timestamp, std.time.us_per_s) + webrtc.ntp_unix_epoch_diff;
+    const ntp_seconds = @divTrunc(timestamp, std.time.us_per_s) + constants.ntp_unix_epoch_diff;
     const ntp_fraction = @rem(timestamp, std.time.us_per_s);
     return @bitCast((ntp_seconds << 32) | ntp_fraction);
 }

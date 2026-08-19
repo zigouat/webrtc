@@ -710,7 +710,12 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
 
         media_exists = true;
 
-        try tr.sender.setCodecs(pc.dtls_transport.getIo(), pc.allocator, media.rtp_codec_parameters);
+        try tr.sender.setCodecs(
+            pc.dtls_transport.getIo(),
+            pc.allocator,
+            media.rtp_codec_parameters,
+            pc.nack_config.send_buffer_size,
+        );
         tr.receiver.setCodecs(media.rtp_codec_parameters);
 
         tr.sender.setHeaderExtensions(media.rtp_header_extensions);
@@ -812,7 +817,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
             const remote_codecs = media.rtp_codec_parameters;
             const codecs = try utils.intersectCodecs(remote_codecs, local_codecs);
 
-            try transceiver.sender.setCodecs(io, pc.allocator, codecs.@"0");
+            try transceiver.sender.setCodecs(io, pc.allocator, codecs.@"0", pc.nack_config.send_buffer_size);
             transceiver.receiver.setCodecs(codecs.@"1");
 
             const local_extensions = local_sdp.getMedias()[idx].rtp_header_extensions;
@@ -1037,7 +1042,10 @@ fn startRtpRtcpInterceptors(pc: *PeerConnection, renegotiation: bool) !void {
         if (tr.receiver.nack) {
             nack = true;
             if (pc.nack_generator == null) {
-                pc.nack_generator = .init(pc.allocator, .{});
+                pc.nack_generator = .init(pc.allocator, .{
+                    .size = pc.nack_config.receive_log_size,
+                    .interval = pc.nack_config.interval,
+                });
                 try pc.nack_generator.?.start(&pc.dtls_transport);
             }
         } else {
