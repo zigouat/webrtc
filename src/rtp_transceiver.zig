@@ -200,7 +200,7 @@ pub fn toSdpMediaAnswer(
 fn synthesizeRtxCodecs(allocator: std.mem.Allocator, codecs: []const webrtc.RtpCodecParameters) std.mem.Allocator.Error![]webrtc.RtpCodecParameters {
     const result = try allocator.alloc(webrtc.RtpCodecParameters, codecs.len * 2);
 
-    var used: [256]bool = @splat(false);
+    var used: [128]bool = @splat(false);
     for (codecs) |c| used[c.payload_type] = true;
 
     var next_pt: u16 = 96;

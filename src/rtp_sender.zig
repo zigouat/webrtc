@@ -122,7 +122,13 @@ pub fn setStream(sender: *RtpSender, stream: webrtc.MediaStream) void {
     if (sender.track) |*track| track.stream_id = stream.id;
 }
 
-pub fn setCodecs(sender: *RtpSender, io: std.Io, allocator: std.mem.Allocator, codecs: []const webrtc.RtpCodecParameters) !void {
+pub fn setCodecs(
+    sender: *RtpSender,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    codecs: []const webrtc.RtpCodecParameters,
+    send_buffer_size: u16,
+) !void {
     if (sender.codecs.len != 0) {
         // TODO: Handle this use case better. What if the codec is changed?
         // For now do not allow changing codecs after they have been set
@@ -138,7 +144,7 @@ pub fn setCodecs(sender: *RtpSender, io: std.Io, allocator: std.mem.Allocator, c
         const rtx_codec = webrtc.RtpCodecParameters.findRtx(codecs, chosen_codec.payload_type);
 
         if (rtx_codec != null and chosen_codec.rtcp_feedbacks.nack) {
-            sender.send_buffer = try .init(allocator, 1024, max_rtp_payload_size);
+            sender.send_buffer = try .init(allocator, send_buffer_size, max_rtp_payload_size);
             sender.rtx_config = .{
                 .payload_type = rtx_codec.?.payload_type,
                 .sequence_number = 0,
