@@ -355,6 +355,14 @@ fn newTestRtpTransceiver(io: Io, allocator: std.mem.Allocator) !*RtpTransceiver 
 const testing = std.testing;
 const rtcp = @import("rtcp");
 
+fn dummyDtlsTransport() !DtlsTransport {
+    return try DtlsTransport.init(testing.io, testing.allocator, .{
+        .on_data = undefined,
+        .on_event = undefined,
+        .ice_servers = &.{},
+    });
+}
+
 test "initFromSdpMedia" {
     var sdp_media = SDPSession.Media.empty;
     sdp_media.mid = 1;
@@ -377,7 +385,7 @@ test "initFromSdpMedia" {
 }
 
 test "toSdpMedia" {
-    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    var transport = try dummyDtlsTransport();
     defer transport.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
@@ -410,7 +418,7 @@ test "toSdpMedia" {
 }
 
 test "toSdpMediaAnswer: answer to offer" {
-    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    var transport = try dummyDtlsTransport();
     defer transport.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
@@ -445,7 +453,7 @@ test "toSdpMediaAnswer: answer to offer" {
 }
 
 test "toSdpMediaAnswer: includes rtx_ssrc when the negotiated codecs include rtx" {
-    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    var transport = try dummyDtlsTransport();
     defer transport.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
@@ -468,7 +476,7 @@ test "toSdpMediaAnswer: includes rtx_ssrc when the negotiated codecs include rtx
 }
 
 test "toSdpMediaAnswer: enable_rtx=false ignores an rtx-capable offer" {
-    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    var transport = try dummyDtlsTransport();
     defer transport.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
@@ -492,7 +500,7 @@ test "toSdpMediaAnswer: enable_rtx=false ignores an rtx-capable offer" {
 }
 
 test "toSdpMedia: includes rtx_ssrc when enable_rtx synthesizes an rtx codec" {
-    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    var transport = try dummyDtlsTransport();
     defer transport.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
@@ -513,7 +521,7 @@ test "toSdpMedia: includes rtx_ssrc when enable_rtx synthesizes an rtx codec" {
 }
 
 test "toSdpMedia: leaves rtx_ssrc unset for audio, which has no rtx codec, even with enable_rtx" {
-    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    var transport = try dummyDtlsTransport();
     defer transport.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
@@ -571,7 +579,7 @@ test "synthesizeRtxCodecs: picks the next free payload type, skipping ones alrea
 }
 
 test "toSdpMediaAnswer: negotiates header extensions, keeping the offerer's id" {
-    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    var transport = try dummyDtlsTransport();
     defer transport.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);

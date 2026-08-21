@@ -142,7 +142,7 @@ pub fn setCodecs(
         const rtx_codec = webrtc.RtpCodecParameters.findRtx(codecs, chosen_codec.payload_type);
 
         if (rtx_codec != null and chosen_codec.rtcp_feedbacks.nack) {
-            sender.send_buffer = try .init(allocator, send_buffer_size, constants.rtp_default_header_size);
+            sender.send_buffer = try .init(allocator, send_buffer_size, constants.max_rtp_payload_size);
             sender.rtx_config = .{
                 .payload_type = rtx_codec.?.payload_type,
                 .sequence_number = 0,
@@ -168,7 +168,7 @@ pub fn sendSample(sender: *RtpSender, sample: *const MediaPacket) SendError!void
     defer tr.transport.ice_agent.destroyPacket(buffer);
 
     const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[constants.rtp_default_header_size..]);
-    buffer = buffer[0 .. header_size + constants.rtp_default_header_size];
+    buffer = buffer[0 .. header_size + constants.max_rtp_payload_size];
 
     //TODO: refactor this mess
     switch (sender.packetizer) {
@@ -239,7 +239,7 @@ pub fn writeRtcpSenderReport(sender: *RtpSender, io: Io, timestamp: i64, buffer:
 
     const codec = sender.codecs[0]; // First codec is used for sending
     const ts = if (timestamp <= report.timestamp) report.timestamp else timestamp;
-    const diff: u32 = @intCast(@divTrunc((ts - report.timestamp) * codec.clock_rate, std.time.us_per_s));
+    const diff: u32 = @intCast(@divTrunc(@as(i128, (ts - report.timestamp)) * codec.clock_rate, std.time.us_per_s));
 
     const sender_report: rtcp.SenderReport = .{
         .ssrc = sender.ssrc,

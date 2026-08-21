@@ -40,7 +40,8 @@ pub fn main(init: std.process.Init) !void {
                 .video => sender,
                 .audio => audio_sender,
             };
-            try grp.concurrent(io, sendBackRtp, .{ io, track_event.receiver, s });
+            track_event.receiver.user_data = s;
+            track_event.receiver.on_track_event = sendBackRtp;
         },
         else => {},
     } else |_| {}
@@ -85,17 +86,10 @@ fn writeAnswerToStdout(io: Io, allocator: std.mem.Allocator, pc: *webrtc.PeerCon
     try stdout.interface.writeAll("\n");
 }
 
-fn sendBackRtp(io: Io, receiver: *webrtc.RtpReceiver, sender: *webrtc.RtpSender) !void {
-    while (receiver.poll(io)) |event| switch (event) {
-        .rtp => |*rtp| {
-            defer receiver.deinitEvent(&event);
-            sender.sendRtp(rtp) catch |err| switch (err) {
-                error.Canceled => return error.Canceled,
-                else => |e| std.log.err("Error while polling rtp: {}", .{e}),
-            };
-        },
-    } else |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        else => |e| std.log.err("Error while receiving rtp: {}", .{e}),
-    }
+fn sendBackRtp(userdata: ?*anyopaque, _: *webrtc.RtpReceiver, event: webrtc.RtpReceiver.TrackEvent) void {
+    const sender: *webrtc.RtpSender = @ptrCast(@alignCast(userdata.?));
+
+    sender.sendRtp(&event.rtp) catch |err| {
+        std.log.err("Error while polling rtp: {}", .{err});
+    };
 }

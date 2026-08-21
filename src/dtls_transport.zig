@@ -32,22 +32,32 @@ out_srtp_session: ?srtp.Session = null,
 timer: Timer = .empty,
 mutex: std.Io.Mutex = .init,
 
+on_data: *const fn (transport: *DtlsTransport, DataEvent) void,
+on_event: *const fn (transport: *DtlsTransport, Event) void,
+
 pub const Event = union(enum) {
     ice_connection_state: ice.ConnectionState,
     ice_candidate: ?ice.Candidate,
     ice_gathering_state: ice.GatheringState,
     dtls_connection_state: dtls.ConnectionState,
+};
+
+pub const DataEvent = union(enum) {
     rtp: []const u8,
     rtcp: []const u8,
 };
 
 pub const Config = struct {
     ice_servers: []const ice.IceServer = &.{},
+    on_data: *const fn (*DtlsTransport, DataEvent) void,
+    on_event: *const fn (*DtlsTransport, Event) void,
 };
 
 pub fn init(io: std.Io, allocator: std.mem.Allocator, config: Config) !DtlsTransport {
     var ice_agent: ice.Agent = try .init(io, allocator, .{
         .ice_servers = config.ice_servers,
+        .on_data = onIceData,
+        .on_event = onIceEvent,
     });
     errdefer ice_agent.deinit();
 
@@ -64,6 +74,8 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, config: Config) !DtlsTrans
             .on_set_timer = setDtlsTimer,
             .on_get_timer_state = getDtlsTimerState,
         }),
+        .on_data = config.on_data,
+        .on_event = config.on_event,
     };
 }
 
@@ -93,7 +105,7 @@ pub fn applyIceAttributes(transport: *DtlsTransport, media: *SDPSession.Media) !
         try transport.ice_agent.setRemoteCredentials(.{ .username = media.ice_ufrag, .password = media.ice_pwd });
 
         for (media.candidates) |candidate| {
-            if (candidate.component != 1 or candidate.transport == .tcp or std.meta.activeTag(candidate.address) == .ip6) continue;
+            if (candidate.component != 1 or candidate.transport == .tcp) continue;
             try transport.ice_agent.addRemoteCandidate(candidate);
         }
 
@@ -126,11 +138,58 @@ pub fn sendRtcp(transport: *DtlsTransport, data: []const u8) SendError!void {
     try transport.ice_agent.sendData(encrypted);
 }
 
-pub fn poll(transport: *DtlsTransport) !Event {
-    while (transport.ice_agent.poll()) |ice_event| switch (ice_event) {
-        .candidate => |candidate| return .{ .ice_candidate = candidate },
-        .connection_state => |ice_connection_state| {
-            if (ice_connection_state == .connected) {
+pub fn close(transport: *DtlsTransport) void {
+    transport.session.close();
+    transport.ice_agent.close();
+}
+
+fn onIceData(_: ?*anyopaque, ice_agent: *ice.Agent, data: []const u8) std.Io.Cancelable!void {
+    const transport: *DtlsTransport = @alignCast(@fieldParentPtr("ice_agent", ice_agent));
+    transport.handleIceData(data) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => Logger.warn("Error while handling ice message: {}", .{err}),
+    };
+}
+
+fn handleIceData(transport: *DtlsTransport, data: []const u8) !void {
+    switch (getPacketType(data)) {
+        .dtls => switch (transport.session.connection_state) {
+            .new => {},
+            else => {
+                transport.handleDtlsData(data) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    error.WantData => {},
+                    else => |e| {
+                        transport.on_event(transport, .{ .dtls_connection_state = transport.session.connection_state });
+                        return e;
+                    },
+                };
+                transport.on_event(transport, .{ .dtls_connection_state = transport.session.connection_state });
+            },
+        },
+        .rtp => {
+            if (transport.session.connection_state != .connected) return;
+            const buffer = try transport.ice_agent.createPacket();
+            defer transport.ice_agent.destroyPacket(buffer);
+            const rtp_packet = try transport.in_srtp_session.?.decryptRtp(data, buffer);
+            transport.on_data(transport, .{ .rtp = rtp_packet });
+        },
+        .rtcp => if (transport.session.connection_state == .connected) {
+            const buffer = try transport.ice_agent.createPacket();
+            defer transport.ice_agent.destroyPacket(buffer);
+            const rtcp_packet = try transport.in_srtp_session.?.decryptRtcp(data, buffer);
+            transport.on_data(transport, .{ .rtcp = rtcp_packet });
+        },
+        .unknown => Logger.debug("Received unknown packet", .{}),
+    }
+}
+
+fn onIceEvent(_: ?*anyopaque, ice_agent: *ice.Agent, event: ice.Agent.Event) std.Io.Cancelable!void {
+    const transport: *DtlsTransport = @alignCast(@fieldParentPtr("ice_agent", ice_agent));
+    switch (event) {
+        .gathering_state => |state| transport.on_event(transport, .{ .ice_gathering_state = state }),
+        .connection_state => |state| {
+            if (state == .connected) {
                 try transport.mutex.lock(transport.getIo());
                 defer transport.mutex.unlock(transport.getIo());
                 transport.session.handleData(null) catch |err| switch (err) {
@@ -138,54 +197,11 @@ pub fn poll(transport: *DtlsTransport) !Event {
                     else => |e| Logger.err("Error occurred while handling dtls message: {}", .{e}),
                 };
             }
-            return .{ .ice_connection_state = ice_connection_state };
+            transport.on_event(transport, .{ .ice_connection_state = state });
         },
-        .gathering_state => |gathering_state| return .{ .ice_gathering_state = gathering_state },
-        .data => |ice_data| {
-            defer transport.ice_agent.destroyPacket(ice_data);
-            switch (getPacketType(ice_data)) {
-                .dtls => switch (transport.session.connection_state) {
-                    .new => continue,
-                    else => {
-                        transport.handleDtlsData(ice_data) catch |err| switch (err) {
-                            error.WantData => continue,
-                            else => |e| {
-                                Logger.err("Error occurred while handling dtls message: {}", .{e});
-                                return .{ .dtls_connection_state = transport.session.connection_state };
-                            },
-                        };
-                        return .{ .dtls_connection_state = transport.session.connection_state };
-                    },
-                },
-                .rtp => {
-                    switch (transport.session.connection_state) {
-                        .connected => return .{
-                            .rtp = try transport.in_srtp_session.?.decryptRtp(
-                                ice_data,
-                                try transport.ice_agent.createPacket(),
-                            ),
-                        },
-                        else => continue,
-                    }
-                },
-                .rtcp => switch (transport.session.connection_state) {
-                    .connected => return .{
-                        .rtcp = try transport.in_srtp_session.?.decryptRtcp(
-                            ice_data,
-                            try transport.ice_agent.createPacket(),
-                        ),
-                    },
-                    else => continue,
-                },
-                .unknown => Logger.debug("Received unknown packet", .{}),
-            }
-        },
-    } else |err| return err;
-}
-
-pub fn close(transport: *DtlsTransport) void {
-    transport.session.close();
-    transport.ice_agent.close();
+        .candidate => |candidate| transport.on_event(transport, .{ .ice_candidate = candidate }),
+        else => {},
+    }
 }
 
 fn onDtlsSendData(dtls_session: *dtls.Session, data: []const u8) i32 {
