@@ -30,20 +30,13 @@ nack: bool,
 user_data: ?*anyopaque = null,
 on_track_event: ?*const fn (userdata: ?*anyopaque, receiver: *RtpReceiver, event: TrackEvent) void = null,
 
-pub fn init(allocator: std.mem.Allocator, track: webrtc.MediaStreamTrack) !RtpReceiver {
-    _ = allocator;
+pub fn init(track: webrtc.MediaStreamTrack) RtpReceiver {
     return .{
         .track = track,
         .ssrc = null,
         .stream_infos = @splat(null),
         .nack = false,
     };
-}
-
-pub fn deinit(receiver: *RtpReceiver, io: Io, allocator: std.mem.Allocator) void {
-    _ = receiver;
-    _ = io;
-    _ = allocator;
 }
 
 pub fn setCodecs(receiver: *RtpReceiver, codecs: []const webrtc.RtpCodecParameters) void {
@@ -132,14 +125,8 @@ fn testPacket(pt: u7) rtp.Packet {
     };
 }
 
-test "RtpReceiver.init" {
-    var receiver = try RtpReceiver.init(testing.allocator, .init(testing.io, .video));
-    defer receiver.deinit(testing.io, testing.allocator);
-}
-
 test "RtpReceiver.setCodecs: fill stream infos" {
-    var receiver = try RtpReceiver.init(testing.allocator, .init(testing.io, .video));
-    defer receiver.deinit(testing.io, testing.allocator);
+    var receiver = RtpReceiver.init(.init(testing.io, .video));
 
     const codecs = [_]webrtc.RtpCodecParameters{
         .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90000 },
@@ -177,8 +164,7 @@ test "RtpReceiver.setCodecs: fill stream infos" {
 }
 
 test "RtpReceiver.setCodecs: clear stream infos before filling" {
-    var receiver = try RtpReceiver.init(testing.allocator, .init(testing.io, .video));
-    defer receiver.deinit(testing.io, testing.allocator);
+    var receiver = RtpReceiver.init(.init(testing.io, .video));
 
     const codecs = [_]webrtc.RtpCodecParameters{
         .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90000 },
@@ -210,8 +196,7 @@ test "RtpReceiver.setCodecs: clear stream infos before filling" {
 }
 
 test "RtpReceiver.handleRtpPacket: handle rtx packets" {
-    var receiver = try RtpReceiver.init(testing.allocator, .init(testing.io, .video));
-    defer receiver.deinit(testing.io, testing.allocator);
+    var receiver = RtpReceiver.init(.init(testing.io, .video));
 
     receiver.stream_infos[96] = .{ .packet_type = .media, .apt = 0 };
     receiver.stream_infos[97] = .{ .packet_type = .rtx, .apt = 96 };
@@ -239,9 +224,7 @@ test "RtpReceiver.handleRtpPacket: handle rtx packets" {
 }
 
 test "RtpReceiver.handleRtpPacket: ignore packets with unknown payload type" {
-    var receiver = try RtpReceiver.init(testing.allocator, .init(testing.io, .video));
-    defer receiver.deinit(testing.io, testing.allocator);
-
+    var receiver = RtpReceiver.init(.init(testing.io, .video));
     receiver.stream_infos[96] = .{ .packet_type = .media, .apt = 0 };
 
     var packet = testPacket(104);

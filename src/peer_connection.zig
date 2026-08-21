@@ -288,10 +288,10 @@ pub fn addTransceiverFromKind(
         .kind = kind,
         .direction = init_config.direction,
         .sender = .init(null),
-        .receiver = try .init(pc.allocator, .init(io, kind)),
+        .receiver = webrtc.RtpReceiver.init(.init(io, kind)),
         .transport = &pc.dtls_transport,
     };
-    errdefer tr.receiver.deinit(io, pc.allocator);
+    errdefer tr.deinit(io, pc.allocator);
 
     if (init_config.stream_id) |stream_id| {
         const stream = try getOrAddStream(pc, stream_id);
@@ -479,7 +479,7 @@ fn initTransceiverFromTrack(
         .kind = track.kind,
         .direction = .sendrecv,
         .sender = .init(track),
-        .receiver = try webrtc.RtpReceiver.init(pc.allocator, track),
+        .receiver = webrtc.RtpReceiver.init(track),
         .added_by_add_track = added_by_add_track,
         .transport = &pc.dtls_transport,
     };
