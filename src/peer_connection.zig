@@ -291,7 +291,6 @@ pub fn addTransceiverFromKind(
         .receiver = webrtc.RtpReceiver.init(.init(io, kind)),
         .transport = &pc.dtls_transport,
     };
-    errdefer tr.deinit(io, pc.allocator);
 
     if (init_config.stream_id) |stream_id| {
         const stream = try getOrAddStream(pc, stream_id);
