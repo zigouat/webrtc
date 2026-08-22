@@ -32,7 +32,14 @@ pub fn main(init: std.process.Init) !void {
         else => |e| return e,
     };
 
-    pc = try .init(io, allocator, .{});
+    var media_engine = webrtc.MediaEngine.init(.{});
+    try media_engine.registerCodec(allocator, .video, .{
+        .mime_type = webrtc.MediaEngine.MimeType.VP8,
+        .clock_rate = 90_000,
+    });
+    defer media_engine.deinit(allocator);
+
+    pc = try .init(io, allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
     const sender = try pc.addTrack(.initWithId("video-track", .video), "video-stream");

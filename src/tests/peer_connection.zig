@@ -9,15 +9,27 @@ const PCEvent = @typeInfo(PeerConnection.Event).@"union".tag_type.?;
 const io = testing.io;
 const allocator = testing.allocator;
 
+fn testMediaEngine(enable_rtx: bool) !webrtc.MediaEngine {
+    var engine: webrtc.MediaEngine = .init(.{ .enable_rtx = enable_rtx });
+    try engine.registerDefaultCodecs(testing.allocator);
+    return engine;
+}
+
 test "init" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 }
 
 test "addTransceiverFromKind: no leak on allocation failure" {
     try std.testing.checkAllAllocationFailures(testing.allocator, struct {
         fn run(alloc: std.mem.Allocator) !void {
-            var pc = try PeerConnection.init(io, alloc, .{});
+            var media_engine = try testMediaEngine(false);
+            defer media_engine.deinit(testing.allocator);
+
+            var pc = try PeerConnection.init(io, alloc, .{ .media_engine = &media_engine });
             defer pc.deinit();
             _ = try pc.addTransceiverFromKind(.video, .{ .direction = .sendrecv, .stream_id = "stream" });
         }
@@ -25,7 +37,10 @@ test "addTransceiverFromKind: no leak on allocation failure" {
 }
 
 test "setLocalDescription: set offer" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
     const offer = try pc.createOffer();
@@ -43,7 +58,10 @@ test "setLocalDescription: set offer" {
 }
 
 test "setLocalDescription: set offer multiple times" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
     var offer = try pc.createOffer();
@@ -57,7 +75,10 @@ test "setLocalDescription: set offer multiple times" {
 }
 
 test "setLocalDescription: invalid state" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
     try testing.expectError(error.NotImplemented, pc.setLocalDescription(.{ .type = .pranswer, .sdp = "" }));
@@ -74,7 +95,10 @@ test "setLocalDescription: invalid state" {
 }
 
 test "setRemoteDescription: set offer" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
     const offer =
@@ -106,7 +130,10 @@ test "setRemoteDescription: set offer" {
 }
 
 test "setRemoteDescription: set offer - do not reject bundle only m-lines" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
     const offer =
@@ -153,7 +180,10 @@ test "setRemoteDescription: set offer - do not reject bundle only m-lines" {
 }
 
 test "setRemoteDescription: set offer - data channel media does not create a transceiver" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
     const offer =
@@ -193,7 +223,10 @@ test "setRemoteDescription: set offer - data channel media does not create a tra
 }
 
 test "setRemoteDescription: invalid state" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
     try testing.expectError(error.NotImplemented, pc.setRemoteDescription(.{ .type = .pranswer, .sdp = "" }));
@@ -213,7 +246,10 @@ test "setRemoteDescription: invalid state" {
 }
 
 test "addTrack" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
     const track: webrtc.MediaStreamTrack = .init(testing.io, .video);
@@ -232,7 +268,10 @@ test "addTrack" {
 }
 
 test "removeTrack" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
     const sender = try pc.addTrack(.initWithId("track1", .video), null);
@@ -247,7 +286,10 @@ test "removeTrack" {
 
 test "addTransceiver" {
     {
-        var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+        var media_engine = try testMediaEngine(false);
+        defer media_engine.deinit(testing.allocator);
+
+        var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
         defer pc.deinit();
 
         const track: webrtc.MediaStreamTrack = .initWithId("track1", .video);
@@ -274,8 +316,11 @@ test "addTransceiver" {
     }
 
     {
+        var media_engine = try testMediaEngine(false);
+        defer media_engine.deinit(testing.allocator);
+
         var failing_alloc = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 7 });
-        var pc = try PeerConnection.init(testing.io, failing_alloc.allocator(), .{});
+        var pc = try PeerConnection.init(testing.io, failing_alloc.allocator(), .{ .media_engine = &media_engine });
         defer pc.deinit();
 
         try std.testing.expectError(error.OutOfMemory, pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly }));
@@ -283,7 +328,10 @@ test "addTransceiver" {
 }
 
 test "stopTransceiver" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
     const tr = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
@@ -294,7 +342,10 @@ test "stopTransceiver" {
 }
 
 test "createOffer: empty offer" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
     const offer = try pc.createOffer();
@@ -305,7 +356,10 @@ test "createOffer: empty offer" {
 }
 
 test "createOffer: m-lines created for each transceiver" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
     _ = try pc.addTrack(.initWithId("video", .video), null);
@@ -329,9 +383,10 @@ test "createOffer: m-lines created for each transceiver" {
 }
 
 test "createOffer: enable_rtx synthesizes rtx codecs for video only" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{
-        .peer_config = .{ .nack_config = .{ .enable_rtx = true } },
-    });
+    var media_engine = try testMediaEngine(true);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
     _ = try pc.addTrack(.initWithId("video", .video), null);
@@ -356,7 +411,10 @@ test "createOffer: enable_rtx synthesizes rtx codecs for video only" {
 }
 
 test "createOffer: enable_rtx defaults to false, never emits rtx codecs" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
     _ = try pc.addTrack(.initWithId("video", .video), null);
@@ -371,7 +429,10 @@ test "createOffer: enable_rtx defaults to false, never emits rtx codecs" {
 }
 
 test "createOffer: stopped non-associted transceiver is ignored" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
     const tr = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
@@ -389,7 +450,10 @@ test "createOffer: stopped non-associted transceiver is ignored" {
 }
 
 test "createOffer: multiple offers" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
     _ = try pc.addTrack(.initWithId("video", .video), null);
@@ -420,10 +484,13 @@ test "createOffer: multiple offers" {
 }
 
 test "createAnswer: answer to offer" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
-    var pc2 = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var pc2 = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc2.deinit();
 
     _ = try pc.addTrack(.initWithId("video", .video), null);
@@ -445,10 +512,13 @@ test "createAnswer: answer to offer" {
 }
 
 test "createAnswer: reject media in offer" {
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
-    var pc2 = try PeerConnection.init(testing.io, testing.allocator, .{});
+    var pc2 = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
     defer pc2.deinit();
 
     _ = try pc.addTrack(.initWithId("video", .video), null);
@@ -472,10 +542,13 @@ test "createAnswer: reject media in offer" {
 }
 
 test "negotiation between peers" {
-    var pc1: PeerConnection = try .init(io, allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc1: PeerConnection = try .init(io, allocator, .{ .media_engine = &media_engine });
     defer pc1.deinit();
 
-    var pc2: PeerConnection = try .init(io, allocator, .{});
+    var pc2: PeerConnection = try .init(io, allocator, .{ .media_engine = &media_engine });
     defer pc2.deinit();
 
     const sender1 = try pc1.addTrack(.initWithId("track-1", .video), "stream-1");
@@ -500,10 +573,13 @@ test "negotiation between peers" {
 }
 
 test "negotiation between peers: add/remove tracks" {
-    var pc1: PeerConnection = try .init(io, allocator, .{});
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var pc1: PeerConnection = try .init(io, allocator, .{ .media_engine = &media_engine });
     defer pc1.deinit();
 
-    var pc2: PeerConnection = try .init(io, allocator, .{});
+    var pc2: PeerConnection = try .init(io, allocator, .{ .media_engine = &media_engine });
     defer pc2.deinit();
 
     var pc1_collector: EventCollector = .init();

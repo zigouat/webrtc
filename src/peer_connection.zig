@@ -100,6 +100,8 @@ pub const Config = struct {
     rtc_configuration: RTCConfiguration = .{},
     /// This is the internal configuration for the PeerConnection, which defines a set of parameters to configure the PeerConnection.
     peer_config: PeerConfiguration = .{},
+    /// The media engine used to advertise and negotiate codecs. Owned by the caller.
+    media_engine: *webrtc.MediaEngine,
 };
 
 allocator: std.mem.Allocator,
@@ -121,6 +123,8 @@ demuxer: Demuxer,
 
 /// Used as a counter for generating mid values for transceivers.
 mid: u16 = 0,
+
+media_engine: *webrtc.MediaEngine,
 
 // RTP/RTCP interceptors
 nack_config: NackConfig,
@@ -190,6 +194,7 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
         .queue_buffer = queue_buffer,
         .queue = .init(queue_buffer),
         .nack_config = config.peer_config.nack_config,
+        .media_engine = config.media_engine,
     };
 }
 
@@ -351,7 +356,7 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
             break :blk cloned;
         } else blk: {
             const tr = pc.findTransceiverByMid(media.mid) orelse return error.NotExistingTransceiver;
-            break :blk try tr.toSdpMediaAnswer(pc.allocator, media, pc.nack_config);
+            break :blk try tr.toSdpMediaAnswer(pc.allocator, media, pc.media_engine);
         };
     }
 
@@ -519,7 +524,7 @@ fn createFirstOffer(pc: *PeerConnection) !webrtc.SessionDescription {
         const media = try medias.addOne(pc.allocator);
         media.* = .empty;
 
-        media.* = try tr.toSdpMedia(pc.allocator, pc.nack_config);
+        media.* = try tr.toSdpMedia(pc.allocator, pc.media_engine);
         media.mid = try Mid.fromInt(mid);
 
         tr.sdp_mline_index = @intCast(medias.items.len - 1);
@@ -574,7 +579,7 @@ fn createSubsequentOffer(pc: *PeerConnection) !webrtc.SessionDescription {
             tr.sdp_mline_index = @intCast(sdp_session.medias.items.len - 1);
             break :blk media;
         };
-        media.* = try tr.toSdpMedia(pc.allocator, pc.nack_config);
+        media.* = try tr.toSdpMedia(pc.allocator, pc.media_engine);
         media.mid = try Mid.fromInt(pc.mid);
         pc.mid +%= 1;
     };
