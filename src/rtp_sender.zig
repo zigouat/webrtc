@@ -133,6 +133,8 @@ pub fn setCodecs(
         return;
     }
 
+    const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
+
     sender.codecs = codecs;
     sender.packetizer = .none;
 
@@ -141,8 +143,8 @@ pub fn setCodecs(
         sender.packetizer = .init(io, sender.ssrc, chosen_codec);
         const rtx_codec = webrtc.RtpCodecParameters.findRtx(codecs, chosen_codec.payload_type);
 
-        if (rtx_codec != null and chosen_codec.rtcp_feedbacks.nack) {
-            sender.send_buffer = try .init(allocator, send_buffer_size, constants.max_rtp_payload_size);
+        if (tr.canSend() and rtx_codec != null and chosen_codec.rtcp_feedbacks.nack) {
+            sender.send_buffer = try .init(allocator, send_buffer_size, constants.max_packet_size);
             sender.rtx_config = .{
                 .payload_type = rtx_codec.?.payload_type,
                 .sequence_number = 0,

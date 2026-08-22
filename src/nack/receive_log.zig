@@ -64,7 +64,7 @@ pub fn add(self: *ReceiveLog, seq: u16) void {
         return;
     }
 
-    const diff = @as(i16, @bitCast(seq)) - @as(i16, @bitCast(self.end));
+    const diff = @as(i16, @bitCast(seq)) -% @as(i16, @bitCast(self.end));
     if (diff == 0) return;
     if (diff > 0) {
         @branchHint(.likely);
