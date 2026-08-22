@@ -18,8 +18,8 @@ pub fn getCodecIntersection(allocator: std.mem.Allocator, a: []const RtpCodec, b
             if (codec_b.eql(&codec_a)) {
                 var new_codec_a = codec_a;
                 var new_codec_b = codec_b;
-                new_codec_a.rtcp_feedbacks = webrtc.RtcpFeedbacks.intersect(codec_a.rtcp_feedbacks, codec_b.rtcp_feedbacks);
-                new_codec_b.rtcp_feedbacks = new_codec_a.rtcp_feedbacks;
+                new_codec_a.rtp_codec.rtcp_feedbacks = webrtc.RtcpFeedbacks.intersect(codec_a.rtp_codec.rtcp_feedbacks, codec_b.rtp_codec.rtcp_feedbacks);
+                new_codec_b.rtp_codec.rtcp_feedbacks = new_codec_a.rtp_codec.rtcp_feedbacks;
 
                 try result_a.append(allocator, new_codec_a);
                 try result_b.append(allocator, new_codec_b);
@@ -28,7 +28,7 @@ pub fn getCodecIntersection(allocator: std.mem.Allocator, a: []const RtpCodec, b
     };
 
     for (b) |codec_b| if (codec_b.isRtx()) {
-        const apt = codec_b.fmtp_params.?.rtx.apt;
+        const apt = codec_b.rtp_codec.fmtp_params.?.rtx.apt;
         const maybe_index = blk: {
             for (result_b.items, 0..) |codec, idx| if (codec.payload_type == apt) break :blk idx;
             break :blk null;
@@ -37,11 +37,11 @@ pub fn getCodecIntersection(allocator: std.mem.Allocator, a: []const RtpCodec, b
         if (maybe_index == null) continue;
 
         const src_apt = result_a.items[maybe_index.?].payload_type;
-        for (a) |codec_a| if (codec_a.isRtx() and codec_a.fmtp_params.?.rtx.apt == src_apt) {
+        for (a) |codec_a| if (codec_a.isRtx() and codec_a.rtp_codec.fmtp_params.?.rtx.apt == src_apt) {
             var new_codec_a = codec_a;
             var new_codec_b = codec_b;
-            new_codec_a.rtcp_feedbacks = webrtc.RtcpFeedbacks.intersect(codec_a.rtcp_feedbacks, codec_b.rtcp_feedbacks);
-            new_codec_b.rtcp_feedbacks = new_codec_a.rtcp_feedbacks;
+            new_codec_a.rtp_codec.rtcp_feedbacks = webrtc.RtcpFeedbacks.intersect(codec_a.rtp_codec.rtcp_feedbacks, codec_b.rtp_codec.rtcp_feedbacks);
+            new_codec_b.rtp_codec.rtcp_feedbacks = new_codec_a.rtp_codec.rtcp_feedbacks;
 
             try result_a.append(allocator, new_codec_a);
             try result_b.append(allocator, new_codec_b);
@@ -117,7 +117,7 @@ fn swapExt(extensions: []RtpHeaderExtension, i: usize, j: usize) void {
 
 /// Index of the RTX codec whose `apt` references payload type `pt`, if any.
 fn findRtx(codecs: []const RtpCodec, pt: u8) ?usize {
-    for (codecs, 0..) |*codec, idx| if (codec.isRtx() and codec.fmtp_params.?.rtx.apt == pt) {
+    for (codecs, 0..) |*codec, idx| if (codec.isRtx() and codec.rtp_codec.fmtp_params.?.rtx.apt == pt) {
         return idx;
     };
 
@@ -151,15 +151,15 @@ fn swap(codecs: []RtpCodec, i: usize, j: usize) void {
 const testing = std.testing;
 
 fn vp8(pt: u8) RtpCodec {
-    return .{ .payload_type = pt, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000 };
+    return .{ .payload_type = pt, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000 } };
 }
 
 fn opus(pt: u8) RtpCodec {
-    return .{ .payload_type = pt, .mime_type = webrtc.MimeType.Opus, .clock_rate = 48_000, .channels = 2 };
+    return .{ .payload_type = pt, .rtp_codec = .{ .mime_type = webrtc.MimeType.Opus, .clock_rate = 48_000, .channels = 2 } };
 }
 
 fn rtx(pt: u8, apt: u8) RtpCodec {
-    return .{ .payload_type = pt, .mime_type = webrtc.MimeType.Rtx, .clock_rate = 90_000, .fmtp_params = .{ .rtx = .{ .apt = apt } } };
+    return .{ .payload_type = pt, .rtp_codec = .{ .mime_type = webrtc.MimeType.Rtx, .clock_rate = 90_000, .fmtp_params = .{ .rtx = .{ .apt = apt } } } };
 }
 
 test "getCodecIntersection: keeps matching a-side codecs, in b order" {
@@ -196,7 +196,7 @@ test "getCodecIntersection: includes the associated rtx codec" {
     try testing.expectEqual(100, result[0].payload_type);
     try testing.expect(result[1].isRtx());
     try testing.expectEqual(101, result[1].payload_type);
-    try testing.expectEqual(100, result[1].fmtp_params.?.rtx.apt);
+    try testing.expectEqual(100, result[1].rtp_codec.fmtp_params.?.rtx.apt);
 }
 
 test "intersectCodecs: aligns the matched codec on both sides" {

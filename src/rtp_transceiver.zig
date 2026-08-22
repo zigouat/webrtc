@@ -211,12 +211,14 @@ fn synthesizeRtxCodecs(allocator: std.mem.Allocator, codecs: []const webrtc.RtpC
         used[pt] = true;
 
         result[i * 2] = codec;
-        result[i * 2].rtcp_feedbacks.nack = true;
+        result[i * 2].rtp_codec.rtcp_feedbacks.nack = true;
         result[i * 2 + 1] = .{
             .payload_type = pt,
-            .mime_type = webrtc.MimeType.Rtx,
-            .clock_rate = codec.clock_rate,
-            .fmtp_params = .{ .rtx = .{ .apt = codec.payload_type } },
+            .rtp_codec = .{
+                .mime_type = webrtc.MimeType.Rtx,
+                .clock_rate = codec.rtp_codec.clock_rate,
+                .fmtp_params = .{ .rtx = .{ .apt = codec.payload_type } },
+            },
         };
     }
 
@@ -437,7 +439,7 @@ test "toSdpMediaAnswer: answer to offer" {
     offer_media.direction = .sendrecv;
     offer_media.port = constants.sdp_default_port;
     offer_media.rtp_codec_parameters = try testing.allocator.dupe(webrtc.RtpCodecParameters, webrtc.getCodecCapabilities(.video));
-    offer_media.rtp_codec_parameters[0].rtcp_feedbacks = .{ .nack = true, .nack_pli = true };
+    offer_media.rtp_codec_parameters[0].rtp_codec.rtcp_feedbacks = .{ .nack = true, .nack_pli = true };
     defer offer_media.deinit(testing.allocator);
 
     var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, .{});
@@ -450,7 +452,7 @@ test "toSdpMediaAnswer: answer to offer" {
     try testing.expect(answer_media.rtp_codec_parameters.len == offer_media.rtp_codec_parameters.len);
 
     for (answer_media.rtp_codec_parameters) |codec| {
-        try testing.expect(codec.rtcp_feedbacks == webrtc.RtcpFeedbacks{ .nack_pli = true });
+        try testing.expect(codec.rtp_codec.rtcp_feedbacks == webrtc.RtcpFeedbacks{ .nack_pli = true });
     }
 
     const ice_credentials = transport.ice_agent.localCredentials();
@@ -521,7 +523,7 @@ test "toSdpMedia: includes rtx_ssrc when enable_rtx synthesizes an rtx codec" {
 
     var saw_rtx = false;
     for (media.rtp_codec_parameters) |codec| {
-        if (codec.isRtx()) saw_rtx = true else try testing.expect(codec.rtcp_feedbacks.nack);
+        if (codec.isRtx()) saw_rtx = true else try testing.expect(codec.rtp_codec.rtcp_feedbacks.nack);
     }
     try testing.expect(saw_rtx);
 }
@@ -545,8 +547,8 @@ test "toSdpMedia: leaves rtx_ssrc unset for audio, which has no rtx codec, even 
 
 test "synthesizeRtxCodecs: adds an rtx companion with an unused payload type and enables nack" {
     const codecs = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack_pli = true } },
-        .{ .payload_type = 104, .mime_type = webrtc.MimeType.H264, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack_pli = true } },
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack_pli = true } } },
+        .{ .payload_type = 104, .rtp_codec = .{ .mime_type = webrtc.MimeType.H264, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack_pli = true } } },
     };
 
     const result = try synthesizeRtxCodecs(testing.allocator, &codecs);
@@ -555,25 +557,25 @@ test "synthesizeRtxCodecs: adds an rtx companion with an unused payload type and
     try testing.expectEqual(4, result.len);
 
     try testing.expectEqual(96, result[0].payload_type);
-    try testing.expect(result[0].rtcp_feedbacks.nack);
-    try testing.expect(result[0].rtcp_feedbacks.nack_pli);
+    try testing.expect(result[0].rtp_codec.rtcp_feedbacks.nack);
+    try testing.expect(result[0].rtp_codec.rtcp_feedbacks.nack_pli);
 
     try testing.expect(result[1].isRtx());
     try testing.expectEqual(97, result[1].payload_type);
-    try testing.expectEqual(96, result[1].fmtp_params.?.rtx.apt);
+    try testing.expectEqual(96, result[1].rtp_codec.fmtp_params.?.rtx.apt);
 
     try testing.expectEqual(104, result[2].payload_type);
-    try testing.expect(result[2].rtcp_feedbacks.nack);
+    try testing.expect(result[2].rtp_codec.rtcp_feedbacks.nack);
 
     try testing.expect(result[3].isRtx());
     try testing.expectEqual(98, result[3].payload_type);
-    try testing.expectEqual(104, result[3].fmtp_params.?.rtx.apt);
+    try testing.expectEqual(104, result[3].rtp_codec.fmtp_params.?.rtx.apt);
 }
 
 test "synthesizeRtxCodecs: picks the next free payload type, skipping ones already in use" {
     const codecs = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000 },
-        .{ .payload_type = 97, .mime_type = webrtc.MimeType.H264, .clock_rate = 90_000 },
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000 } },
+        .{ .payload_type = 97, .rtp_codec = .{ .mime_type = webrtc.MimeType.H264, .clock_rate = 90_000 } },
     };
 
     const result = try synthesizeRtxCodecs(testing.allocator, &codecs);

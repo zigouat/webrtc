@@ -7,7 +7,7 @@ const SDPSession = @This();
 const Direction = @import("rtp_transceiver.zig").Direction;
 const SDPAttribute = sdp.Attribute.ParsedAttribute;
 const Mid = @import("mid.zig");
-const RtpCodec = webrtc.RtpCodecParameters;
+const RtpCodecParameters = webrtc.RtpCodecParameters;
 
 const sdp_header =
     \\v=0
@@ -42,7 +42,7 @@ pub const Media = struct {
     kind: sdp.Media.MediaType,
     port: u16,
     bundle_only: bool,
-    rtp_codec_parameters: []RtpCodec,
+    rtp_codec_parameters: []RtpCodecParameters,
     rtp_header_extensions: []webrtc.RtpHeaderExtensionParameter,
     mid: Mid.Int,
     direction: Direction,
@@ -178,7 +178,7 @@ pub const Media = struct {
 
     pub fn clone(media: *const Media, allocator: std.mem.Allocator) !Media {
         var new_media = media.*;
-        new_media.rtp_codec_parameters = try allocator.dupe(RtpCodec, media.rtp_codec_parameters);
+        new_media.rtp_codec_parameters = try allocator.dupe(RtpCodecParameters, media.rtp_codec_parameters);
         errdefer allocator.free(new_media.rtp_codec_parameters);
         new_media.rtp_header_extensions = try allocator.dupe(webrtc.RtpHeaderExtensionParameter, media.rtp_header_extensions);
         errdefer allocator.free(new_media.rtp_header_extensions);
@@ -221,22 +221,22 @@ pub const Media = struct {
             .rtcp_mux => sdp_media.rtcp_mux = true,
             .rtcp_rsize => sdp_media.rtcp_rsize = true,
             .rtpmap => |rtpmap| {
-                const rtp_codec = findRtpCodecParameters(
+                const codec_params = findRtpCodecParameters(
                     sdp_media.rtp_codec_parameters,
                     rtpmap.payload_type,
                 ) orelse return error.InvalidRtpMap;
 
-                rtp_codec.clock_rate = rtpmap.clock_rate;
-                rtp_codec.channels = rtpmap.channels;
-                rtp_codec.mime_type = webrtc.MimeType.fromKindAndCodec(sdp_media.getKind(), rtpmap.encoding);
+                codec_params.rtp_codec.clock_rate = rtpmap.clock_rate;
+                codec_params.rtp_codec.channels = rtpmap.channels;
+                codec_params.rtp_codec.mime_type = webrtc.MimeType.fromKindAndCodec(sdp_media.getKind(), rtpmap.encoding);
             },
             .fmtp => |fmtp| {
                 const pt, const fmtp_line = fmtp;
-                const rtp_codec = findRtpCodecParameters(
+                const codec_params = findRtpCodecParameters(
                     sdp_media.rtp_codec_parameters,
                     pt,
                 ) orelse return error.InvalidFmtp;
-                rtp_codec.fmtp_params = .{ .unknown = fmtp_line };
+                codec_params.rtp_codec.fmtp_params = .{ .unknown = fmtp_line };
             },
             .fingerprint => |value| switch (value) {
                 .sha_256 => |f| @memcpy(fingerprint, &f),
@@ -264,9 +264,9 @@ pub const Media = struct {
             .rtcp_fb => |fb| {
                 const codecs = sdp_media.rtp_codec_parameters;
                 switch (fb.payload_type) {
-                    .all => for (codecs) |*codec| codec.rtcp_feedbacks.fromSdpRtcpFb(fb),
+                    .all => for (codecs) |*codec| codec.rtp_codec.rtcp_feedbacks.fromSdpRtcpFb(fb),
                     else => |pt| if (findRtpCodecParameters(codecs, @intFromEnum(pt))) |codec| {
-                        codec.rtcp_feedbacks.fromSdpRtcpFb(fb);
+                        codec.rtp_codec.rtcp_feedbacks.fromSdpRtcpFb(fb);
                     },
                 }
             },
@@ -303,52 +303,52 @@ pub const Media = struct {
         if (sdp_media.sctp_port == null) return error.SctpPortRequired;
     }
 
-    fn allocRtpCodecsParameters(allocator: std.mem.Allocator, formats: []const u8) ![]RtpCodec {
+    fn allocRtpCodecsParameters(allocator: std.mem.Allocator, formats: []const u8) ![]RtpCodecParameters {
         var count: usize = 0;
         var fmt_iterator = std.mem.tokenizeScalar(u8, formats, ' ');
         while (fmt_iterator.next()) |_| : (count += 1) {}
 
         fmt_iterator = std.mem.tokenizeScalar(u8, formats, ' ');
-        var rtp_codec_parameters = try allocator.alloc(RtpCodec, count);
+        var rtp_codec_parameters = try allocator.alloc(RtpCodecParameters, count);
         var idx: usize = 0;
         while (fmt_iterator.next()) |payload_type| {
             const pt = try std.fmt.parseInt(u7, payload_type, 10);
-            rtp_codec_parameters[idx] = .{ .payload_type = pt, .clock_rate = 0, .mime_type = &.{} };
+            rtp_codec_parameters[idx] = .{ .payload_type = pt, .rtp_codec = .{ .clock_rate = 0, .mime_type = &.{} } };
             idx += 1;
         }
 
         return rtp_codec_parameters;
     }
 
-    fn validateRtpCodecParameters(rtp_codec_parameters: []RtpCodec) !void {
-        for (rtp_codec_parameters) |*rtp_codec| {
-            if (rtp_codec.mime_type.len == 0) return error.InvalidMedia; // no rtpmap entry exists
+    fn validateRtpCodecParameters(rtp_codec_parameters: []RtpCodecParameters) !void {
+        for (rtp_codec_parameters) |*codec_params| {
+            if (codec_params.rtp_codec.mime_type.len == 0) return error.InvalidMedia; // no rtpmap entry exists
 
-            if (rtp_codec.fmtp_params) |params| try setRtpCodecParameterFmtp(rtp_codec, params.unknown);
+            if (codec_params.rtp_codec.fmtp_params) |params| try setRtpCodecParameterFmtp(codec_params, params.unknown);
 
             // Check the associated codec with this rtx
-            if (rtp_codec.isRtx()) {
-                if (rtp_codec.fmtp_params == null) return error.InvalidMedia;
-                const apt = rtp_codec.fmtp_params.?.rtx.apt;
+            if (codec_params.isRtx()) {
+                if (codec_params.rtp_codec.fmtp_params == null) return error.InvalidMedia;
+                const apt = codec_params.rtp_codec.fmtp_params.?.rtx.apt;
                 const associated_codec = findRtpCodecParameters(rtp_codec_parameters, apt);
                 if (associated_codec == null or associated_codec.?.isRtx()) return error.InvalidMedia;
             }
         }
     }
 
-    fn findRtpCodecParameters(rtp_codec_parameters: []RtpCodec, payload_type: u8) ?*RtpCodec {
-        for (rtp_codec_parameters) |*rtp_codec| if (rtp_codec.payload_type == payload_type)
-            return rtp_codec;
+    fn findRtpCodecParameters(rtp_codec_parameters: []RtpCodecParameters, payload_type: u8) ?*RtpCodecParameters {
+        for (rtp_codec_parameters) |*codec_params| if (codec_params.payload_type == payload_type)
+            return codec_params;
 
         return null;
     }
 
-    fn setRtpCodecParameterFmtp(rtp_codec: *RtpCodec, fmtp_line: []const u8) !void {
-        const codec = if (std.mem.indexOfScalar(u8, rtp_codec.mime_type, '/')) |idx|
-            rtp_codec.mime_type[idx + 1 ..]
+    fn setRtpCodecParameterFmtp(codec_params: *RtpCodecParameters, fmtp_line: []const u8) !void {
+        const codec = if (std.mem.indexOfScalar(u8, codec_params.rtp_codec.mime_type, '/')) |idx|
+            codec_params.rtp_codec.mime_type[idx + 1 ..]
         else
-            rtp_codec.mime_type;
-        rtp_codec.fmtp_params = try sdp.Attribute.Fmtp.Params.parse(fmtp_line, codec);
+            codec_params.rtp_codec.mime_type;
+        codec_params.rtp_codec.fmtp_params = try sdp.Attribute.Fmtp.Params.parse(fmtp_line, codec);
     }
 };
 

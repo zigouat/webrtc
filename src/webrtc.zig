@@ -19,22 +19,26 @@ pub const ntp_unix_epoch_diff = 2_208_988_800;
 pub const default_video_codecs = &[_]RtpCodecParameters{
     .{
         .payload_type = 96,
-        .mime_type = MimeType.VP8,
-        .clock_rate = 90_000,
-        .rtcp_feedbacks = .{ .nack_pli = true },
+        .rtp_codec = .{
+            .mime_type = MimeType.VP8,
+            .clock_rate = 90_000,
+            .rtcp_feedbacks = .{ .nack_pli = true },
+        },
     },
     .{
         .payload_type = 104,
-        .mime_type = MimeType.H264,
-        .clock_rate = 90_000,
-        .fmtp_params = .{
-            .h264 = .{
-                .profile_level_id = 0x42e01f,
-                .level_asymmetry_allowed = true,
-                .packetization_mode = 1,
+        .rtp_codec = .{
+            .mime_type = MimeType.H264,
+            .clock_rate = 90_000,
+            .fmtp_params = .{
+                .h264 = .{
+                    .profile_level_id = 0x42e01f,
+                    .level_asymmetry_allowed = true,
+                    .packetization_mode = 1,
+                },
             },
+            .rtcp_feedbacks = .{ .nack_pli = true },
         },
-        .rtcp_feedbacks = .{ .nack_pli = true },
     },
 };
 
@@ -42,9 +46,11 @@ pub const default_video_codecs = &[_]RtpCodecParameters{
 pub const default_audio_codecs = &[_]RtpCodecParameters{
     .{
         .payload_type = 111,
-        .mime_type = MimeType.Opus,
-        .clock_rate = 48_000,
-        .channels = 2,
+        .rtp_codec = .{
+            .mime_type = MimeType.Opus,
+            .clock_rate = 48_000,
+            .channels = 2,
+        },
     },
 };
 
@@ -119,42 +125,14 @@ pub const RtcpParameter = struct {
     reduced_size: bool,
 };
 
-pub const RtpCodecParameters = struct {
-    payload_type: u8,
+pub const RtpCodec = struct {
     mime_type: []const u8,
     clock_rate: u32,
     channels: ?u8 = null,
     fmtp_params: ?FmtpParams = null,
     rtcp_feedbacks: RtcpFeedbacks = RtcpFeedbacks.empty,
 
-    pub fn format(codec_params: *RtpCodecParameters, writer: *Io.Writer) !void {
-        try sdp.Attribute.ParsedAttribute.write(.{
-            .rtpmap = .{
-                .clock_rate = codec_params.clock_rate,
-                .encoding = std.mem.cut(u8, codec_params.mime_type, "/").?.@"1",
-                .payload_type = codec_params.payload_type,
-                .channels = codec_params.channels,
-            },
-        }, writer);
-
-        if (codec_params.fmtp_params) |params| {
-            try writer.print("a=fmtp:{} {f}\r\n", .{ codec_params.payload_type, params });
-        }
-
-        try codec_params.rtcp_feedbacks.writeAsSdpAttribute(codec_params.payload_type, writer);
-    }
-
-    pub fn isRtx(a: *const RtpCodecParameters) bool {
-        const codec = std.mem.cutScalar(u8, a.mime_type, '/').?.@"1";
-        return std.ascii.eqlIgnoreCase(codec, "rtx");
-    }
-
-    pub fn findRtx(codecs: []const RtpCodecParameters, payload_type: u8) ?RtpCodecParameters {
-        for (codecs) |codec| if (codec.isRtx() and codec.fmtp_params.?.rtx.apt == payload_type) return codec;
-        return null;
-    }
-
-    pub fn eql(a: *const RtpCodecParameters, b: *const RtpCodecParameters) bool {
+    pub fn eql(a: *const RtpCodec, b: *const RtpCodec) bool {
         if (!std.ascii.eqlIgnoreCase(a.mime_type, b.mime_type) or
             a.clock_rate != b.clock_rate or
             a.channels != b.channels) return false;
@@ -166,17 +144,55 @@ pub const RtpCodecParameters = struct {
         return true;
     }
 
-    pub fn isUnknown(a: *const RtpCodecParameters) bool {
-        return std.ascii.eqlIgnoreCase(a.mime_type, MimeType.video_unknown) or
-            std.ascii.eqlIgnoreCase(a.mime_type, MimeType.audio_unknown);
-    }
-
     test "eql" {
         {
-            const a: RtpCodecParameters = .{ .payload_type = 96, .mime_type = MimeType.H264, .clock_rate = 9000 };
-            const b: RtpCodecParameters = .{ .payload_type = 107, .mime_type = MimeType.H264, .clock_rate = 9000 };
+            const a: RtpCodec = .{ .mime_type = MimeType.H264, .clock_rate = 9000 };
+            const b: RtpCodec = .{ .mime_type = MimeType.H264, .clock_rate = 9000 };
             try testing.expect(a.eql(&b));
         }
+    }
+};
+
+pub const RtpCodecParameters = struct {
+    payload_type: u8,
+    rtp_codec: RtpCodec,
+
+    pub fn format(codec_params: *RtpCodecParameters, writer: *Io.Writer) !void {
+        const rtp_codec = codec_params.rtp_codec;
+
+        try sdp.Attribute.ParsedAttribute.write(.{
+            .rtpmap = .{
+                .clock_rate = rtp_codec.clock_rate,
+                .encoding = std.mem.cut(u8, rtp_codec.mime_type, "/").?.@"1",
+                .payload_type = codec_params.payload_type,
+                .channels = rtp_codec.channels,
+            },
+        }, writer);
+
+        if (rtp_codec.fmtp_params) |params| {
+            try writer.print("a=fmtp:{} {f}\r\n", .{ codec_params.payload_type, params });
+        }
+
+        try rtp_codec.rtcp_feedbacks.writeAsSdpAttribute(codec_params.payload_type, writer);
+    }
+
+    pub fn isRtx(a: *const RtpCodecParameters) bool {
+        const codec = std.mem.cutScalar(u8, a.rtp_codec.mime_type, '/').?.@"1";
+        return std.ascii.eqlIgnoreCase(codec, "rtx");
+    }
+
+    pub fn findRtx(codecs: []const RtpCodecParameters, payload_type: u8) ?RtpCodecParameters {
+        for (codecs) |codec| if (codec.isRtx() and codec.rtp_codec.fmtp_params.?.rtx.apt == payload_type) return codec;
+        return null;
+    }
+
+    pub fn eql(a: *const RtpCodecParameters, b: *const RtpCodecParameters) bool {
+        return a.rtp_codec.eql(&b.rtp_codec);
+    }
+
+    pub fn isUnknown(a: *const RtpCodecParameters) bool {
+        return std.ascii.eqlIgnoreCase(a.rtp_codec.mime_type, MimeType.video_unknown) or
+            std.ascii.eqlIgnoreCase(a.rtp_codec.mime_type, MimeType.audio_unknown);
     }
 };
 

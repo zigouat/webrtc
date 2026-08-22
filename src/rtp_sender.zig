@@ -31,11 +31,11 @@ const Packetizer = union(enum) {
         rtp_config.payload_type = @intCast(codec.payload_type);
         rtp_config.ssrc = ssrc;
 
-        if (std.mem.eql(u8, codec.mime_type, webrtc.MimeType.VP8)) {
+        if (std.mem.eql(u8, codec.rtp_codec.mime_type, webrtc.MimeType.VP8)) {
             return .{ .vp8 = .init(rtp_config) };
-        } else if (std.mem.eql(u8, codec.mime_type, webrtc.MimeType.H264)) {
+        } else if (std.mem.eql(u8, codec.rtp_codec.mime_type, webrtc.MimeType.H264)) {
             return .{ .h264 = .init(rtp_config) };
-        } else if (std.mem.eql(u8, codec.mime_type, webrtc.MimeType.Opus)) {
+        } else if (std.mem.eql(u8, codec.rtp_codec.mime_type, webrtc.MimeType.Opus)) {
             return .{ .opus = .init(rtp_config) };
         }
 
@@ -133,7 +133,7 @@ pub fn setCodecs(
     const chosen_codec = if (sender.codecs.len == 0) codecs[0] else sender.codecs[0];
     const rtx_codec = webrtc.RtpCodecParameters.findRtx(codecs, chosen_codec.payload_type);
 
-    if (tr.canSend() and rtx_codec != null and chosen_codec.rtcp_feedbacks.nack) {
+    if (tr.canSend() and rtx_codec != null and chosen_codec.rtp_codec.rtcp_feedbacks.nack) {
         if (sender.send_buffer == null) {
             sender.send_buffer = try SendBuffer.init(
                 allocator,
@@ -250,7 +250,7 @@ pub fn writeRtcpSenderReport(sender: *RtpSender, io: Io, timestamp: i64, buffer:
 
     const codec = sender.codecs[0]; // First codec is used for sending
     const ts = if (timestamp <= report.timestamp) report.timestamp else timestamp;
-    const diff: u32 = @intCast(@divTrunc(@as(i128, (ts - report.timestamp)) * codec.clock_rate, std.time.us_per_s));
+    const diff: u32 = @intCast(@divTrunc(@as(i128, (ts - report.timestamp)) * codec.rtp_codec.clock_rate, std.time.us_per_s));
 
     const sender_report: rtcp.SenderReport = .{
         .ssrc = sender.ssrc,
@@ -398,7 +398,7 @@ test "RtpSender.setCodecs: no-op when no codecs are negotiated and none were set
 test "RtpSender.setCodecs: sets codecs and initializes the packetizer for the chosen codec" {
     var tr = testTransceiver(null);
     const codecs = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000 },
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000 } },
     };
 
     try tr.sender.setCodecs(testing.io, testing.allocator, &codecs, 16);
@@ -411,7 +411,7 @@ test "RtpSender.setCodecs: sets codecs and initializes the packetizer for the ch
 test "RtpSender.setCodecs: unknown mime type leaves the packetizer as none" {
     var tr = testTransceiver(null);
     const codecs = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 96, .mime_type = "video/unknown", .clock_rate = 90_000 },
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = "video/unknown", .clock_rate = 90_000 } },
     };
 
     try tr.sender.setCodecs(testing.io, testing.allocator, &codecs, 16);
@@ -424,8 +424,8 @@ test "RtpSender.setCodecs: enables the send buffer when the transceiver can send
     defer tr.sender.deinit(testing.allocator);
 
     const codecs = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } },
-        .{ .payload_type = 97, .mime_type = webrtc.MimeType.Rtx, .clock_rate = 90_000, .fmtp_params = .{ .rtx = .{ .apt = 96 } } },
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } } },
+        .{ .payload_type = 97, .rtp_codec = .{ .mime_type = webrtc.MimeType.Rtx, .clock_rate = 90_000, .fmtp_params = .{ .rtx = .{ .apt = 96 } } } },
     };
 
     try tr.sender.setCodecs(testing.io, testing.allocator, &codecs, 16);
@@ -438,8 +438,8 @@ test "RtpSender.setCodecs: leaves the send buffer disabled when the transceiver 
     defer tr.sender.deinit(testing.allocator);
 
     const codecs = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } },
-        .{ .payload_type = 97, .mime_type = webrtc.MimeType.Rtx, .clock_rate = 90_000, .fmtp_params = .{ .rtx = .{ .apt = 96 } } },
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } } },
+        .{ .payload_type = 97, .rtp_codec = .{ .mime_type = webrtc.MimeType.Rtx, .clock_rate = 90_000, .fmtp_params = .{ .rtx = .{ .apt = 96 } } } },
     };
 
     try tr.sender.setCodecs(testing.io, testing.allocator, &codecs, 16);
@@ -449,11 +449,11 @@ test "RtpSender.setCodecs: leaves the send buffer disabled when the transceiver 
 
 test "RtpSender.setCodecs: leaves the send buffer disabled unless both rtx and nack are negotiated" {
     const with_nack_no_rtx = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } },
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } } },
     };
     const with_rtx_no_nack = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000 },
-        .{ .payload_type = 97, .mime_type = webrtc.MimeType.Rtx, .clock_rate = 90_000, .fmtp_params = .{ .rtx = .{ .apt = 96 } } },
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000 } },
+        .{ .payload_type = 97, .rtp_codec = .{ .mime_type = webrtc.MimeType.Rtx, .clock_rate = 90_000, .fmtp_params = .{ .rtx = .{ .apt = 96 } } } },
     };
 
     for (&[_][]const webrtc.RtpCodecParameters{ &with_nack_no_rtx, &with_rtx_no_nack }) |codecs| {
@@ -470,10 +470,10 @@ test "RtpSender.setCodecs: ignores the codec list on subsequent calls, keeping t
     var tr = testTransceiver(null);
 
     const first = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000 },
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000 } },
     };
     const second = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 111, .mime_type = webrtc.MimeType.Opus, .clock_rate = 48_000 },
+        .{ .payload_type = 111, .rtp_codec = .{ .mime_type = webrtc.MimeType.Opus, .clock_rate = 48_000 } },
     };
 
     try tr.sender.setCodecs(testing.io, testing.allocator, &first, 16);
@@ -489,11 +489,11 @@ test "RtpSender.setCodecs: tears down the send buffer when renegotiation drops r
     defer tr.sender.deinit(testing.allocator);
 
     const with_rtx = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } },
-        .{ .payload_type = 97, .mime_type = webrtc.MimeType.Rtx, .clock_rate = 90_000, .fmtp_params = .{ .rtx = .{ .apt = 96 } } },
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } } },
+        .{ .payload_type = 97, .rtp_codec = .{ .mime_type = webrtc.MimeType.Rtx, .clock_rate = 90_000, .fmtp_params = .{ .rtx = .{ .apt = 96 } } } },
     };
     const without_rtx = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } },
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } } },
     };
 
     try tr.sender.setCodecs(testing.io, testing.allocator, &with_rtx, 16);
