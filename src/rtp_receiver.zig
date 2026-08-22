@@ -6,6 +6,7 @@ const rtcp = @import("rtcp");
 const Io = std.Io;
 const RtpReceiver = @This();
 const DtlsTransport = @import("dtls_transport.zig");
+const Callback = *const fn (userdata: ?*anyopaque, receiver: *RtpReceiver, event: TrackEvent) void;
 
 const queue_size: usize = 16;
 
@@ -28,7 +29,7 @@ ssrc: ?u32,
 nack: bool,
 
 user_data: ?*anyopaque = null,
-on_track_event: ?*const fn (userdata: ?*anyopaque, receiver: *RtpReceiver, event: TrackEvent) void = null,
+on_track_event: ?Callback = null,
 
 pub fn init(track: webrtc.MediaStreamTrack) RtpReceiver {
     return .{
@@ -51,18 +52,6 @@ pub fn setCodecs(receiver: *RtpReceiver, codecs: []const webrtc.RtpCodecParamete
         };
 
         receiver.nack |= codec.rtcp_feedbacks.nack;
-    }
-}
-
-/// Deinitializes the event and frees any resources associated with it.
-pub fn deinitEvent(receiver: *RtpReceiver, event: *const TrackEvent) void {
-    const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("receiver", receiver));
-    switch (event.*) {
-        .rtp => |rtp_packet| {
-            const header_size = rtp_packet.size() - rtp_packet.payload.len;
-            const beg = rtp_packet.payload.ptr - header_size;
-            tr.transport.ice_agent.destroyPacket(beg[0..1]);
-        },
     }
 }
 
@@ -106,6 +95,11 @@ pub fn sendPli(receiver: *RtpReceiver) DtlsTransport.SendError!void {
 
     const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("receiver", receiver));
     try tr.transport.sendRtcp(&buffer);
+}
+
+pub fn registerCallback(receiver: *RtpReceiver, userdata: ?*anyopaque, callback: Callback) void {
+    receiver.user_data = userdata;
+    receiver.on_track_event = callback;
 }
 
 const testing = std.testing;

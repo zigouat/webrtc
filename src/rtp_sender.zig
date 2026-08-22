@@ -387,7 +387,7 @@ fn testTransceiver(current_direction: ?RtpTransceiver.Direction) RtpTransceiver 
     };
 }
 
-test "setCodecs: no-op when no codecs are negotiated and none were set" {
+test "RtpSender.setCodecs: no-op when no codecs are negotiated and none were set" {
     var sender = RtpSender.init(null);
     try sender.setCodecs(testing.io, testing.allocator, &.{}, 16);
 
@@ -395,7 +395,7 @@ test "setCodecs: no-op when no codecs are negotiated and none were set" {
     try testing.expect(sender.send_buffer == null);
 }
 
-test "setCodecs: sets codecs and initializes the packetizer for the chosen codec" {
+test "RtpSender.setCodecs: sets codecs and initializes the packetizer for the chosen codec" {
     var tr = testTransceiver(null);
     const codecs = [_]webrtc.RtpCodecParameters{
         .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000 },
@@ -408,7 +408,7 @@ test "setCodecs: sets codecs and initializes the packetizer for the chosen codec
     try testing.expectEqual(.vp8, std.meta.activeTag(tr.sender.packetizer));
 }
 
-test "setCodecs: unknown mime type leaves the packetizer as none" {
+test "RtpSender.setCodecs: unknown mime type leaves the packetizer as none" {
     var tr = testTransceiver(null);
     const codecs = [_]webrtc.RtpCodecParameters{
         .{ .payload_type = 96, .mime_type = "video/unknown", .clock_rate = 90_000 },
@@ -419,7 +419,7 @@ test "setCodecs: unknown mime type leaves the packetizer as none" {
     try testing.expectEqual(.none, std.meta.activeTag(tr.sender.packetizer));
 }
 
-test "setCodecs: enables the send buffer when the transceiver can send and rtx+nack are negotiated" {
+test "RtpSender.setCodecs: enables the send buffer when the transceiver can send and rtx+nack are negotiated" {
     var tr = testTransceiver(.sendrecv);
     defer tr.sender.deinit(testing.allocator);
 
@@ -433,7 +433,7 @@ test "setCodecs: enables the send buffer when the transceiver can send and rtx+n
     try testing.expect(tr.sender.send_buffer != null);
 }
 
-test "setCodecs: leaves the send buffer disabled when the transceiver cannot send" {
+test "RtpSender.setCodecs: leaves the send buffer disabled when the transceiver cannot send" {
     var tr = testTransceiver(.recvonly);
     defer tr.sender.deinit(testing.allocator);
 
@@ -447,7 +447,7 @@ test "setCodecs: leaves the send buffer disabled when the transceiver cannot sen
     try testing.expect(tr.sender.send_buffer == null);
 }
 
-test "setCodecs: leaves the send buffer disabled unless both rtx and nack are negotiated" {
+test "RtpSender.setCodecs: leaves the send buffer disabled unless both rtx and nack are negotiated" {
     const with_nack_no_rtx = [_]webrtc.RtpCodecParameters{
         .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } },
     };
@@ -466,7 +466,7 @@ test "setCodecs: leaves the send buffer disabled unless both rtx and nack are ne
     }
 }
 
-test "setCodecs: ignores the codec list on subsequent calls, keeping the first negotiated codecs" {
+test "RtpSender.setCodecs: ignores the codec list on subsequent calls, keeping the first negotiated codecs" {
     var tr = testTransceiver(null);
 
     const first = [_]webrtc.RtpCodecParameters{
@@ -484,7 +484,7 @@ test "setCodecs: ignores the codec list on subsequent calls, keeping the first n
     try testing.expectEqual(.vp8, std.meta.activeTag(tr.sender.packetizer));
 }
 
-test "setCodecs: tears down the send buffer when renegotiation drops rtx support" {
+test "RtpSender.setCodecs: tears down the send buffer when renegotiation drops rtx support" {
     var tr = testTransceiver(.sendrecv);
     defer tr.sender.deinit(testing.allocator);
 
@@ -503,7 +503,7 @@ test "setCodecs: tears down the send buffer when renegotiation drops rtx support
     try testing.expect(tr.sender.send_buffer == null);
 }
 
-test "setHeaderExtensions: picks the mid extension id, ignores others" {
+test "RtpSender.setHeaderExtensions: picks the mid extension id, ignores others" {
     var sender = RtpSender.init(null);
     sender.setHeaderExtensions(&.{
         .{ .id = 9, .uri = "some-other-uri" },
@@ -513,21 +513,21 @@ test "setHeaderExtensions: picks the mid extension id, ignores others" {
     try testing.expectEqual(3, sender.header_extensions.mid);
 }
 
-test "setHeaderExtensions: no mid extension leaves it unset" {
+test "RtpSender.setHeaderExtensions: no mid extension leaves it unset" {
     var sender = RtpSender.init(null);
     sender.setHeaderExtensions(&.{.{ .id = 9, .uri = "some-other-uri" }});
 
     try testing.expectEqual(0, sender.header_extensions.mid);
 }
 
-test "writeHeaderExtensions: not negotiated writes nothing" {
+test "RtpSender.writeHeaderExtensions: not negotiated writes nothing" {
     var sender = RtpSender.init(null);
     var buffer: [64]u8 = undefined;
 
     try testing.expectEqual(0, try sender.writeHeaderExtensions(try Mid.fromInt(1), &buffer));
 }
 
-test "writeHeaderExtensions: writes a one-byte mid extension" {
+test "RtpSender.writeHeaderExtensions: writes a one-byte mid extension" {
     var sender = RtpSender.init(null);
     sender.header_extensions.mid = 3;
 
@@ -538,7 +538,7 @@ test "writeHeaderExtensions: writes a one-byte mid extension" {
     try testing.expectEqualSlices(u8, &expected, buffer[0..len]);
 }
 
-test "record packets" {
+test "RtpSender: record packets" {
     var report: Report = .empty;
     const payload = "hello";
     var packet: rtp.Packet = .{
@@ -584,7 +584,7 @@ test "record packets" {
     try testing.expectEqual(payload.len * 3, report.octet_count);
 }
 
-test "convert microseconds to ntp" {
+test "RtpSender: convert microseconds to ntp" {
     {
         const ntp = microsecondsToNtp(1782228674132465);
         try testing.expectEqual(0xEDE52542, ntp >> 32);

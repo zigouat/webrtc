@@ -228,10 +228,7 @@ fn pollPublisher(io: Io, pc: *webrtc.PeerConnection, ctx: *Context, gathering_do
             }
         },
         .gathering_state => |state| if (state == .complete) gathering_done.set(io),
-        .track_event_init => |track_event| {
-            track_event.receiver.user_data = ctx;
-            track_event.receiver.on_track_event = receivePublishedData;
-        },
+        .track_event_init => |track_event| track_event.receiver.registerCallback(ctx, receivePublishedData),
         else => {},
     } else |err| switch (err) {
         error.Canceled => return error.Canceled,

@@ -40,8 +40,7 @@ pub fn main(init: std.process.Init) !void {
                 .video => sender,
                 .audio => audio_sender,
             };
-            track_event.receiver.user_data = s;
-            track_event.receiver.on_track_event = sendBackRtp;
+            track_event.receiver.registerCallback(s, sendBackRtp);
         },
         else => {},
     } else |_| {}
