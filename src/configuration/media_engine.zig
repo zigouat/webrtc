@@ -59,7 +59,7 @@ pub const supported_video_codecs = &[_]RtpCodecParameters{
         .rtp_codec = .{
             .mime_type = MimeType.VP8,
             .clock_rate = 90_000,
-            .rtcp_feedbacks = .{ .nack_pli = true },
+            .rtcp_feedbacks = .{ .nack = true, .nack_pli = true },
         },
     },
     .{
@@ -74,7 +74,7 @@ pub const supported_video_codecs = &[_]RtpCodecParameters{
                     .packetization_mode = 1,
                 },
             },
-            .rtcp_feedbacks = .{ .nack_pli = true },
+            .rtcp_feedbacks = .{ .nack = true, .nack_pli = true },
         },
     },
 };
@@ -111,6 +111,13 @@ pub fn init(config: Config) MediaEngine {
 pub fn deinit(self: *MediaEngine, allocator: std.mem.Allocator) void {
     self.video_codecs.deinit(allocator);
     self.audio_codecs.deinit(allocator);
+}
+
+pub fn getCodecs(self: *const MediaEngine, kind: TrackKind) []const RtpCodecParameters {
+    return switch (kind) {
+        .video => self.video_codecs.items,
+        .audio => self.audio_codecs.items,
+    };
 }
 
 /// Registers a new codec.

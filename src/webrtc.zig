@@ -14,47 +14,6 @@ const testing = std.testing;
 
 pub const ntp_unix_epoch_diff = 2_208_988_800;
 
-/// Default video codecs used for sending and receiving video tracks.
-///
-/// This can be overridden by the user to only include the codecs they want to support.
-pub const default_video_codecs = &[_]RtpCodecParameters{
-    .{
-        .payload_type = 96,
-        .rtp_codec = .{
-            .mime_type = MimeType.VP8,
-            .clock_rate = 90_000,
-            .rtcp_feedbacks = .{ .nack_pli = true },
-        },
-    },
-    .{
-        .payload_type = 104,
-        .rtp_codec = .{
-            .mime_type = MimeType.H264,
-            .clock_rate = 90_000,
-            .fmtp_params = .{
-                .h264 = .{
-                    .profile_level_id = 0x42e01f,
-                    .level_asymmetry_allowed = true,
-                    .packetization_mode = 1,
-                },
-            },
-            .rtcp_feedbacks = .{ .nack_pli = true },
-        },
-    },
-};
-
-/// Default audio codecs used for sending and receiving audio tracks.
-pub const default_audio_codecs = &[_]RtpCodecParameters{
-    .{
-        .payload_type = 111,
-        .rtp_codec = .{
-            .mime_type = MimeType.Opus,
-            .clock_rate = 48_000,
-            .channels = 2,
-        },
-    },
-};
-
 pub const MimeType = MediaEngine.MimeType;
 
 pub const mid_extension_uri = "urn:ietf:params:rtp-hdrext:sdes:mid";
@@ -378,13 +337,6 @@ pub const RtcpFeedbacks = packed struct(u8) {
         try testing.expectEqualStrings("", w.buffered());
     }
 };
-
-pub fn getCodecCapabilities(kind: TrackKind) []const RtpCodecParameters {
-    return switch (kind) {
-        .audio => default_audio_codecs,
-        .video => default_video_codecs,
-    };
-}
 
 pub fn getHeaderExtensionCapabilities(kind: TrackKind) []const RtpHeaderExtensionParameter {
     return switch (kind) {
