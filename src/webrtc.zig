@@ -3,6 +3,7 @@ pub const SDPSession = @import("sdp_session.zig");
 pub const RtpTransceiver = @import("rtp_transceiver.zig");
 pub const RtpSender = @import("rtp_sender.zig");
 pub const RtpReceiver = @import("rtp_receiver.zig");
+pub const MediaEngine = @import("configuration/media_engine.zig");
 
 const std = @import("std");
 const sdp = @import("sdp");
@@ -54,51 +55,7 @@ pub const default_audio_codecs = &[_]RtpCodecParameters{
     },
 };
 
-pub const MimeType = struct {
-    pub const H264 = "video/H264";
-    pub const H265 = "video/H265";
-    pub const VP8 = "video/VP8";
-    pub const VP9 = "video/VP9";
-    pub const AV1 = "video/AV1";
-    pub const Rtx = "video/rtx";
-    pub const Ulpfec = "video/ulpfec";
-    pub const Red = "video/red";
-    pub const video_unknown = "video/unknown";
-    pub const Opus = "audio/Opus";
-    pub const G722 = "audio/G722";
-    pub const PCMU = "audio/PCMU";
-    pub const PCMA = "audio/PCMA";
-    pub const audio_unknown = "audio/unknown";
-
-    pub fn fromKindAndCodec(kind: TrackKind, codec: []const u8) []const u8 {
-        switch (kind) {
-            .video => return if (std.ascii.eqlIgnoreCase(codec, "h264"))
-                H264
-            else if (std.ascii.eqlIgnoreCase(codec, "h265"))
-                H265
-            else if (std.ascii.eqlIgnoreCase(codec, "rtx"))
-                Rtx
-            else if (std.ascii.eqlIgnoreCase(codec, "vp8"))
-                VP8
-            else if (std.ascii.eqlIgnoreCase(codec, "vp9"))
-                VP9
-            else if (std.ascii.eqlIgnoreCase(codec, "av1"))
-                AV1
-            else
-                video_unknown,
-            .audio => return if (std.ascii.eqlIgnoreCase(codec, "opus"))
-                Opus
-            else if (std.ascii.eqlIgnoreCase(codec, "g722"))
-                G722
-            else if (std.ascii.eqlIgnoreCase(codec, "pcmu"))
-                PCMU
-            else if (std.ascii.eqlIgnoreCase(codec, "pcma"))
-                PCMA
-            else
-                audio_unknown,
-        }
-    }
-};
+pub const MimeType = MediaEngine.MimeType;
 
 pub const mid_extension_uri = "urn:ietf:params:rtp-hdrext:sdes:mid";
 
