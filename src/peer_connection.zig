@@ -1021,7 +1021,7 @@ fn startRtpRtcpInterceptors(pc: *PeerConnection, renegotiation: bool) !void {
     defer pc.mutex.unlock(io);
 
     for (pc.getTransceivers()) |tr| {
-        if (tr.receiver.nack) {
+        if (tr.canReceive() and tr.receiver.nack) {
             nack = true;
             if (pc.nack_generator == null) {
                 pc.nack_generator = .init(pc.allocator, .{

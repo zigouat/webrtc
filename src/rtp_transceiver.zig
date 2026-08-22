@@ -285,6 +285,12 @@ pub fn canSend(tr: *const RtpTransceiver) bool {
     return false;
 }
 
+pub fn canReceive(tr: *const RtpTransceiver) bool {
+    if (tr.isStopped()) return false;
+    if (tr.current_direction) |direction| return direction == .sendrecv or direction == .recvonly;
+    return false;
+}
+
 pub fn processRemoteTrack(tr: *RtpTransceiver, direction: Direction, msid: ?MediaStream) ?TrackEventInit {
     tr.receiver.track.stream_id = if (msid) |m| m.id else null;
 
