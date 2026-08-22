@@ -29,13 +29,17 @@ pub fn main(init: std.process.Init) !void {
 
     try grp.concurrent(io, startHttpServer, .{ io, allocator });
 
+    var media_engine = webrtc.MediaEngine.init(.{});
+    try media_engine.registerDefaultCodecs(allocator);
+    defer media_engine.deinit(allocator);
+
     // start publisher
     const pc = blk: {
         const offer = try queue.getOne(io);
         defer offer.deinit();
 
         var pc = try allocator.create(webrtc.PeerConnection);
-        pc.* = try .init(io, allocator, .{});
+        pc.* = try .init(io, allocator, .{ .media_engine = &media_engine });
         errdefer {
             pc.deinit();
             allocator.destroy(pc);
@@ -83,7 +87,7 @@ pub fn main(init: std.process.Init) !void {
         defer offer.deinit();
 
         const pc2 = try allocator.create(webrtc.PeerConnection);
-        pc2.* = try .init(io, allocator, .{});
+        pc2.* = try .init(io, allocator, .{ .media_engine = &media_engine });
         errdefer {
             pc2.deinit();
             allocator.destroy(pc2);

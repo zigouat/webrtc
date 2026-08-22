@@ -7,11 +7,16 @@ pub const std_options = std.Options{ .log_level = .info };
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
+    const allocator = init.gpa;
 
     var grp: Io.Group = .init;
     defer grp.cancel(io);
 
-    var pc = try webrtc.PeerConnection.init(io, init.gpa, .{});
+    var media_engine = webrtc.MediaEngine.init(.{});
+    try media_engine.registerDefaultCodecs(allocator);
+    defer media_engine.deinit(allocator);
+
+    var pc = try webrtc.PeerConnection.init(io, allocator, .{ .media_engine = &media_engine });
     defer pc.deinit();
 
     const sender = try pc.addTrack(.initWithId("video", .video), "my-stream");

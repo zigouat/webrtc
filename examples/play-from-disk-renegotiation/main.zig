@@ -141,9 +141,17 @@ pub fn main(init: std.process.Init) !void {
     _ = arg_iterator.next();
     const file_path = arg_iterator.next().?;
 
+    var media_engine = webrtc.MediaEngine.init(.{});
+    try media_engine.registerCodec(allocator, .video, .{
+        .mime_type = webrtc.MediaEngine.MimeType.VP8,
+        .clock_rate = 90_000,
+    });
+    defer media_engine.deinit(allocator);
+
     app_state = .{
         .file_path = file_path,
         .pc = try webrtc.PeerConnection.init(io, allocator, .{
+            .media_engine = &media_engine,
             .rtc_configuration = .{
                 .ice_servers = &.{.{ .url = "stun:stun.l.google.com:19302" }},
             },
