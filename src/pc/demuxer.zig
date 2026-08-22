@@ -117,9 +117,9 @@ fn testSdpSession(alloc: std.mem.Allocator) !SDPSession {
     medias[0].mid = mid_1;
     medias[0].ssrc = 0x10101010;
     medias[0].rtx_ssrc = 0x30303030;
-    media1_params[0] = .{ .payload_type = 96, .clock_rate = 90000, .mime_type = "video/h264" };
-    media1_params[1] = .{ .payload_type = 97, .clock_rate = 90000, .mime_type = "video/rtx" };
-    media1_params[2] = .{ .payload_type = 98, .clock_rate = 90000, .mime_type = "video/vp8" };
+    media1_params[0] = .{ .payload_type = 96, .rtp_codec = .{ .clock_rate = 90000, .mime_type = "video/h264" } };
+    media1_params[1] = .{ .payload_type = 97, .rtp_codec = .{ .clock_rate = 90000, .mime_type = "video/rtx" } };
+    media1_params[2] = .{ .payload_type = 98, .rtp_codec = .{ .clock_rate = 90000, .mime_type = "video/vp8" } };
 
     medias[0].rtp_header_extensions = try alloc.dupe(webrtc.RtpHeaderExtensionParameter, &.{
         .{ .id = mid_ext_id, .uri = webrtc.mid_extension_uri },
@@ -128,17 +128,17 @@ fn testSdpSession(alloc: std.mem.Allocator) !SDPSession {
     var media2_params = try alloc.alloc(RtpCodecParameters, 3);
     medias[1].rtp_codec_parameters = media2_params;
     medias[1].mid = mid_2;
-    media2_params[0] = .{ .payload_type = 98, .clock_rate = 90000, .mime_type = "video/h264" };
-    media2_params[1] = .{ .payload_type = 99, .clock_rate = 90000, .mime_type = "video/rtx" };
-    media2_params[2] = .{ .payload_type = 100, .clock_rate = 90000, .mime_type = "video/vp9" };
+    media2_params[0] = .{ .payload_type = 98, .rtp_codec = .{ .clock_rate = 90000, .mime_type = "video/h264" } };
+    media2_params[1] = .{ .payload_type = 99, .rtp_codec = .{ .clock_rate = 90000, .mime_type = "video/rtx" } };
+    media2_params[2] = .{ .payload_type = 100, .rtp_codec = .{ .clock_rate = 90000, .mime_type = "video/vp9" } };
 
     var media3_params = try alloc.alloc(RtpCodecParameters, 3);
     medias[2].rtp_codec_parameters = media3_params;
     medias[2].mid = mid_3;
     medias[2].ssrc = 0x20202020;
-    media3_params[0] = .{ .payload_type = 96, .clock_rate = 90000, .mime_type = "video/h265" };
-    media3_params[1] = .{ .payload_type = 105, .clock_rate = 90000, .mime_type = "video/rtx" };
-    media3_params[2] = .{ .payload_type = 106, .clock_rate = 90000, .mime_type = "video/av1" };
+    media3_params[0] = .{ .payload_type = 96, .rtp_codec = .{ .clock_rate = 90000, .mime_type = "video/h265" } };
+    media3_params[1] = .{ .payload_type = 105, .rtp_codec = .{ .clock_rate = 90000, .mime_type = "video/rtx" } };
+    media3_params[2] = .{ .payload_type = 106, .rtp_codec = .{ .clock_rate = 90000, .mime_type = "video/av1" } };
 
     return session;
 }

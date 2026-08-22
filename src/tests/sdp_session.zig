@@ -268,14 +268,16 @@ test "parse: sdp offer" {
     const expected_audio_codecs = [_]webrtc.RtpCodecParameters{
         .{
             .payload_type = 111,
-            .mime_type = webrtc.MimeType.Opus,
-            .clock_rate = 48000,
-            .channels = 2,
-            .fmtp_params = .{ .unknown = "minptime=10;useinbandfec=1" },
+            .rtp_codec = .{
+                .mime_type = webrtc.MimeType.Opus,
+                .clock_rate = 48000,
+                .channels = 2,
+                .fmtp_params = .{ .unknown = "minptime=10;useinbandfec=1" },
+            },
         },
-        .{ .payload_type = 9, .mime_type = webrtc.MimeType.G722, .clock_rate = 8000 },
-        .{ .payload_type = 0, .mime_type = webrtc.MimeType.PCMU, .clock_rate = 8000 },
-        .{ .payload_type = 8, .mime_type = webrtc.MimeType.PCMA, .clock_rate = 8000 },
+        .{ .payload_type = 9, .rtp_codec = .{ .mime_type = webrtc.MimeType.G722, .clock_rate = 8000 } },
+        .{ .payload_type = 0, .rtp_codec = .{ .mime_type = webrtc.MimeType.PCMU, .clock_rate = 8000 } },
+        .{ .payload_type = 8, .rtp_codec = .{ .mime_type = webrtc.MimeType.PCMA, .clock_rate = 8000 } },
     };
 
     for (&expected_audio_codecs, audio_codecs) |*expected, *codec| {
@@ -290,7 +292,7 @@ test "parse: sdp offer" {
             .ccm_fir = false,
             .goog_remb = false,
             ._pad = 0,
-        }, codec.rtcp_feedbacks);
+        }, codec.rtp_codec.rtcp_feedbacks);
     }
 
     try testing.expectEqual(1, audio_media.rtp_header_extensions.len);
@@ -328,7 +330,7 @@ test "parse: sdp offer" {
     try testing.expectEqual(24, video_codecs.len);
 
     const expected_codecs = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90000, .fmtp_params = null },
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90000, .fmtp_params = null } },
         rtx(97, 96),
         h264(104, true, 1, 0x42001f),
         rtx(103, 102),
@@ -342,13 +344,13 @@ test "parse: sdp offer" {
         rtx(125, 127),
         h264(39, true, 0, 0x4d001f),
         rtx(40, 39),
-        .{ .payload_type = 116, .mime_type = webrtc.MimeType.H265, .clock_rate = 90000, .fmtp_params = null },
+        .{ .payload_type = 116, .rtp_codec = .{ .mime_type = webrtc.MimeType.H265, .clock_rate = 90000, .fmtp_params = null } },
         rtx(117, 116),
-        .{ .payload_type = 45, .mime_type = webrtc.MimeType.AV1, .clock_rate = 90000, .fmtp_params = null },
+        .{ .payload_type = 45, .rtp_codec = .{ .mime_type = webrtc.MimeType.AV1, .clock_rate = 90000, .fmtp_params = null } },
         rtx(46, 45),
-        .{ .payload_type = 98, .mime_type = webrtc.MimeType.VP9, .clock_rate = 90000, .fmtp_params = .{ .unknown = "profile-id=0" } },
+        .{ .payload_type = 98, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP9, .clock_rate = 90000, .fmtp_params = .{ .unknown = "profile-id=0" } } },
         rtx(99, 98),
-        .{ .payload_type = 100, .mime_type = webrtc.MimeType.VP9, .clock_rate = 90000, .fmtp_params = .{ .unknown = "profile-id=2" } },
+        .{ .payload_type = 100, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP9, .clock_rate = 90000, .fmtp_params = .{ .unknown = "profile-id=2" } } },
         rtx(101, 100),
         h264(112, true, 1, 0x64001f),
         rtx(113, 112),
@@ -363,7 +365,7 @@ test "parse: sdp offer" {
             .{ .nack = true, .nack_pli = true, .transport_cc = true, .ccm_fir = false, .goog_remb = false, ._pad = 0 }
         else
             .{ .nack = true, .nack_pli = true, .transport_cc = true, .ccm_fir = true, .goog_remb = true, ._pad = 0 };
-        try testing.expectEqual(expected_fb, codec.rtcp_feedbacks);
+        try testing.expectEqual(expected_fb, codec.rtp_codec.rtcp_feedbacks);
     }
 
     const hdr_extensions = video_media.rtp_header_extensions;
@@ -520,17 +522,19 @@ test "write: media" {
 
     var codecs = [_]webrtc.RtpCodecParameters{.{
         .payload_type = 111,
-        .mime_type = webrtc.MimeType.Opus,
-        .clock_rate = 48000,
-        .channels = 2,
-        .fmtp_params = .{ .unknown = "minptime=10;useinbandfec=1" },
-        .rtcp_feedbacks = .{
-            .nack = false,
-            .nack_pli = false,
-            .transport_cc = true,
-            .ccm_fir = false,
-            .goog_remb = false,
-            ._pad = 0,
+        .rtp_codec = .{
+            .mime_type = webrtc.MimeType.Opus,
+            .clock_rate = 48000,
+            .channels = 2,
+            .fmtp_params = .{ .unknown = "minptime=10;useinbandfec=1" },
+            .rtcp_feedbacks = .{
+                .nack = false,
+                .nack_pli = false,
+                .transport_cc = true,
+                .ccm_fir = false,
+                .goog_remb = false,
+                ._pad = 0,
+            },
         },
     }};
     media.rtp_codec_parameters = &codecs;
@@ -672,7 +676,7 @@ test "write: session round-trip" {
         try testing.expectEqual(orig.rtp_codec_parameters.len, new.rtp_codec_parameters.len);
         for (orig.rtp_codec_parameters, new.rtp_codec_parameters) |*o, *n| {
             try testing.expect(o.eql(n));
-            try testing.expectEqual(o.rtcp_feedbacks, n.rtcp_feedbacks);
+            try testing.expectEqual(o.rtp_codec.rtcp_feedbacks, n.rtp_codec.rtcp_feedbacks);
         }
 
         try testing.expectEqual(orig.rtp_header_extensions.len, new.rtp_header_extensions.len);
@@ -686,17 +690,21 @@ test "write: session round-trip" {
 fn rtx(pt: u8, apt: u8) webrtc.RtpCodecParameters {
     return .{
         .payload_type = pt,
-        .mime_type = webrtc.MimeType.Rtx,
-        .clock_rate = 90000,
-        .fmtp_params = .{ .rtx = .{ .apt = apt } },
+        .rtp_codec = .{
+            .mime_type = webrtc.MimeType.Rtx,
+            .clock_rate = 90000,
+            .fmtp_params = .{ .rtx = .{ .apt = apt } },
+        },
     };
 }
 
 fn h264(pt: u8, level_asym: bool, pm: u8, profile: u24) webrtc.RtpCodecParameters {
     return .{
         .payload_type = pt,
-        .mime_type = webrtc.MimeType.H264,
-        .clock_rate = 90000,
-        .fmtp_params = .{ .h264 = .{ .level_asymmetry_allowed = level_asym, .packetization_mode = pm, .profile_level_id = profile } },
+        .rtp_codec = .{
+            .mime_type = webrtc.MimeType.H264,
+            .clock_rate = 90000,
+            .fmtp_params = .{ .h264 = .{ .level_asymmetry_allowed = level_asym, .packetization_mode = pm, .profile_level_id = profile } },
+        },
     };
 }

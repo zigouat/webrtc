@@ -95,7 +95,7 @@ const AppState = struct {
         const video_stream = &ivf_reader.stream;
 
         const start_timestamp = Io.Clock.now(.awake, io).toMilliseconds();
-        const clock_rate = sender.codecs[0].clock_rate;
+        const clock_rate = sender.codecs[0].rtp_codec.clock_rate;
         const time_base = video_stream.time_base;
 
         var curr_packet = try ivf_reader.next(allocator);

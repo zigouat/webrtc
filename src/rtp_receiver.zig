@@ -48,10 +48,10 @@ pub fn setCodecs(receiver: *RtpReceiver, codecs: []const webrtc.RtpCodecParamete
     for (receiver.codecs) |*codec| {
         receiver.stream_infos[codec.payload_type] = .{
             .packet_type = if (codec.isRtx()) .rtx else .media,
-            .apt = if (codec.isRtx()) @intCast(codec.fmtp_params.?.rtx.apt) else 0,
+            .apt = if (codec.isRtx()) @intCast(codec.rtp_codec.fmtp_params.?.rtx.apt) else 0,
         };
 
-        receiver.nack |= codec.rtcp_feedbacks.nack;
+        receiver.nack |= codec.rtp_codec.rtcp_feedbacks.nack;
     }
 }
 
@@ -123,13 +123,15 @@ test "RtpReceiver.setCodecs: fill stream infos" {
     var receiver = RtpReceiver.init(.init(testing.io, .video));
 
     const codecs = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90000 },
-        .{ .payload_type = 104, .mime_type = webrtc.MimeType.H264, .clock_rate = 90000 },
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90000 } },
+        .{ .payload_type = 104, .rtp_codec = .{ .mime_type = webrtc.MimeType.H264, .clock_rate = 90000 } },
         .{
             .payload_type = 97,
-            .mime_type = webrtc.MimeType.Rtx,
-            .clock_rate = 90000,
-            .fmtp_params = .{ .rtx = .{ .apt = 96 } },
+            .rtp_codec = .{
+                .mime_type = webrtc.MimeType.Rtx,
+                .clock_rate = 90000,
+                .fmtp_params = .{ .rtx = .{ .apt = 96 } },
+            },
         },
     };
 
@@ -161,13 +163,15 @@ test "RtpReceiver.setCodecs: clear stream infos before filling" {
     var receiver = RtpReceiver.init(.init(testing.io, .video));
 
     const codecs = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90000 },
-        .{ .payload_type = 104, .mime_type = webrtc.MimeType.H264, .clock_rate = 90000 },
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90000 } },
+        .{ .payload_type = 104, .rtp_codec = .{ .mime_type = webrtc.MimeType.H264, .clock_rate = 90000 } },
         .{
             .payload_type = 97,
-            .mime_type = webrtc.MimeType.Rtx,
-            .clock_rate = 90000,
-            .fmtp_params = .{ .rtx = .{ .apt = 96 } },
+            .rtp_codec = .{
+                .mime_type = webrtc.MimeType.Rtx,
+                .clock_rate = 90000,
+                .fmtp_params = .{ .rtx = .{ .apt = 96 } },
+            },
         },
     };
 

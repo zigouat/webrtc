@@ -348,7 +348,7 @@ test "createOffer: enable_rtx synthesizes rtx codecs for video only" {
             if (codec.isRtx()) {
                 saw_rtx = true;
             } else if (media.kind == .video) {
-                try testing.expect(codec.rtcp_feedbacks.nack);
+                try testing.expect(codec.rtp_codec.rtcp_feedbacks.nack);
             }
         }
         try testing.expectEqual(media.kind == .video, saw_rtx);
