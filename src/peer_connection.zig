@@ -174,6 +174,8 @@ const ParsedSessionDescription = struct {
 pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnection {
     var dtls_transport: DtlsTransport = try .init(io, allocator, .{
         .ice_servers = config.rtc_configuration.ice_servers,
+        .on_event = onDtlsEvent,
+        .on_data = onDtlsData,
     });
     errdefer dtls_transport.deinit();
 
@@ -286,10 +288,9 @@ pub fn addTransceiverFromKind(
         .kind = kind,
         .direction = init_config.direction,
         .sender = .init(null),
-        .receiver = try .init(pc.allocator, .init(io, kind)),
+        .receiver = webrtc.RtpReceiver.init(.init(io, kind)),
         .transport = &pc.dtls_transport,
     };
-    errdefer tr.receiver.deinit(io, pc.allocator);
 
     if (init_config.stream_id) |stream_id| {
         const stream = try getOrAddStream(pc, stream_id);
@@ -439,12 +440,10 @@ pub fn writeLocalDescription(pc: *PeerConnection, w: *Io.Writer) !void {
 }
 
 pub fn poll(pc: *PeerConnection) !Event {
-    try pc.checkNotClosed();
     const io = pc.dtls_transport.getIo();
     while (pc.queue.getOne(io)) |event| switch (event) {
         .connection_state => |state| switch (state) {
             .closed => {
-                pc.queue.close(io);
                 pc.group.cancel(io);
                 return event;
             },
@@ -479,7 +478,7 @@ fn initTransceiverFromTrack(
         .kind = track.kind,
         .direction = .sendrecv,
         .sender = .init(track),
-        .receiver = try webrtc.RtpReceiver.init(pc.allocator, track),
+        .receiver = webrtc.RtpReceiver.init(track),
         .added_by_add_track = added_by_add_track,
         .transport = &pc.dtls_transport,
     };
@@ -681,7 +680,6 @@ fn applyLocalOffer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescript
     }
 
     if (pc.dtls_transport.ice_agent.gatheringState() == .new) {
-        try pc.group.concurrent(pc.dtls_transport.getIo(), pollTransportWrapper, .{pc});
         try pc.dtls_transport.gatherCandidates(pc.last_offer.getIceRole());
     }
 
@@ -727,7 +725,6 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
 
     // if there's no negotiated media, don't start connectivity checks
     if (media_exists and !renegotiation) {
-        try pc.group.concurrent(pc.dtls_transport.getIo(), pollTransportWrapper, .{pc});
         try pc.dtls_transport.gatherCandidates(pc.last_answer.getIceRole());
     }
 
@@ -905,42 +902,37 @@ fn findTransceiverByMid(pc: *PeerConnection, mid: Mid.Int) ?*RtpTransceiver {
     return null;
 }
 
-fn pollTransportWrapper(pc: *PeerConnection) !void {
-    pc.pollTransport() catch |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        else => std.log.err("Failed to poll transport event: {}", .{err}),
-    };
-}
-
-fn pollTransport(pc: *PeerConnection) !void {
+fn onDtlsEvent(dtls_transport: *DtlsTransport, event: DtlsTransport.Event) void {
+    const pc: *PeerConnection = @fieldParentPtr("dtls_transport", dtls_transport);
     const io = pc.dtls_transport.getIo();
 
-    while (pc.dtls_transport.poll()) |event| switch (event) {
+    switch (event) {
         .ice_candidate => |candidate| if (candidate) |c| Logger.debug("candidate:{f}", .{c}),
         .ice_connection_state, .dtls_connection_state => {
             const ice_state, const dtls_state = pc.dtls_transport.getConnectionState();
             const new_state = nextPeerConnectionState(ice_state, dtls_state);
             if (new_state != pc.connection_state) {
                 pc.connection_state = new_state;
-                try pc.queue.putOne(io, .{ .connection_state = new_state });
+                pc.queue.putOne(io, .{ .connection_state = new_state }) catch {};
                 if (pc.connection_state == .closed) {
                     pc.signaling_state = .closed;
-                    return;
+                    pc.queue.close(io);
                 }
             }
         },
-        .ice_gathering_state => |state| try pc.queue.putOne(io, .{ .gathering_state = state }),
-        .rtcp => |data| pc.handleRtcpData(data) catch |err| {
-            Logger.warn("Failed to handle RTCP data: {}", .{err});
-        },
-        .rtp => |data| pc.handleRtpData(data) catch |err| {
-            Logger.warn("Failed to handle RTP data: {}", .{err});
-        },
-    } else |err| return err;
+        .ice_gathering_state => |state| pc.queue.putOne(io, .{ .gathering_state = state }) catch {},
+    }
+}
+
+fn onDtlsData(dtls_transport: *DtlsTransport, data_event: DtlsTransport.DataEvent) void {
+    const pc: *PeerConnection = @fieldParentPtr("dtls_transport", dtls_transport);
+    switch (data_event) {
+        .rtp => |data| pc.handleRtpData(data) catch {},
+        .rtcp => |data| pc.handleRtcpData(data) catch {},
+    }
 }
 
 fn handleRtcpData(pc: *PeerConnection, data: []const u8) !void {
-    defer pc.dtls_transport.ice_agent.destroyPacket(data);
     var it = rtcp.CompoundPacketIterator.init(data);
     while (try it.next()) |packet| switch (packet.payload) {
         .nack => |nack| if (pc.findSenderBySsrc(nack.media_ssrc)) |sender| try sender.handleNack(nack),
@@ -950,26 +942,16 @@ fn handleRtcpData(pc: *PeerConnection, data: []const u8) !void {
 
 fn handleRtpData(pc: *PeerConnection, data: []const u8) !void {
     const io = pc.dtls_transport.getIo();
-
-    errdefer pc.dtls_transport.ice_agent.destroyPacket(data);
     var packet = try rtp.Packet.parse(data);
 
-    const mid = try pc.demuxer.getMid(io, &packet) orelse {
-        pc.dtls_transport.ice_agent.destroyPacket(data);
-        return;
-    };
+    const mid = try pc.demuxer.getMid(io, &packet) orelse return;
+    const tr = pc.findTransceiverByMid(mid) orelse return;
 
-    const tr = pc.findTransceiverByMid(mid) orelse {
-        pc.dtls_transport.ice_agent.destroyPacket(data);
-        return;
-    };
-
-    if (try tr.receiver.handleRtpPacket(pc.dtls_transport.getIo(), &packet)) {
+    if (try tr.receiver.handleRtpPacket(&packet)) {
         if (tr.receiver.nack) if (pc.nack_generator) |*nack_generator| {
-            // Packet is already delivered
-            nack_generator.handleRtpPacket(io, &packet) catch return;
+            try nack_generator.handleRtpPacket(io, &packet);
         };
-    } else pc.dtls_transport.ice_agent.destroyPacket(data);
+    }
 }
 
 fn findSenderBySsrc(pc: *PeerConnection, ssrc: u32) ?*RtpSender {
@@ -1039,7 +1021,7 @@ fn startRtpRtcpInterceptors(pc: *PeerConnection, renegotiation: bool) !void {
     defer pc.mutex.unlock(io);
 
     for (pc.getTransceivers()) |tr| {
-        if (tr.receiver.nack) {
+        if (tr.canReceive() and tr.receiver.nack) {
             nack = true;
             if (pc.nack_generator == null) {
                 pc.nack_generator = .init(pc.allocator, .{

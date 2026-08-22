@@ -24,27 +24,19 @@ codecs: []const webrtc.RtpCodecParameters = &.{},
 stream_infos: [128]?StreamInfo,
 header_extensions: []const webrtc.RtpHeaderExtensionParameter = &.{},
 ssrc: ?u32,
-queue: Io.Queue(TrackEvent),
-queue_buffer: []TrackEvent,
 //Whether nack is configured for this receiver.
 nack: bool,
 
-pub fn init(allocator: std.mem.Allocator, track: webrtc.MediaStreamTrack) !RtpReceiver {
-    const queue_buffer = try allocator.alloc(TrackEvent, queue_size);
+user_data: ?*anyopaque = null,
+on_track_event: ?*const fn (userdata: ?*anyopaque, receiver: *RtpReceiver, event: TrackEvent) void = null,
 
+pub fn init(track: webrtc.MediaStreamTrack) RtpReceiver {
     return .{
         .track = track,
-        .queue = Io.Queue(TrackEvent).init(queue_buffer),
-        .queue_buffer = queue_buffer,
         .ssrc = null,
         .stream_infos = @splat(null),
         .nack = false,
     };
-}
-
-pub fn deinit(receiver: *RtpReceiver, io: Io, allocator: std.mem.Allocator) void {
-    receiver.queue.close(io);
-    allocator.free(receiver.queue_buffer);
 }
 
 pub fn setCodecs(receiver: *RtpReceiver, codecs: []const webrtc.RtpCodecParameters) void {
@@ -62,10 +54,6 @@ pub fn setCodecs(receiver: *RtpReceiver, codecs: []const webrtc.RtpCodecParamete
     }
 }
 
-pub fn poll(receiver: *RtpReceiver, io: Io) !TrackEvent {
-    return receiver.queue.getOne(io);
-}
-
 /// Deinitializes the event and frees any resources associated with it.
 pub fn deinitEvent(receiver: *RtpReceiver, event: *const TrackEvent) void {
     const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("receiver", receiver));
@@ -78,7 +66,7 @@ pub fn deinitEvent(receiver: *RtpReceiver, event: *const TrackEvent) void {
     }
 }
 
-pub fn handleRtpPacket(receiver: *RtpReceiver, io: Io, packet: *rtp.Packet) !bool {
+pub fn handleRtpPacket(receiver: *RtpReceiver, packet: *rtp.Packet) !bool {
     const stream_info = receiver.stream_infos[packet.header.payload_type] orelse return false;
     if (stream_info.packet_type == .rtx) {
         @branchHint(.unlikely);
@@ -100,7 +88,11 @@ pub fn handleRtpPacket(receiver: *RtpReceiver, io: Io, packet: *rtp.Packet) !boo
         receiver.ssrc = packet.header.ssrc;
     }
 
-    try receiver.queue.putOne(io, .{ .rtp = packet.* });
+    if (receiver.on_track_event) |callback| {
+        @branchHint(.likely);
+        callback(receiver.user_data, receiver, .{ .rtp = packet.* });
+    }
+
     return true;
 }
 
@@ -133,29 +125,8 @@ fn testPacket(pt: u7) rtp.Packet {
     };
 }
 
-test "RtpReceiver.init" {
-    var receiver = try RtpReceiver.init(testing.allocator, .init(testing.io, .video));
-    defer receiver.deinit(testing.io, testing.allocator);
-}
-
-test "RtpReceiver.poll" {
-    var receiver = try RtpReceiver.init(testing.allocator, .init(testing.io, .video));
-    defer receiver.deinit(testing.io, testing.allocator);
-
-    receiver.setCodecs(&.{.{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90000 }});
-
-    var packet = testPacket(96);
-    try testing.expect(try receiver.handleRtpPacket(testing.io, &packet));
-    const event = try receiver.poll(testing.io);
-    try testing.expectEqual(.rtp, std.meta.activeTag(event));
-    try testing.expectEqual(packet.header.ssrc, event.rtp.header.ssrc);
-
-    try testing.expectEqual(receiver.ssrc.?, packet.header.ssrc);
-}
-
 test "RtpReceiver.setCodecs: fill stream infos" {
-    var receiver = try RtpReceiver.init(testing.allocator, .init(testing.io, .video));
-    defer receiver.deinit(testing.io, testing.allocator);
+    var receiver = RtpReceiver.init(.init(testing.io, .video));
 
     const codecs = [_]webrtc.RtpCodecParameters{
         .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90000 },
@@ -193,8 +164,7 @@ test "RtpReceiver.setCodecs: fill stream infos" {
 }
 
 test "RtpReceiver.setCodecs: clear stream infos before filling" {
-    var receiver = try RtpReceiver.init(testing.allocator, .init(testing.io, .video));
-    defer receiver.deinit(testing.io, testing.allocator);
+    var receiver = RtpReceiver.init(.init(testing.io, .video));
 
     const codecs = [_]webrtc.RtpCodecParameters{
         .{ .payload_type = 96, .mime_type = webrtc.MimeType.VP8, .clock_rate = 90000 },
@@ -226,53 +196,37 @@ test "RtpReceiver.setCodecs: clear stream infos before filling" {
 }
 
 test "RtpReceiver.handleRtpPacket: handle rtx packets" {
-    var receiver = try RtpReceiver.init(testing.allocator, .init(testing.io, .video));
-    defer receiver.deinit(testing.io, testing.allocator);
+    var receiver = RtpReceiver.init(.init(testing.io, .video));
 
     receiver.stream_infos[96] = .{ .packet_type = .media, .apt = 0 };
     receiver.stream_infos[97] = .{ .packet_type = .rtx, .apt = 96 };
 
-    var events: [1]TrackEvent = undefined;
-
     // Ignore rtx packets when ssrc is not yet known (no rtp packet is received yet)
     var rtx_packet = testPacket(97);
-    try testing.expect(!(try receiver.handleRtpPacket(testing.io, &rtx_packet)));
-
-    var received = try receiver.queue.get(testing.io, &events, 0);
-    try testing.expectEqual(0, received);
+    try testing.expect(!(try receiver.handleRtpPacket(&rtx_packet)));
 
     var packet = testPacket(96);
     packet.header.sequence_number = 1000;
     packet.header.ssrc = 0xDEADDEAD;
-    try testing.expect(try receiver.handleRtpPacket(testing.io, &packet));
-
-    received = try receiver.queue.get(testing.io, &events, 0);
-    try testing.expectEqual(1, received);
+    try testing.expect(try receiver.handleRtpPacket(&packet));
 
     var payload: [10]u8 = undefined;
     std.mem.writeInt(u16, payload[0..2], 1001, .big);
     @memcpy(payload[2..], "ZIGLANG-");
     rtx_packet.payload = payload[0..];
     rtx_packet.header.sequence_number = 2;
-    try testing.expect(try receiver.handleRtpPacket(testing.io, &rtx_packet));
+    try testing.expect(try receiver.handleRtpPacket(&rtx_packet));
 
     try testing.expectEqual(96, rtx_packet.header.payload_type);
     try testing.expectEqual(0xDEADDEAD, rtx_packet.header.ssrc);
     try testing.expectEqual(1001, rtx_packet.header.sequence_number);
     try testing.expectEqualStrings("ZIGLANG-", rtx_packet.payload);
-
-    received = try receiver.queue.get(testing.io, &events, 0);
-    try testing.expectEqual(1, received);
 }
 
 test "RtpReceiver.handleRtpPacket: ignore packets with unknown payload type" {
-    var receiver = try RtpReceiver.init(testing.allocator, .init(testing.io, .video));
-    defer receiver.deinit(testing.io, testing.allocator);
-
+    var receiver = RtpReceiver.init(.init(testing.io, .video));
     receiver.stream_infos[96] = .{ .packet_type = .media, .apt = 0 };
 
-    var events: [1]TrackEvent = undefined;
     var packet = testPacket(104);
-    try testing.expect(!(try receiver.handleRtpPacket(testing.io, &packet)));
-    try testing.expectEqual(0, try receiver.queue.get(testing.io, &events, 0));
+    try testing.expect(!(try receiver.handleRtpPacket(&packet)));
 }

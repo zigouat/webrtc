@@ -89,8 +89,7 @@ pub fn get(send_buffer: *SendBuffer, seq_number: u16) ?rtp.Packet {
     const index = seq_number & (send_buffer.size - 1);
     const entry = send_buffer.entries[index];
 
-    if (seq_number > send_buffer.highest_seq_number) return null;
-    if (send_buffer.highest_seq_number - seq_number >= send_buffer.size) return null;
+    if (send_buffer.highest_seq_number -% seq_number >= send_buffer.size) return null;
     if (!entry.available) return null;
 
     const offset = @as(usize, index) * send_buffer.max_rtp_payload;

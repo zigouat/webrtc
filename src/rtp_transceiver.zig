@@ -97,7 +97,7 @@ pub fn initFromSdpMedia(allocator: std.mem.Allocator, io: Io, sdp_media: *const 
     tr.* = .{
         .direction = .recvonly,
         .kind = sdp_media.getKind(),
-        .receiver = try RtpReceiver.init(allocator, track),
+        .receiver = RtpReceiver.init(track),
         .sender = RtpSender.init(null),
         .mid = sdp_media.mid,
         .sdp_mline_index = index,
@@ -108,7 +108,7 @@ pub fn initFromSdpMedia(allocator: std.mem.Allocator, io: Io, sdp_media: *const 
 }
 
 pub fn deinit(tr: *RtpTransceiver, io: Io, allocator: std.mem.Allocator) void {
-    tr.receiver.deinit(io, allocator);
+    _ = io;
     tr.sender.deinit(allocator);
     allocator.destroy(tr);
 }
@@ -285,6 +285,12 @@ pub fn canSend(tr: *const RtpTransceiver) bool {
     return false;
 }
 
+pub fn canReceive(tr: *const RtpTransceiver) bool {
+    if (tr.isStopped()) return false;
+    if (tr.current_direction) |direction| return direction == .sendrecv or direction == .recvonly;
+    return false;
+}
+
 pub fn processRemoteTrack(tr: *RtpTransceiver, direction: Direction, msid: ?MediaStream) ?TrackEventInit {
     tr.receiver.track.stream_id = if (msid) |m| m.id else null;
 
@@ -343,7 +349,7 @@ fn newTestRtpTransceiver(io: Io, allocator: std.mem.Allocator) !*RtpTransceiver 
 
     tr.* = .{
         .sender = RtpSender.init(.init(io, .video)),
-        .receiver = try RtpReceiver.init(allocator, .init(io, .video)),
+        .receiver = RtpReceiver.init(.init(io, .video)),
         .direction = .sendrecv,
         .kind = .video,
         .transport = undefined,
@@ -354,6 +360,14 @@ fn newTestRtpTransceiver(io: Io, allocator: std.mem.Allocator) !*RtpTransceiver 
 
 const testing = std.testing;
 const rtcp = @import("rtcp");
+
+fn dummyDtlsTransport() !DtlsTransport {
+    return try DtlsTransport.init(testing.io, testing.allocator, .{
+        .on_data = undefined,
+        .on_event = undefined,
+        .ice_servers = &.{},
+    });
+}
 
 test "initFromSdpMedia" {
     var sdp_media = SDPSession.Media.empty;
@@ -377,7 +391,7 @@ test "initFromSdpMedia" {
 }
 
 test "toSdpMedia" {
-    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    var transport = try dummyDtlsTransport();
     defer transport.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
@@ -410,7 +424,7 @@ test "toSdpMedia" {
 }
 
 test "toSdpMediaAnswer: answer to offer" {
-    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    var transport = try dummyDtlsTransport();
     defer transport.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
@@ -445,7 +459,7 @@ test "toSdpMediaAnswer: answer to offer" {
 }
 
 test "toSdpMediaAnswer: includes rtx_ssrc when the negotiated codecs include rtx" {
-    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    var transport = try dummyDtlsTransport();
     defer transport.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
@@ -468,7 +482,7 @@ test "toSdpMediaAnswer: includes rtx_ssrc when the negotiated codecs include rtx
 }
 
 test "toSdpMediaAnswer: enable_rtx=false ignores an rtx-capable offer" {
-    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    var transport = try dummyDtlsTransport();
     defer transport.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
@@ -492,7 +506,7 @@ test "toSdpMediaAnswer: enable_rtx=false ignores an rtx-capable offer" {
 }
 
 test "toSdpMedia: includes rtx_ssrc when enable_rtx synthesizes an rtx codec" {
-    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    var transport = try dummyDtlsTransport();
     defer transport.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
@@ -513,7 +527,7 @@ test "toSdpMedia: includes rtx_ssrc when enable_rtx synthesizes an rtx codec" {
 }
 
 test "toSdpMedia: leaves rtx_ssrc unset for audio, which has no rtx codec, even with enable_rtx" {
-    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    var transport = try dummyDtlsTransport();
     defer transport.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
@@ -571,7 +585,7 @@ test "synthesizeRtxCodecs: picks the next free payload type, skipping ones alrea
 }
 
 test "toSdpMediaAnswer: negotiates header extensions, keeping the offerer's id" {
-    var transport = try DtlsTransport.init(testing.io, testing.allocator, .{});
+    var transport = try dummyDtlsTransport();
     defer transport.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
