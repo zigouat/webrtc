@@ -167,17 +167,16 @@ fn handleIceData(transport: *DtlsTransport, data: []const u8) !void {
                 transport.on_event(transport, .{ .dtls_connection_state = transport.session.connection_state });
             },
         },
-        .rtp => {
-            if (transport.session.connection_state != .connected) return;
+        .rtp => if (transport.in_srtp_session) |*srtp_session| {
             const buffer = try transport.ice_agent.createPacket();
             defer transport.ice_agent.destroyPacket(buffer);
-            const rtp_packet = try transport.in_srtp_session.?.decryptRtp(data, buffer);
+            const rtp_packet = try srtp_session.decryptRtp(data, buffer);
             transport.on_data(transport, .{ .rtp = rtp_packet });
         },
-        .rtcp => if (transport.session.connection_state == .connected) {
+        .rtcp => if (transport.in_srtp_session) |*srtp_session| {
             const buffer = try transport.ice_agent.createPacket();
             defer transport.ice_agent.destroyPacket(buffer);
-            const rtcp_packet = try transport.in_srtp_session.?.decryptRtcp(data, buffer);
+            const rtcp_packet = try srtp_session.decryptRtcp(data, buffer);
             transport.on_data(transport, .{ .rtcp = rtcp_packet });
         },
         .unknown => Logger.debug("Received unknown packet", .{}),

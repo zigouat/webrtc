@@ -41,7 +41,7 @@ const AppState = struct {
         if (self.senders.items.len == 0) return;
         if (self.senders.pop()) |sender| {
             const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
-            try self.pc.stopTransceiver(tr);
+            tr.removeTrack();
 
             try self.pc.setRemoteDescription(offer);
             const answer = try self.pc.createAnswer();
