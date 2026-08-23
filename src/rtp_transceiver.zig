@@ -177,7 +177,7 @@ pub fn toSdpMediaAnswer(
         ),
     ) else &.{};
 
-    if (!rejected and answer.direction != .inactive) {
+    if (!rejected) {
         answer.setIceCredentials(tr.transport.ice_agent.localCredentials());
     }
 

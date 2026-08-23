@@ -112,6 +112,25 @@ pub fn deinit(sender: *RtpSender, allocator: std.mem.Allocator) void {
     }
 }
 
+/// Resets the sender to its initial state, preparing it for reuse.
+pub fn reset(sender: *RtpSender, io: Io, allocator: std.mem.Allocator) void {
+    sender.mutex.lockUncancelable(io);
+    defer sender.mutex.unlock(io);
+
+    sender.codecs = &.{};
+    sender.header_extensions = .{};
+    sender.report = .empty;
+    sender.packetizer = .none;
+    sender.rtx_config = null;
+    sender.ssrc = 0;
+    sender.rtx_ssrc = 0;
+    sender.rtx_config = null;
+    if (sender.send_buffer) |*send_buffer| {
+        send_buffer.deinit(allocator);
+        sender.send_buffer = null;
+    }
+}
+
 pub fn replaceTrack(sender: *RtpSender, new_track: MediaStreamTrack) !void {
     sender.track = new_track;
 }
@@ -255,7 +274,7 @@ pub fn writeRtcpSenderReport(sender: *RtpSender, io: Io, timestamp: i64, buffer:
     const sender_report: rtcp.SenderReport = .{
         .ssrc = sender.ssrc,
         .ntp_timestamp = microsecondsToNtp(timestamp),
-        .rtp_timestamp = report.rtp_timestamp + diff,
+        .rtp_timestamp = report.rtp_timestamp +% diff,
         .octet_count = report.octet_count,
         .packet_count = report.packet_count,
     };

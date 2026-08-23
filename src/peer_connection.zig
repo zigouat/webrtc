@@ -228,12 +228,24 @@ pub fn deinit(pc: *PeerConnection) void {
 /// Adds a new track to the PeerConnection and optionally associates it with a stream.
 pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: ?[]const u8) Error!*RtpSender {
     try pc.checkNotClosed();
+    const io = pc.dtls_transport.getIo();
 
     const maybe_transceiver = blk: {
-        pc.mutex.lockUncancelable(pc.dtls_transport.getIo());
-        defer pc.mutex.unlock(pc.dtls_transport.getIo());
+        pc.mutex.lockUncancelable(io);
+        defer pc.mutex.unlock(io);
+
         for (pc.transceivers.items) |tr| if (tr.canAssociateTrack(track.kind)) {
+            // We relaxed the canAssociateTrack check to allow reusing a transceiver even if the sender
+            // already used for sending data. For that we need to reset the rtp sender.
+            tr.sender.reset(io, pc.allocator);
             tr.setSenderTrack(track);
+            try tr.sender.generateSsrc(io, &pc.demuxer);
+
+            if (stream_id) |sid| {
+                const stream = try getOrAddStream(pc, sid);
+                tr.sender.setStream(stream);
+            }
+
             break :blk tr;
         };
 
