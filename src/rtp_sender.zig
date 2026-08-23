@@ -133,7 +133,7 @@ pub fn setCodecs(
     const chosen_codec = if (sender.codecs.len == 0) codecs[0] else sender.codecs[0];
     const rtx_codec = webrtc.RtpCodecParameters.findRtx(codecs, chosen_codec.payload_type);
 
-    if (tr.canSend() and rtx_codec != null and chosen_codec.rtp_codec.rtcp_feedbacks.nack) {
+    if (tr.canSend() and chosen_codec.rtp_codec.rtcp_feedbacks.nack) {
         if (sender.send_buffer == null) {
             sender.send_buffer = try SendBuffer.init(
                 allocator,
@@ -266,39 +266,39 @@ pub fn writeRtcpSenderReport(sender: *RtpSender, io: Io, timestamp: i64, buffer:
 
 pub fn handleNack(sender: *RtpSender, nack: rtcp.Nack) !void {
     const send_buffer = if (sender.send_buffer) |*sb| sb else return;
-    const rtx_config = if (sender.rtx_config) |*rc| rc else return;
+    const is_rtx = sender.rtx_config != null;
     const tr = try checkAndGetTransceiver(sender);
 
     var it = nack.iterateSequenceNumbers();
+    var buffer = try tr.transport.ice_agent.createPacket();
+    defer tr.transport.ice_agent.destroyPacket(buffer);
+
+    const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[constants.rtp_default_header_size..]);
+    // RFC 4588: RTX payload is the original sequence number followed by the original payload.
+    const payload_offset = header_size + @as(usize, if (is_rtx) 2 else 0);
+
     while (it.next()) |seq| {
         const packet = blk: {
             const io = tr.transport.getIo();
             sender.mutex.lockUncancelable(io);
             defer sender.mutex.unlock(io);
-            break :blk send_buffer.get(seq);
+            break :blk send_buffer.get(seq, buffer[payload_offset..]);
         } orelse continue;
-
-        var buffer = try tr.transport.ice_agent.createPacket();
-        defer tr.transport.ice_agent.destroyPacket(buffer);
-
-        const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[constants.rtp_default_header_size..]);
 
         const header: rtp.Packet.Header = .{
             .extension = header_size != constants.rtp_default_header_size,
             .marker = packet.header.marker,
             .padding = false,
-            .payload_type = @intCast(rtx_config.payload_type),
-            .sequence_number = rtx_config.sequence_number,
-            .ssrc = sender.rtx_ssrc,
+            .payload_type = @intCast(if (is_rtx) sender.rtx_config.?.payload_type else tr.sender.codecs[0].payload_type),
+            .sequence_number = if (is_rtx) sender.rtx_config.?.sequence_number else seq,
+            .ssrc = if (is_rtx) sender.rtx_ssrc else sender.ssrc,
             .timestamp = packet.header.timestamp,
         };
 
-        // RFC 4588: RTX payload is the original sequence number followed by the original payload.
-        std.mem.writeInt(u16, buffer[header_size..][0..2], seq, .big);
-        @memcpy(buffer[header_size + 2 ..][0..packet.payload.len], packet.payload);
-
-        try writeHeaderAndSend(tr, header, header_size, 2 + packet.payload.len, buffer);
-        rtx_config.sequence_number +%= 1;
+        if (is_rtx) std.mem.writeInt(u16, buffer[header_size..][0..2], seq, .big);
+        const payload_len = if (is_rtx) 2 + packet.payload.len else packet.payload.len;
+        try writeHeaderAndSend(tr, header, header_size, payload_len, buffer);
+        if (is_rtx) sender.rtx_config.?.sequence_number +%= 1;
     }
 }
 
@@ -447,23 +447,31 @@ test "RtpSender.setCodecs: leaves the send buffer disabled when the transceiver 
     try testing.expect(tr.sender.send_buffer == null);
 }
 
-test "RtpSender.setCodecs: leaves the send buffer disabled unless both rtx and nack are negotiated" {
+test "RtpSender.setCodecs: enables the send buffer on nack alone, without rtx" {
     const with_nack_no_rtx = [_]webrtc.RtpCodecParameters{
         .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } } },
     };
+
+    var tr = testTransceiver(.sendrecv);
+    defer tr.sender.deinit(testing.allocator);
+
+    try tr.sender.setCodecs(testing.io, testing.allocator, &with_nack_no_rtx, 16);
+
+    try testing.expect(tr.sender.send_buffer != null);
+}
+
+test "RtpSender.setCodecs: leaves the send buffer disabled on rtx alone, without nack" {
     const with_rtx_no_nack = [_]webrtc.RtpCodecParameters{
         .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000 } },
         .{ .payload_type = 97, .rtp_codec = .{ .mime_type = webrtc.MimeType.Rtx, .clock_rate = 90_000, .fmtp_params = .{ .rtx = .{ .apt = 96 } } } },
     };
 
-    for (&[_][]const webrtc.RtpCodecParameters{ &with_nack_no_rtx, &with_rtx_no_nack }) |codecs| {
-        var tr = testTransceiver(.sendrecv);
-        defer tr.sender.deinit(testing.allocator);
+    var tr = testTransceiver(.sendrecv);
+    defer tr.sender.deinit(testing.allocator);
 
-        try tr.sender.setCodecs(testing.io, testing.allocator, codecs, 16);
+    try tr.sender.setCodecs(testing.io, testing.allocator, &with_rtx_no_nack, 16);
 
-        try testing.expect(tr.sender.send_buffer == null);
-    }
+    try testing.expect(tr.sender.send_buffer == null);
 }
 
 test "RtpSender.setCodecs: ignores the codec list on subsequent calls, keeping the first negotiated codecs" {
@@ -482,25 +490,6 @@ test "RtpSender.setCodecs: ignores the codec list on subsequent calls, keeping t
     try testing.expectEqual(1, tr.sender.codecs.len);
     try testing.expectEqual(96, tr.sender.codecs[0].payload_type);
     try testing.expectEqual(.vp8, std.meta.activeTag(tr.sender.packetizer));
-}
-
-test "RtpSender.setCodecs: tears down the send buffer when renegotiation drops rtx support" {
-    var tr = testTransceiver(.sendrecv);
-    defer tr.sender.deinit(testing.allocator);
-
-    const with_rtx = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } } },
-        .{ .payload_type = 97, .rtp_codec = .{ .mime_type = webrtc.MimeType.Rtx, .clock_rate = 90_000, .fmtp_params = .{ .rtx = .{ .apt = 96 } } } },
-    };
-    const without_rtx = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } } },
-    };
-
-    try tr.sender.setCodecs(testing.io, testing.allocator, &with_rtx, 16);
-    try testing.expect(tr.sender.send_buffer != null);
-
-    try tr.sender.setCodecs(testing.io, testing.allocator, &without_rtx, 16);
-    try testing.expect(tr.sender.send_buffer == null);
 }
 
 test "RtpSender.setHeaderExtensions: picks the mid extension id, ignores others" {
