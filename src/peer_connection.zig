@@ -79,14 +79,6 @@ pub const ConnectionState = enum {
     connecting,
 };
 
-pub const Event = union(enum) {
-    negotiation_needed: void,
-    signaling_state: SignalingState,
-    connection_state: ConnectionState,
-    gathering_state: GatheringState,
-    track_event_init: RtpTransceiver.TrackEventInit,
-};
-
 pub const RTCConfiguration = struct {
     /// List of ICE servers (stun/turn) used for candidates gathering.
     ice_servers: []const ice.IceServer = &.{},
