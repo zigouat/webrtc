@@ -141,9 +141,9 @@ const ParsedSessionDescription = struct {
         };
     }
 
-    fn initAnswer(sdp: []const u8, session: SDPSession) ParsedSessionDescription {
+    fn init(t: webrtc.SessionDescriptionType, sdp: []const u8, session: SDPSession) ParsedSessionDescription {
         return .{
-            .desc_type = .answer,
+            .desc_type = t,
             .sdp = sdp,
             .session = session,
         };
@@ -662,6 +662,7 @@ fn writeDescriptionWithCandidates(pc: *PeerConnection, sess_desc: *const ParsedS
 }
 
 fn setSignalingState(pc: *PeerConnection, state: SignalingState) void {
+    if (pc.signaling_state == state) return;
     pc.signaling_state = state;
     if (pc.handler) |handler| {
         handler.vtable.onSignalingStateChange(handler.userdata, state);
@@ -834,17 +835,14 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     switch (session_desc.type) {
         .answer => {
             try pc.demuxer.updateMaps(pc.dtls_transport.getIo(), &remote_sdp);
-            pc.pending_remote_description = .initAnswer(sdp_text, remote_sdp);
+            pc.pending_remote_description = .init(.answer, sdp_text, remote_sdp);
             try pc.updateSignalingStateToStable();
             // pc.removeTransceivers();
             try pc.startRtpRtcpInterceptors(renegotiation);
         },
         .offer => {
-            pc.pending_remote_description = .{
-                .desc_type = .offer,
-                .sdp = sdp_text,
-                .session = remote_sdp,
-            };
+            if (pc.pending_remote_description) |*desc| desc.deinit(pc.allocator);
+            pc.pending_remote_description = .init(.offer, sdp_text, remote_sdp);
             pc.setSignalingState(.have_remote_offer);
         },
         else => {},

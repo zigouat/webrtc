@@ -687,6 +687,33 @@ test "write: session round-trip" {
     }
 }
 
+test "SDPSession.parse: malformed media" {
+    const sdp = head ++
+        \\m=audio 9 UDP/TLS/RTP/SAVPF 111 112 not_number 114
+        \\
+    ;
+
+    try testing.expectError(error.InvalidMedia, SDPSession.parse(testing.allocator, sdp));
+}
+
+test "SDPSession.parse: reject oversized track id" {
+    const track_id: [65]u8 = @splat('a');
+    const sdp = head ++
+        \\a=group:BUNDLE 0
+        \\m=audio 9 UDP/TLS/RTP/SAVPF 111
+        \\a=rtpmap:111 Opus/48000/2
+        \\a=rtcp-mux
+        \\a=mid:0
+        \\a=ice-ufrag:YBvMzurJIEpKGlbQ
+        \\a=ice-pwd:xWVHffXavbkalUfEXPyeKkyMRnyyYggx
+        \\a=msid:stream1 
+    ++ track_id ++ "\r\n" ++
+        \\
+    ;
+
+    try testing.expectError(error.InvalidSDP, SDPSession.parse(testing.allocator, sdp));
+}
+
 fn rtx(pt: u8, apt: u8) webrtc.RtpCodecParameters {
     return .{
         .payload_type = pt,
