@@ -7,7 +7,6 @@ const webrtc = @import("webrtc");
 const Io = std.Io;
 
 const html_file = @embedFile("index.html");
-const js_file = @embedFile("pc.js");
 
 var pc: webrtc.PeerConnection = undefined;
 var grp: Io.Group = .init;
@@ -160,11 +159,6 @@ fn doHandleClientConnection(ctx: Context, stream: Io.net.Stream) !void {
 
     if (std.mem.eql(u8, "/", req.head.target)) {
         try req.respond(html_file, .{ .transfer_encoding = .none });
-    } else if (std.mem.eql(u8, "/pc.js", req.head.target)) {
-        try req.respond(js_file, .{
-            .transfer_encoding = .none,
-            .extra_headers = &[_]std.http.Header{.{ .name = "Content-Type", .value = "application/javascript" }},
-        });
     } else if (std.mem.eql(u8, req.head.target, "/offer") and req.head.method == .GET) {
         std.log.info("Create offer", .{});
         const offer = try pc.createOffer();
