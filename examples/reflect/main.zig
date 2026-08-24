@@ -5,6 +5,51 @@ const Io = std.Io;
 
 pub const std_options = std.Options{ .log_level = .info };
 
+const ReflectHandler = struct {
+    io: std.Io,
+    gathering_done: std.Io.Event = .unset,
+    done: std.Io.Event = .unset,
+    audio_sender: *webrtc.RtpSender = undefined,
+    video_sender: *webrtc.RtpSender = undefined,
+
+    fn peerConnectionHandler(handler: *ReflectHandler) webrtc.PeerConnectionHandler {
+        return .{
+            .userdata = handler,
+            .vtable = &.{
+                .onGatheringStateChange = onGatheringStateChange,
+                .onConnectionStateChange = onConnectionStateChange,
+                .onTrack = onTrack,
+            },
+        };
+    }
+
+    fn onGatheringStateChange(userdata: ?*anyopaque, state: webrtc.PeerConnection.GatheringState) void {
+        const handler: *ReflectHandler = @ptrCast(@alignCast(userdata.?));
+        if (state == .complete) handler.gathering_done.set(handler.io);
+    }
+
+    fn onConnectionStateChange(userdata: ?*anyopaque, state: webrtc.PeerConnection.ConnectionState) void {
+        std.log.info("Connection state changed: {s}", .{@tagName(state)});
+        const handler: *ReflectHandler = @ptrCast(@alignCast(userdata.?));
+        switch (state) {
+            .closed, .failed => handler.done.set(handler.io),
+            else => {},
+        }
+    }
+
+    fn onTrack(userdata: ?*anyopaque, event: webrtc.RtpTransceiver.TrackEventInit) void {
+        const handler: *ReflectHandler = @ptrCast(@alignCast(userdata.?));
+        std.log.info("New remote track({s}): {s}", .{ @tagName(event.track.kind), event.track.id });
+
+        const s = switch (event.track.kind) {
+            .video => handler.video_sender,
+            .audio => handler.audio_sender,
+        };
+
+        event.receiver.registerCallback(s, sendBackRtp);
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.gpa;
@@ -16,11 +61,16 @@ pub fn main(init: std.process.Init) !void {
     try media_engine.registerDefaultCodecs(allocator);
     defer media_engine.deinit(allocator);
 
-    var pc = try webrtc.PeerConnection.init(io, allocator, .{ .media_engine = &media_engine });
+    var handler = ReflectHandler{ .io = io };
+
+    var pc = try webrtc.PeerConnection.init(io, allocator, .{
+        .media_engine = &media_engine,
+        .handler = handler.peerConnectionHandler(),
+    });
     defer pc.deinit();
 
-    const sender = try pc.addTrack(.initWithId("video", .video), "my-stream");
-    const audio_sender = try pc.addTrack(.initWithId("audio", .audio), "my-stream");
+    handler.video_sender = try pc.addTrack(.initWithId("video", .video), "my-stream");
+    handler.audio_sender = try pc.addTrack(.initWithId("audio", .audio), "my-stream");
 
     const offer = try readOfferFromStdin(io, init.gpa);
     defer init.gpa.free(offer);
@@ -32,23 +82,10 @@ pub fn main(init: std.process.Init) !void {
     const answer = try pc.createAnswer();
     try pc.setLocalDescription(answer);
 
+    try handler.gathering_done.wait(io);
     try writeAnswerToStdout(io, init.gpa, &pc);
 
-    while (pc.poll()) |event| switch (event) {
-        .connection_state => |state| switch (state) {
-            .failed => break,
-            else => std.log.info("Connection state: {}", .{state}),
-        },
-        .track_event_init => |track_event| {
-            std.log.info("New remote track({s}): {s}", .{ @tagName(track_event.track.kind), track_event.track.id });
-            const s = switch (track_event.track.kind) {
-                .video => sender,
-                .audio => audio_sender,
-            };
-            track_event.receiver.registerCallback(s, sendBackRtp);
-        },
-        else => {},
-    } else |_| {}
+    try handler.done.wait(io);
 }
 
 fn readOfferFromStdin(io: Io, allocator: std.mem.Allocator) ![]const u8 {

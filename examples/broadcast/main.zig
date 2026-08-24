@@ -13,11 +13,87 @@ var queue: Io.Queue(std.json.Parsed(webrtc.SessionDescription)) = .init(&queue_b
 
 pub const std_options = std.Options{ .log_level = .info };
 
-const Context = struct {
-    io: Io,
+const PublisherHandler = struct {
+    io: std.Io,
     allocator: std.mem.Allocator,
+    grp: *Io.Group,
+    gathering_done: std.Io.Event = .unset,
+    done: std.Io.Event = .unset,
     channel: *BroadcastChannel,
     memory_pool: *MemoryPool,
+    receiver: *webrtc.RtpReceiver = undefined,
+
+    fn peerConnectionHandler(handler: *PublisherHandler) webrtc.PeerConnectionHandler {
+        return .{
+            .userdata = handler,
+            .vtable = &.{
+                .onGatheringStateChange = onGatheringStateChange,
+                .onConnectionStateChange = onConnectionStateChange,
+                .onTrack = onTrack,
+            },
+        };
+    }
+
+    fn onGatheringStateChange(userdata: ?*anyopaque, state: webrtc.PeerConnection.GatheringState) void {
+        const handler: *PublisherHandler = @ptrCast(@alignCast(userdata.?));
+        if (state == .complete) handler.gathering_done.set(handler.io);
+    }
+
+    fn onConnectionStateChange(userdata: ?*anyopaque, state: webrtc.PeerConnection.ConnectionState) void {
+        std.log.info("Connection state changed: {s}", .{@tagName(state)});
+        const handler: *PublisherHandler = @ptrCast(@alignCast(userdata.?));
+        switch (state) {
+            .connected => handler.grp.concurrent(handler.io, sendPli, .{
+                handler.io,
+                handler.receiver,
+            }) catch @panic("ConcurrencyUnavailable"),
+            .closed, .failed => handler.done.set(handler.io),
+            else => {},
+        }
+    }
+
+    fn onTrack(userdata: ?*anyopaque, event: webrtc.RtpTransceiver.TrackEventInit) void {
+        const handler: *PublisherHandler = @ptrCast(@alignCast(userdata.?));
+        std.log.info("New remote track({s}): {s}", .{ @tagName(event.track.kind), event.track.id });
+        event.receiver.registerCallback(handler, receivePublishedData);
+        handler.receiver = event.receiver;
+    }
+};
+
+const ViewerHandler = struct {
+    io: std.Io,
+    grp: *Io.Group,
+    gathering_done: std.Io.Event = .unset,
+    channel: *BroadcastChannel,
+    sender: *webrtc.RtpSender,
+
+    fn peerConnectionHandler(handler: *ViewerHandler) webrtc.PeerConnectionHandler {
+        return .{
+            .userdata = handler,
+            .vtable = &.{
+                .onGatheringStateChange = onGatheringStateChange,
+                .onConnectionStateChange = onConnectionStateChange,
+            },
+        };
+    }
+
+    fn onGatheringStateChange(userdata: ?*anyopaque, state: webrtc.PeerConnection.GatheringState) void {
+        const handler: *ViewerHandler = @ptrCast(@alignCast(userdata.?));
+        if (state == .complete) handler.gathering_done.set(handler.io);
+    }
+
+    fn onConnectionStateChange(userdata: ?*anyopaque, state: webrtc.PeerConnection.ConnectionState) void {
+        std.log.info("Connection state changed: {s}", .{@tagName(state)});
+        const handler: *ViewerHandler = @ptrCast(@alignCast(userdata.?));
+        switch (state) {
+            .connected => handler.grp.concurrent(handler.io, sendDataToSubscriber, .{
+                handler.io,
+                handler.sender,
+                handler.channel,
+            }) catch @panic("ConcurrencyUnavailable"),
+            else => {},
+        }
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -29,9 +105,20 @@ pub fn main(init: std.process.Init) !void {
 
     try grp.concurrent(io, startHttpServer, .{ io, allocator });
 
+    var memory_pool = try MemoryPool.initCapacity(allocator, 16);
+    defer memory_pool.deinit(allocator);
+
     var media_engine = webrtc.MediaEngine.init(.{});
     try media_engine.registerDefaultCodecs(allocator);
     defer media_engine.deinit(allocator);
+
+    var publisher_handler = PublisherHandler{
+        .io = io,
+        .allocator = allocator,
+        .grp = &grp,
+        .channel = undefined,
+        .memory_pool = &memory_pool,
+    };
 
     // start publisher
     const pc = blk: {
@@ -39,7 +126,10 @@ pub fn main(init: std.process.Init) !void {
         defer offer.deinit();
 
         var pc = try allocator.create(webrtc.PeerConnection);
-        pc.* = try .init(io, allocator, .{ .media_engine = &media_engine });
+        pc.* = try .init(io, allocator, .{
+            .media_engine = &media_engine,
+            .handler = publisher_handler.peerConnectionHandler(),
+        });
         errdefer {
             pc.deinit();
             allocator.destroy(pc);
@@ -53,56 +143,53 @@ pub fn main(init: std.process.Init) !void {
 
         break :blk pc;
     };
-
-    var memory_pool = try MemoryPool.initCapacity(allocator, 16);
-    defer memory_pool.deinit(allocator);
-
-    var ctx = Context{
-        .io = io,
-        .allocator = allocator,
-        .channel = undefined,
-        .memory_pool = &memory_pool,
-    };
+    defer {
+        pc.deinit();
+        allocator.destroy(pc);
+    }
 
     var rtp_channel = BroadcastChannel.init(.{
         .deinit = deinitPacket,
-        .deinit_ctx = &ctx,
+        .deinit_ctx = &memory_pool,
         .empty = .{ .header = undefined, .payload = &.{} },
     });
-    ctx.channel = &rtp_channel;
-
     // No need for rtp_channel.deinit() since all the buffers will be released when the
     // memory is destroyed.
 
-    var gathering_done = Io.Event.unset;
-    var done = Io.Event.unset;
+    publisher_handler.channel = &rtp_channel;
 
-    try grp.concurrent(io, exit, .{ io, &done });
-    try grp.concurrent(io, pollPublisher, .{ io, pc, &ctx, &gathering_done, &done });
+    try grp.concurrent(io, exit, .{ io, &publisher_handler.done });
+    try publisher_handler.gathering_done.wait(io);
 
-    try gathering_done.wait(io);
     try encodeSdp(pc);
+
+    const Viewer = struct {
+        pc: webrtc.PeerConnection,
+        handler: ViewerHandler,
+    };
+
+    var viewers = std.ArrayList(Viewer).empty;
+    defer {
+        for (viewers.items) |*viewer| viewer.pc.deinit();
+        viewers.deinit(allocator);
+    }
 
     while (queue.getOne(io)) |offer| {
         defer offer.deinit();
 
-        const pc2 = try allocator.create(webrtc.PeerConnection);
-        pc2.* = try .init(io, allocator, .{ .media_engine = &media_engine });
-        errdefer {
-            pc2.deinit();
-            allocator.destroy(pc2);
-        }
+        const viewer = try viewers.addOne(allocator);
+        errdefer _ = viewers.swapRemove(viewers.items.len - 1);
 
-        const sender = try pc2.addTrack(.init(io, .video), "stream");
-        gathering_done.reset();
-        try grp.concurrent(io, pollSubscriber, .{ io, pc2, sender, &gathering_done, &rtp_channel });
-        try pc2.setRemoteDescription(offer.value);
+        viewer.handler = ViewerHandler{ .io = io, .channel = &rtp_channel, .grp = &grp, .sender = undefined };
+        viewer.pc = try .init(io, allocator, .{ .media_engine = &media_engine, .handler = viewer.handler.peerConnectionHandler() });
 
-        const answer = try pc2.createAnswer();
-        try pc2.setLocalDescription(answer);
+        viewer.handler.sender = try viewer.pc.addTrack(.init(io, .video), "stream");
+        try viewer.pc.setRemoteDescription(offer.value);
+        const answer = try viewer.pc.createAnswer();
+        try viewer.pc.setLocalDescription(answer);
 
-        try gathering_done.wait(io);
-        try encodeSdp(pc2);
+        try viewer.handler.gathering_done.wait(io);
+        try encodeSdp(&viewer.pc);
     } else |_| {}
 }
 
@@ -113,8 +200,8 @@ fn exit(io: Io, done: *Io.Event) !void {
 
 fn deinitPacket(userdata: ?*anyopaque, packet: *rtp.Packet) void {
     if (packet.payload.len == 0) return;
-    const c: *Context = @ptrCast(@alignCast(userdata.?));
-    c.memory_pool.destroy(@ptrCast(@alignCast(@constCast(packet.payload))));
+    const c: *MemoryPool = @ptrCast(@alignCast(userdata.?));
+    c.destroy(@ptrCast(@alignCast(@constCast(packet.payload))));
 }
 
 fn clonePacket(userdata: ?*anyopaque, packet: *const rtp.Packet) rtp.Packet {
@@ -208,40 +295,8 @@ fn encodeSdp(pc: *webrtc.PeerConnection) !void {
     std.debug.print("{s}\n", .{result});
 }
 
-fn pollPublisher(io: Io, pc: *webrtc.PeerConnection, ctx: *Context, gathering_done: *Io.Event, done: *Io.Event) !void {
-    defer pc.allocator.destroy(pc);
-    defer pc.deinit();
-
-    while (pc.poll()) |event| switch (event) {
-        .connection_state => |state| {
-            std.log.info("Publisher state: {}", .{state});
-            switch (state) {
-                .connected => {
-                    // send pli periodically to the publisher to request keyframes
-                    pc.group.concurrent(io, sendPli, .{ io, &pc.getTransceivers()[0].receiver }) catch return;
-                },
-                .failed => {
-                    pc.close();
-                    done.set(io);
-                },
-                .closed => {
-                    done.set(io);
-                    break;
-                },
-                else => {},
-            }
-        },
-        .gathering_state => |state| if (state == .complete) gathering_done.set(io),
-        .track_event_init => |track_event| track_event.receiver.registerCallback(ctx, receivePublishedData),
-        else => {},
-    } else |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        else => std.log.err("Error while polling publisher: {}", .{err}),
-    }
-}
-
 fn receivePublishedData(userdata: ?*anyopaque, _: *webrtc.RtpReceiver, event: webrtc.RtpReceiver.TrackEvent) void {
-    const c: *Context = @ptrCast(@alignCast(userdata.?));
+    const c: *PublisherHandler = @ptrCast(@alignCast(userdata.?));
     const buffer = c.memory_pool.create(c.allocator) catch return;
     @memcpy(buffer[0..event.rtp.payload.len], event.rtp.payload);
     const packet = rtp.Packet{
@@ -255,31 +310,6 @@ fn sendPli(io: Io, receiver: *webrtc.RtpReceiver) !void {
     while (true) {
         try io.sleep(.fromSeconds(3), .awake);
         receiver.sendPli() catch return;
-    }
-}
-
-fn pollSubscriber(
-    io: Io,
-    pc: *webrtc.PeerConnection,
-    sender: *webrtc.RtpSender,
-    gathering_done: *Io.Event,
-    c: *BroadcastChannel,
-) !void {
-    defer pc.allocator.destroy(pc);
-    defer pc.deinit();
-
-    while (pc.poll()) |event| switch (event) {
-        .connection_state => |state| switch (state) {
-            .connected => pc.group.concurrent(io, sendDataToSubscriber, .{ io, sender, c }) catch return,
-            .failed => pc.close(),
-            .closed => break,
-            else => {},
-        },
-        .gathering_state => |state| if (state == .complete) gathering_done.set(io),
-        else => {},
-    } else |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        else => std.log.err("Error while polling publisher: {}", .{err}),
     }
 }
 
