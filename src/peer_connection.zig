@@ -2,12 +2,12 @@ const std = @import("std");
 const ice = @import("ice");
 const rtp = @import("rtp");
 const rtcp = @import("rtcp");
-const SDPAttribute = @import("sdp").Attribute.ParsedAttribute;
 
 const webrtc = @import("webrtc.zig");
 const dtls = @import("dtls/dtls.zig");
 const utils = @import("utils.zig");
 
+const SDPAttribute = @import("sdp").Attribute.ParsedAttribute;
 const DtlsTransport = @import("dtls_transport.zig");
 const SDPSession = @import("sdp_session.zig");
 const Demuxer = @import("pc/demuxer.zig");
@@ -16,6 +16,7 @@ const RtpSender = @import("rtp_sender.zig");
 const Mid = @import("mid.zig");
 const NackConfig = @import("pc/nack_config.zig");
 const NackGenerator = @import("nack/generator.zig");
+const PCHandler = @import("pc/handler.zig");
 
 const Io = std.Io;
 const PeerConnection = @This();
@@ -23,7 +24,6 @@ const Logger = std.log.scoped(.pc);
 
 pub const Error = error{
     InvalidState,
-    QueueClosed,
     /// Returned when an ssrc cannot be
     /// generated for a sender
     SsrcUnavailable,
@@ -40,6 +40,8 @@ pub const Error = error{
     /// The requested operation is not implemented.
     NotImplemented,
 } || std.mem.Allocator.Error;
+
+pub const GatheringState = ice.GatheringState;
 
 /// SignalingState represents the signaling state of the PeerConnection.
 pub const SignalingState = enum {
@@ -77,21 +79,12 @@ pub const ConnectionState = enum {
     connecting,
 };
 
-pub const Event = union(enum) {
-    negotiation_needed: void,
-    signaling_state: SignalingState,
-    connection_state: ConnectionState,
-    gathering_state: ice.GatheringState,
-    track_event_init: RtpTransceiver.TrackEventInit,
-};
-
 pub const RTCConfiguration = struct {
     /// List of ICE servers (stun/turn) used for candidates gathering.
     ice_servers: []const ice.IceServer = &.{},
 };
 
 pub const PeerConfiguration = struct {
-    inner_queue_size: usize = 8,
     nack_config: NackConfig = .{},
 };
 
@@ -102,6 +95,7 @@ pub const Config = struct {
     peer_config: PeerConfiguration = .{},
     /// The media engine used to advertise and negotiate codecs. Owned by the caller.
     media_engine: *webrtc.MediaEngine,
+    handler: ?PCHandler = null,
 };
 
 allocator: std.mem.Allocator,
@@ -125,13 +119,12 @@ demuxer: Demuxer,
 mid: u16 = 0,
 
 media_engine: *webrtc.MediaEngine,
+handler: ?PCHandler,
 
 // RTP/RTCP interceptors
 nack_config: NackConfig,
 nack_generator: ?NackGenerator = null,
 
-queue_buffer: []Event,
-queue: Io.Queue(Event),
 group: std.Io.Group = .init,
 mutex: std.Io.Mutex = .init,
 
@@ -183,26 +176,21 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
     });
     errdefer dtls_transport.deinit();
 
-    const queue_buffer = try allocator.alloc(Event, config.peer_config.inner_queue_size);
-
     return .{
         .signaling_state = .stable,
         .connection_state = .new,
         .allocator = allocator,
         .dtls_transport = dtls_transport,
         .demuxer = .init(allocator),
-        .queue_buffer = queue_buffer,
-        .queue = .init(queue_buffer),
         .nack_config = config.peer_config.nack_config,
         .media_engine = config.media_engine,
+        .handler = config.handler,
     };
 }
 
 pub fn deinit(pc: *PeerConnection) void {
     const io = pc.dtls_transport.getIo();
     pc.group.cancel(io);
-    pc.queue.close(io);
-    pc.allocator.free(pc.queue_buffer);
 
     for (pc.transceivers.items) |tr| tr.deinit(io, pc.allocator);
     pc.transceivers.deinit(pc.allocator);
@@ -456,20 +444,6 @@ pub fn writeLocalDescription(pc: *PeerConnection, w: *Io.Writer) !void {
     return if (sess_desc) |*desc| try pc.writeDescriptionWithCandidates(desc, w) else error.NoLocalDescription;
 }
 
-pub fn poll(pc: *PeerConnection) !Event {
-    const io = pc.dtls_transport.getIo();
-    while (pc.queue.getOne(io)) |event| switch (event) {
-        .connection_state => |state| switch (state) {
-            .closed => {
-                pc.group.cancel(io);
-                return event;
-            },
-            else => return event,
-        },
-        else => return event,
-    } else |err| return err;
-}
-
 pub fn close(pc: *PeerConnection) void {
     pc.dtls_transport.close();
 }
@@ -621,7 +595,7 @@ fn checkNegotiationNeeded(pc: *PeerConnection) !void {
     if (pc.isNegotiationNeeded()) {
         if (pc.negotiation_needed) return;
         pc.negotiation_needed = true;
-        pc.queue.putOne(pc.dtls_transport.getIo(), .negotiation_needed) catch return error.QueueClosed;
+        if (pc.handler) |handler| handler.vtable.onNegotiationNeeded(handler.userdata);
     } else {
         pc.negotiation_needed = false;
     }
@@ -687,6 +661,13 @@ fn writeDescriptionWithCandidates(pc: *PeerConnection, sess_desc: *const ParsedS
     } else try w.writeAll(sess_desc.sdp);
 }
 
+fn setSignalingState(pc: *PeerConnection, state: SignalingState) void {
+    pc.signaling_state = state;
+    if (pc.handler) |handler| {
+        handler.vtable.onSignalingStateChange(handler.userdata, state);
+    }
+}
+
 fn applyLocalOffer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescription) !void {
     if (!std.mem.eql(u8, pc.last_offer.sdp, sess_desc.sdp)) return error.TamperedOffer;
 
@@ -706,10 +687,8 @@ fn applyLocalOffer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescript
     pc.pending_local_description = pc.last_offer;
     pc.last_offer = .empty(.offer);
 
-    pc.signaling_state = .have_local_offer;
     pc.mid +%= @intCast(offer.getMedias().len);
-
-    try pc.queue.putOne(pc.dtls_transport.getIo(), .{ .signaling_state = pc.signaling_state });
+    pc.setSignalingState(.have_local_offer);
 }
 
 fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescription) !void {
@@ -866,13 +845,14 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
                 .sdp = sdp_text,
                 .session = remote_sdp,
             };
-            pc.signaling_state = .have_remote_offer;
-            try pc.queue.putOne(pc.dtls_transport.getIo(), .{ .signaling_state = pc.signaling_state });
+            pc.setSignalingState(.have_remote_offer);
         },
         else => {},
     }
 
-    for (track_events.items) |event| try pc.queue.putOne(io, .{ .track_event_init = event });
+    for (track_events.items) |event| if (pc.handler) |handler| {
+        handler.vtable.onTrack(handler.userdata, event);
+    };
 }
 
 fn appendTransceiver(pc: *PeerConnection, tr: *RtpTransceiver) !void {
@@ -883,8 +863,6 @@ fn appendTransceiver(pc: *PeerConnection, tr: *RtpTransceiver) !void {
 }
 
 fn updateSignalingStateToStable(pc: *PeerConnection) !void {
-    pc.signaling_state = .stable;
-
     pc.deinitDescriptions(&.{ &pc.local_description, &pc.remote_description });
 
     pc.local_description = pc.pending_local_description;
@@ -896,7 +874,7 @@ fn updateSignalingStateToStable(pc: *PeerConnection) !void {
     pc.last_answer = .empty(.answer);
     pc.last_offer = .empty(.offer);
 
-    try pc.queue.putOne(pc.dtls_transport.getIo(), .{ .signaling_state = pc.signaling_state });
+    pc.setSignalingState(.stable);
 
     pc.negotiation_needed = false;
     try pc.checkNegotiationNeeded();
@@ -921,23 +899,25 @@ fn findTransceiverByMid(pc: *PeerConnection, mid: Mid.Int) ?*RtpTransceiver {
 
 fn onDtlsEvent(dtls_transport: *DtlsTransport, event: DtlsTransport.Event) void {
     const pc: *PeerConnection = @fieldParentPtr("dtls_transport", dtls_transport);
-    const io = pc.dtls_transport.getIo();
 
     switch (event) {
-        .ice_candidate => |candidate| if (candidate) |c| Logger.debug("candidate:{f}", .{c}),
+        .ice_candidate => |candidate| if (pc.handler) |handler| {
+            handler.vtable.onIceCandidate(handler.userdata, candidate);
+        },
         .ice_connection_state, .dtls_connection_state => {
             const ice_state, const dtls_state = pc.dtls_transport.getConnectionState();
             const new_state = nextPeerConnectionState(ice_state, dtls_state);
             if (new_state != pc.connection_state) {
                 pc.connection_state = new_state;
-                pc.queue.putOne(io, .{ .connection_state = new_state }) catch {};
-                if (pc.connection_state == .closed) {
-                    pc.signaling_state = .closed;
-                    pc.queue.close(io);
-                }
+
+                if (pc.connection_state == .closed) pc.group.cancel(pc.dtls_transport.getIo());
+                if (pc.handler) |handler| handler.vtable.onConnectionStateChange(handler.userdata, new_state);
+                if (pc.connection_state == .closed) pc.setSignalingState(.closed);
             }
         },
-        .ice_gathering_state => |state| pc.queue.putOne(io, .{ .gathering_state = state }) catch {},
+        .ice_gathering_state => |state| {
+            if (pc.handler) |handler| handler.vtable.onGatheringStateChange(handler.userdata, state);
+        },
     }
 }
 

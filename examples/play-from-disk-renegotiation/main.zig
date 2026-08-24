@@ -8,18 +8,74 @@ const webrtc = @import("webrtc");
 const Io = std.Io;
 const html_file = @embedFile("index.html");
 
+var grp: Io.Group = undefined;
+var app_state: AppState = undefined;
+
+const Handler = struct {
+    io: std.Io,
+    gathering_done: std.Io.Event = .unset,
+    connected: std.Io.Event = .unset,
+    done: std.Io.Event = .unset,
+
+    fn peerConnectionHandler(handler: *Handler) webrtc.PeerConnectionHandler {
+        return .{
+            .userdata = handler,
+            .vtable = &.{
+                .onGatheringStateChange = onGatheringStateChange,
+                .onConnectionStateChange = onConnectionStateChange,
+            },
+        };
+    }
+
+    fn onGatheringStateChange(userdata: ?*anyopaque, state: webrtc.PeerConnection.GatheringState) void {
+        const handler: *Handler = @ptrCast(@alignCast(userdata.?));
+        if (state == .complete) handler.gathering_done.set(handler.io);
+    }
+
+    fn onConnectionStateChange(userdata: ?*anyopaque, state: webrtc.PeerConnection.ConnectionState) void {
+        std.debug.print("[Handler] connection state: {}\n", .{state});
+        const handler: *Handler = @ptrCast(@alignCast(userdata.?));
+        switch (state) {
+            .connected => handler.connected.set(handler.io),
+            .disconnected, .closed, .failed => handler.done.set(handler.io),
+            else => {},
+        }
+    }
+};
+
 const AppState = struct {
+    handler: *Handler,
     pc: webrtc.PeerConnection,
     file_path: []const u8,
     senders: std.ArrayList(*webrtc.RtpSender) = .empty,
-    gathering_done: Io.Event = .unset,
 
-    pub fn deinit(self: *AppState, allocator: std.mem.Allocator) void {
-        self.pc.deinit();
-        self.senders.deinit(allocator);
+    fn init(io: std.Io, allocator: std.mem.Allocator, file_path: []const u8, media_engine: *webrtc.MediaEngine) !AppState {
+        const handler = try allocator.create(Handler);
+        errdefer allocator.destroy(handler);
+        handler.* = .{ .io = io };
+
+        return .{
+            .handler = handler,
+            .pc = try webrtc.PeerConnection.init(io, allocator, .{
+                .handler = handler.peerConnectionHandler(),
+                .media_engine = media_engine,
+                .rtc_configuration = .{
+                    .ice_servers = &.{.{ .url = "stun:stun.l.google.com:19302" }},
+                },
+            }),
+            .file_path = file_path,
+        };
     }
 
-    pub fn addTrack(self: *AppState, io: Io, allocator: std.mem.Allocator, offer: webrtc.SessionDescription) !void {
+    fn deinit(self: *AppState, allocator: std.mem.Allocator) void {
+        self.pc.deinit();
+        self.senders.deinit(allocator);
+        allocator.destroy(self.handler);
+    }
+
+    fn addTrack(self: *AppState, allocator: std.mem.Allocator, offer: webrtc.SessionDescription) !void {
+        const io = self.handler.io;
+
         var buf: [8]u8 = @splat(0);
         var stream: [16]u8 = @splat(0);
         io.random(&buf);
@@ -31,13 +87,12 @@ const AppState = struct {
         try self.pc.setRemoteDescription(offer);
         const answer = try self.pc.createAnswer();
         try self.pc.setLocalDescription(answer);
+        try self.handler.gathering_done.wait(io);
 
-        if (self.pc.connection_state == .connected) {
-            try grp.concurrent(io, sendMediaData, .{ io, allocator, self.file_path, sender });
-        }
+        try grp.concurrent(io, sendMediaData, .{ io, allocator, self.file_path, sender, &self.handler.connected });
     }
 
-    pub fn removeTrack(self: *AppState, offer: webrtc.SessionDescription) !void {
+    fn removeTrack(self: *AppState, offer: webrtc.SessionDescription) !void {
         if (self.senders.items.len == 0) return;
         if (self.senders.pop()) |sender| {
             const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
@@ -49,39 +104,18 @@ const AppState = struct {
         }
     }
 
-    pub fn eventLoop(self: *AppState, io: Io, allocator: std.mem.Allocator) !void {
-        while (self.pc.poll()) |event| switch (event) {
-            .connection_state => |state| switch (state) {
-                .connected => {
-                    std.log.info("Peer connected", .{});
-                    for (self.senders.items) |sender| {
-                        try grp.concurrent(io, sendMediaData, .{ io, allocator, self.file_path, sender });
-                    }
-                },
-                .disconnected => self.pc.close(),
-                .closed => {
-                    std.log.warn("Peer closed, exiting...", .{});
-                    grp.cancel(io);
-                    return;
-                },
-                else => {},
-            },
-            .gathering_state => |state| switch (state) {
-                .complete => self.gathering_done.set(io),
-                else => {},
-            },
-            else => {},
-        } else |_| return;
+    fn waitForCloseEvent(self: *AppState) !void {
+        try self.handler.done.wait(self.handler.io);
     }
 
-    fn sendMediaData(io: Io, allocator: std.mem.Allocator, path: []const u8, sender: *webrtc.RtpSender) !void {
-        doSendMediaData(io, allocator, path, sender) catch |err| switch (err) {
+    fn sendMediaData(io: Io, allocator: std.mem.Allocator, path: []const u8, sender: *webrtc.RtpSender, connected: *Io.Event) !void {
+        doSendMediaData(io, allocator, path, sender, connected) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => |e| std.log.err("Error occurred while sending file: {}", .{e}),
         };
     }
 
-    fn doSendMediaData(io: Io, allocator: std.mem.Allocator, path: []const u8, sender: *webrtc.RtpSender) !void {
+    fn doSendMediaData(io: Io, allocator: std.mem.Allocator, path: []const u8, sender: *webrtc.RtpSender, connected: *Io.Event) !void {
         var file = try Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
         defer file.close(io);
 
@@ -96,7 +130,8 @@ const AppState = struct {
 
         const start_timestamp = Io.Clock.now(.awake, io).toMilliseconds();
         const clock_rate = sender.codecs[0].rtp_codec.clock_rate;
-        const time_base = video_stream.time_base;
+
+        try connected.wait(io);
 
         var curr_packet = try ivf_reader.next(allocator);
         defer if (curr_packet) |*p| p.deinit(allocator);
@@ -110,11 +145,9 @@ const AppState = struct {
                 if (curr_packet.?.dts >= dts) break;
 
                 var p = curr_packet.?;
+                p.scaleTimestamps(video_stream.time_base, .ofDen(clock_rate));
                 curr_packet = null;
                 defer p.deinit(allocator);
-
-                p.dts = @intCast(@divTrunc(@as(i128, p.dts) * time_base.num * clock_rate, @as(i128, time_base.den)));
-                p.pts = @intCast(@divTrunc(@as(i128, p.pts) * time_base.num * clock_rate, @as(i128, time_base.den)));
 
                 try sender.sendSample(&p);
 
@@ -126,9 +159,6 @@ const AppState = struct {
     }
 };
 
-var grp: Io.Group = undefined;
-var app_state: AppState = undefined;
-
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -136,10 +166,14 @@ pub fn main(init: std.process.Init) !void {
     grp = .init;
     defer grp.cancel(io);
 
-    var arg_iterator = try init.minimal.args.iterateAllocator(init.gpa);
-    defer arg_iterator.deinit();
-    _ = arg_iterator.next();
-    const file_path = arg_iterator.next().?;
+    const file_path = blk: {
+        var arg_iterator = try init.minimal.args.iterateAllocator(init.gpa);
+        defer arg_iterator.deinit();
+        _ = arg_iterator.next();
+        const path = arg_iterator.next() orelse return error.FilePathNotProvided;
+        break :blk try allocator.dupe(u8, path);
+    };
+    defer allocator.free(file_path);
 
     var media_engine = webrtc.MediaEngine.init(.{});
     try media_engine.registerCodec(allocator, .video, .{
@@ -148,19 +182,11 @@ pub fn main(init: std.process.Init) !void {
     });
     defer media_engine.deinit(allocator);
 
-    app_state = .{
-        .file_path = file_path,
-        .pc = try webrtc.PeerConnection.init(io, allocator, .{
-            .media_engine = &media_engine,
-            .rtc_configuration = .{
-                .ice_servers = &.{.{ .url = "stun:stun.l.google.com:19302" }},
-            },
-        }),
-    };
+    app_state = try AppState.init(io, allocator, file_path, &media_engine);
     defer app_state.deinit(allocator);
 
     try grp.concurrent(io, startHttpServer, .{ io, allocator });
-    try app_state.eventLoop(io, allocator);
+    try app_state.waitForCloseEvent();
 }
 
 fn startHttpServer(io: Io, allocator: std.mem.Allocator) !void {
@@ -208,17 +234,12 @@ fn doHandleClientConnection(io: Io, allocator: std.mem.Allocator, stream: Io.net
         var parsed = try readRequestContent(allocator, &req);
         defer parsed.deinit();
 
-        std.debug.print("Offer:\n{s}\n", .{parsed.value.sdp});
-
-        try app_state.addTrack(io, allocator, parsed.value);
-        try app_state.gathering_done.wait(io);
+        try app_state.addTrack(allocator, parsed.value);
         try writeLocalDescription(allocator, &req);
     } else if (std.mem.eql(u8, req.head.target, "/removeVideo") and req.head.method == .POST) {
         std.log.info("Remove video", .{});
         var parsed = try readRequestContent(allocator, &req);
         defer parsed.deinit();
-
-        std.debug.print("Offer:\n{s}\n", .{parsed.value.sdp});
 
         app_state.removeTrack(parsed.value) catch |err| {
             std.log.err("Error while removing video track: {}", .{err});
