@@ -672,7 +672,12 @@ test "getRtcpReport" {
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
     defer tr.deinit(testing.io, testing.allocator);
 
-    tr.sender.codecs = webrtc.MediaEngine.supported_video_codecs;
+    try tr.sender.setCodecs(
+        testing.io,
+        testing.allocator,
+        webrtc.MediaEngine.supported_video_codecs,
+        16,
+    );
     var buffer: [64]u8 = @splat(0);
 
     tr.sender.report = .{

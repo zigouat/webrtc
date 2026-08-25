@@ -81,6 +81,10 @@ const Report = struct {
 
 track: ?MediaStreamTrack,
 codecs: []const webrtc.RtpCodecParameters,
+/// The codec currently used for sending.
+///
+/// Currently it's the first codec in the list of negotiated codecs.
+codec: ?webrtc.RtpCodecParameters,
 header_extensions: RtpHeaderExtensions,
 ssrc: u32,
 rtx_ssrc: u32,
@@ -94,6 +98,7 @@ pub fn init(track: ?MediaStreamTrack) RtpSender {
     return .{
         .track = track,
         .codecs = &.{},
+        .codec = null,
         .header_extensions = .{},
         .ssrc = 0,
         .rtx_ssrc = 0,
@@ -146,10 +151,29 @@ pub fn setCodecs(
     codecs: []const webrtc.RtpCodecParameters,
     send_buffer_size: u16,
 ) !void {
-    if (codecs.len == 0 and sender.codecs.len == 0) return;
+    sender.mutex.lockUncancelable(io);
+    defer sender.mutex.unlock(io);
+
+    const curr_codecs = sender.codecs;
+    sender.codecs = codecs;
+
+    // Stop sending if no codecs are negotiated
+    if (codecs.len == 0) {
+        if (sender.send_buffer) |*send_buffer| {
+            send_buffer.deinit(allocator);
+            sender.send_buffer = null;
+        }
+        sender.codec = null;
+        return;
+    }
+
+    // For now keep the old negotiated codec.
+    // In the future we'll add callback to notify the application that the negotiated codec has changed
+    // and let it decide what to do.
+    if (curr_codecs.len != 0) return;
     const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
 
-    const chosen_codec = if (sender.codecs.len == 0) codecs[0] else sender.codecs[0];
+    const chosen_codec = sender.codecs[0];
     const rtx_codec = webrtc.RtpCodecParameters.findRtx(codecs, chosen_codec.payload_type);
 
     if (tr.canSend() and chosen_codec.rtp_codec.rtcp_feedbacks.nack) {
@@ -167,18 +191,12 @@ pub fn setCodecs(
         }
     }
 
-    if (sender.codecs.len != 0) {
-        // TODO: Handle this use case better. What if the codec is changed?
-        // For now do not allow changing codecs after they have been set
-        return;
-    }
-
-    sender.codecs = codecs;
     sender.rtx_config = if (rtx_codec) |rc| .{
         .sequence_number = 0,
         .payload_type = @intCast(rc.payload_type),
     } else null;
     sender.packetizer = Packetizer.init(io, sender.ssrc, chosen_codec);
+    sender.codec = chosen_codec;
 }
 
 pub fn setHeaderExtensions(sender: *RtpSender, extensions: []const webrtc.RtpHeaderExtensionParameter) void {
@@ -237,7 +255,7 @@ pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) SendError!void {
         .extension = header_size != constants.rtp_default_header_size,
         .marker = packet.header.marker,
         .padding = false,
-        .payload_type = @intCast(tr.sender.codecs[0].payload_type),
+        .payload_type = @intCast(tr.sender.codec.?.payload_type),
         .sequence_number = packet.header.sequence_number,
         .ssrc = sender.ssrc,
         .timestamp = packet.header.timestamp,
@@ -249,10 +267,11 @@ pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) SendError!void {
 }
 
 pub fn writeRtcpSenderReport(sender: *RtpSender, io: Io, timestamp: i64, buffer: []u8) []const u8 {
-    const report = blk: {
+    const report, const codec = blk: {
         sender.mutex.lockUncancelable(io);
         defer sender.mutex.unlock(io);
-        break :blk sender.report;
+        if (sender.codec == null) return &.{};
+        break :blk .{ sender.report, sender.codec.? };
     };
 
     if (report.packet_count == 0) return &.{};
@@ -267,7 +286,6 @@ pub fn writeRtcpSenderReport(sender: *RtpSender, io: Io, timestamp: i64, buffer:
     };
     std.mem.writeInt(@Int(.unsigned, rtcp.header_size * 8), buffer[0..rtcp.header_size], @bitCast(header), .big);
 
-    const codec = sender.codecs[0]; // First codec is used for sending
     const ts = if (timestamp <= report.timestamp) report.timestamp else timestamp;
     const diff: u32 = @intCast(@divTrunc(@as(i128, (ts - report.timestamp)) * codec.rtp_codec.clock_rate, std.time.us_per_s));
 
@@ -297,27 +315,30 @@ pub fn handleNack(sender: *RtpSender, nack: rtcp.Nack) !void {
     const payload_offset = header_size + @as(usize, if (is_rtx) 2 else 0);
 
     while (it.next()) |seq| {
-        const packet = blk: {
-            const io = tr.transport.getIo();
-            sender.mutex.lockUncancelable(io);
-            defer sender.mutex.unlock(io);
-            break :blk send_buffer.get(seq, buffer[payload_offset..]);
-        } orelse continue;
+        const io = tr.transport.getIo();
+        sender.mutex.lockUncancelable(io);
+        const packet = send_buffer.get(seq, buffer[payload_offset..]) orelse {
+            sender.mutex.unlock(io);
+            continue;
+        };
 
         const header: rtp.Packet.Header = .{
             .extension = header_size != constants.rtp_default_header_size,
             .marker = packet.header.marker,
             .padding = false,
-            .payload_type = @intCast(if (is_rtx) sender.rtx_config.?.payload_type else tr.sender.codecs[0].payload_type),
+            .payload_type = @intCast(if (is_rtx) sender.rtx_config.?.payload_type else tr.sender.codec.?.payload_type),
             .sequence_number = if (is_rtx) sender.rtx_config.?.sequence_number else seq,
             .ssrc = if (is_rtx) sender.rtx_ssrc else sender.ssrc,
             .timestamp = packet.header.timestamp,
         };
+        if (is_rtx) {
+            std.mem.writeInt(u16, buffer[header_size..][0..2], seq, .big);
+            sender.rtx_config.?.sequence_number +%= 1;
+        }
+        sender.mutex.unlock(io);
 
-        if (is_rtx) std.mem.writeInt(u16, buffer[header_size..][0..2], seq, .big);
         const payload_len = if (is_rtx) 2 + packet.payload.len else packet.payload.len;
         try writeHeaderAndSend(tr, header, header_size, payload_len, buffer);
-        if (is_rtx) sender.rtx_config.?.sequence_number +%= 1;
     }
 }
 
@@ -336,7 +357,7 @@ fn recordSent(tr: *RtpTransceiver, packet: *const rtp.Packet, timestamp: i64) vo
 }
 
 fn checkAndGetTransceiver(sender: *RtpSender) !*RtpTransceiver {
-    if (sender.track == null) {
+    if (sender.track == null or sender.codec == null) {
         @branchHint(.cold);
         return error.NoAssociatedTrack;
     }
@@ -423,7 +444,7 @@ test "RtpSender.setCodecs: sets codecs and initializes the packetizer for the ch
     try tr.sender.setCodecs(testing.io, testing.allocator, &codecs, 16);
 
     try testing.expectEqual(1, tr.sender.codecs.len);
-    try testing.expectEqual(96, tr.sender.codecs[0].payload_type);
+    try testing.expectEqual(96, tr.sender.codec.?.payload_type);
     try testing.expectEqual(.vp8, std.meta.activeTag(tr.sender.packetizer));
 }
 
@@ -507,7 +528,7 @@ test "RtpSender.setCodecs: ignores the codec list on subsequent calls, keeping t
     try tr.sender.setCodecs(testing.io, testing.allocator, &second, 16);
 
     try testing.expectEqual(1, tr.sender.codecs.len);
-    try testing.expectEqual(96, tr.sender.codecs[0].payload_type);
+    try testing.expectEqual(96, tr.sender.codec.?.payload_type);
     try testing.expectEqual(.vp8, std.meta.activeTag(tr.sender.packetizer));
 }
 

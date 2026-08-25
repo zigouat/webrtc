@@ -191,6 +191,7 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
 pub fn deinit(pc: *PeerConnection) void {
     const io = pc.dtls_transport.getIo();
     pc.group.cancel(io);
+    pc.handler = null;
 
     for (pc.transceivers.items) |tr| tr.deinit(io, pc.allocator);
     pc.transceivers.deinit(pc.allocator);
