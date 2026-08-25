@@ -937,7 +937,7 @@ fn onDtlsEvent(dtls_transport: *DtlsTransport, event: DtlsTransport.Event) void 
             if (new_state != pc.connection_state) {
                 pc.connection_state = new_state;
                 if (pc.connection_state == .connected) {
-                    if (pc.sctp_transport) |*sctp| try sctp.connect();
+                    if (pc.sctp_transport) |*sctp| sctp.connect() catch @panic("Failed to connect SCTP transport");
                 }
                 if (pc.connection_state == .closed) pc.group.cancel(pc.dtls_transport.getIo());
                 if (pc.handler) |handler| handler.vtable.onConnectionStateChange(handler.userdata, new_state);

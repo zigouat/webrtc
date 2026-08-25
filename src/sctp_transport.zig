@@ -88,7 +88,7 @@ pub fn sendData(sctp_transport: *SctpTranport, data: []const u8) !void {
 }
 
 pub fn handleIncomingData(sctp_transport: *SctpTranport, data: []const u8) void {
-    Logger.debug("received sctp data of length: {}", data.len);
+    Logger.debug("received sctp data of length: {}", .{data.len});
     c.usrsctp_conninput(sctp_transport, data.ptr, data.len, 0);
 }
 
@@ -142,7 +142,7 @@ fn subscribeToEvents(sctp_transport: *const SctpTranport) !void {
 fn receive_cb(
     sock: ?*Socket,
     addr: c.union_sctp_sockstore,
-    data: ?*anyopaque,
+    maybe_data: ?*anyopaque,
     len: usize,
     rcvinfo: c.struct_sctp_rcvinfo,
     flags: c_int,
@@ -150,12 +150,16 @@ fn receive_cb(
 ) callconv(.c) c_int {
     _ = sock;
     _ = addr;
-    _ = data;
-    _ = len;
     _ = rcvinfo;
-    _ = flags;
     _ = ulp_info;
 
-    std.debug.print("Received data in callbacks\n", .{});
-    return 0;
+    const data = @as([*]u8, @ptrCast(@alignCast(maybe_data orelse return 1)))[0..len];
+
+    if (flags & c.MSG_NOTIFICATION != 0) {
+        std.debug.print("Notification: {x}\n", .{data});
+        return 1;
+    }
+
+    std.debug.print("Slice: {x}\n", .{data});
+    return 1;
 }
