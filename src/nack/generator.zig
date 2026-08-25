@@ -59,6 +59,8 @@ pub fn handleRtpPacket(self: *NackGenerator, io: Io, packet: *const rtp.Packet) 
     defer self.mutex.unlock(io);
 
     const entry = try self.receive_logs.getOrPut(packet.header.ssrc);
+    errdefer if (!entry.found_existing) self.receive_logs.removeByPtr(entry.key_ptr);
+
     if (!entry.found_existing) {
         entry.value_ptr.* = try ReceiveLog.init(self.receive_logs.allocator, self.size);
     }
@@ -178,6 +180,11 @@ fn testPacket(ssrc: u32, seq: u16) rtp.Packet {
         },
         .payload = &.{},
     };
+}
+
+test "NackGenerator.handleRtpPacket: failed init" {
+    var gen = NackGenerator.init(testing.allocator, .{ .size = 127 });
+    defer gen.deinit(testing.io);
 }
 
 test "NackGenerator.handleRtpPacket: creates one receive log per ssrc" {

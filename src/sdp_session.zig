@@ -9,6 +9,8 @@ const SDPAttribute = sdp.Attribute.ParsedAttribute;
 const Mid = @import("mid.zig");
 const RtpCodecParameters = webrtc.RtpCodecParameters;
 
+const max_track_id_length: usize = 64;
+
 const sdp_header =
     \\v=0
     \\o=- 1000 1779396395 IN IP4 0.0.0.0
@@ -194,7 +196,10 @@ pub const Media = struct {
 
     fn parseRtpMedia(sdp_media: *Media, allocator: std.mem.Allocator, media: *const sdp.Media, fingerprint: *[32]u8) !void {
         // Parse formats
-        sdp_media.rtp_codec_parameters = try allocRtpCodecsParameters(allocator, media.formats);
+        sdp_media.rtp_codec_parameters = allocRtpCodecsParameters(allocator, media.formats) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidMedia,
+        };
 
         var rtp_header_extensions: std.ArrayList(webrtc.RtpHeaderExtensionParameter) = .empty;
         errdefer rtp_header_extensions.deinit(allocator);
@@ -249,6 +254,7 @@ pub const Media = struct {
             .msid => |msid| {
                 if (sdp_media.msid == null) sdp_media.msid = .{ .id = msid.id };
                 if (sdp_media.track_id == null) if (msid.app_data) |track_id| {
+                    if (track_id.len > max_track_id_length) return error.InvalidSDP;
                     sdp_media.track_id = try allocator.dupe(u8, track_id);
                 };
             },
@@ -310,6 +316,8 @@ pub const Media = struct {
 
         fmt_iterator = std.mem.tokenizeScalar(u8, formats, ' ');
         var rtp_codec_parameters = try allocator.alloc(RtpCodecParameters, count);
+        errdefer allocator.free(rtp_codec_parameters);
+
         var idx: usize = 0;
         while (fmt_iterator.next()) |payload_type| {
             const pt = try std.fmt.parseInt(u7, payload_type, 10);

@@ -83,8 +83,15 @@ pub fn deinit(transport: *DtlsTransport) void {
     transport.ice_agent.deinit();
     transport.session.deinit();
 
-    if (transport.in_srtp_session) |*srtp_sess| srtp_sess.deinit();
-    if (transport.out_srtp_session) |*srtp_sess| srtp_sess.deinit();
+    if (transport.in_srtp_session) |*srtp_sess| {
+        srtp_sess.deinit();
+        transport.in_srtp_session = null;
+    }
+
+    if (transport.out_srtp_session) |*srtp_sess| {
+        srtp_sess.deinit();
+        transport.out_srtp_session = null;
+    }
 }
 
 pub fn getIo(transport: *const DtlsTransport) std.Io {
@@ -258,6 +265,8 @@ fn handleDtlsData(transport: *DtlsTransport, data: []const u8) !void {
     defer transport.mutex.unlock(transport.getIo());
 
     try transport.session.handleData(data);
+    errdefer transport.session.connection_state = .failed;
+
     // TODO: don't set connection state of dtls until we create the whole srtp session.
     // Otherwise, we might start receiving RTP/RTCP packets before we have the srtp session ready.
     if (transport.in_srtp_session == null) {
@@ -269,6 +278,10 @@ fn handleDtlsData(transport: *DtlsTransport, data: []const u8) !void {
         };
 
         transport.in_srtp_session = try srtp.Session.init(transport.getIo(), transport.allocator, &srtp_profile.remote_keying_material, profile);
+        errdefer {
+            transport.in_srtp_session.?.deinit();
+            transport.in_srtp_session = null;
+        }
         transport.out_srtp_session = try srtp.Session.init(transport.getIo(), transport.allocator, &srtp_profile.local_keying_material, profile);
     }
 }

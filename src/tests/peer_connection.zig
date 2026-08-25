@@ -136,6 +136,11 @@ const Connection = struct {
         try std.testing.expectEqual(event_type, std.meta.activeTag(event.?));
         try std.testing.expectEqual(expected, @field(event.?, @tagName(event_type)));
     }
+
+    fn expectNoEvent(conn: *Connection, event_type: PCEnum) !void {
+        const event = conn.popEvent(event_type);
+        try std.testing.expect(event == null);
+    }
 };
 
 fn testMediaEngine(enable_rtx: bool) !webrtc.MediaEngine {
@@ -236,8 +241,10 @@ test "setRemoteDescription: set offer" {
     ;
 
     try pc.setRemoteDescription(.{ .type = .offer, .sdp = offer });
-
     try conn.expectEvent(.signaling_state, .have_remote_offer);
+
+    for (0..5) |_| try pc.setRemoteDescription(.{ .type = .offer, .sdp = offer });
+    try conn.expectNoEvent(.signaling_state);
 }
 
 test "setRemoteDescription: set offer - do not reject bundle only m-lines" {
