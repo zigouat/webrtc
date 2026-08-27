@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("sctp");
 
+const DataChannel = @import("data_channel.zig");
 const DtlsTransport = @import("dtls_transport.zig");
 const SctpTranport = @This();
 const Socket = c.struct_socket;
@@ -21,8 +22,10 @@ const Family = enum(u16) {
 const ConnAddress = extern struct {
     family: Family,
     port: u16,
-    addr: ?*anyopaque,
+    addr: ?*anyopaque = null,
 };
+
+pub const ConnectionState = enum { new, connected, failed, closed };
 
 pub const InitConfig = struct {
     local_port: u16,
@@ -31,9 +34,10 @@ pub const InitConfig = struct {
 };
 
 socket: *Socket,
-dtls_transport: *DtlsTransport,
+connection_state: ConnectionState,
 local_port: u16,
 remote_port: u16,
+dtls_transport: *DtlsTransport,
 
 pub fn init(sctp_transport: *SctpTranport, init_config: InitConfig) !void {
     sctp_transport.socket = c.usrsctp_socket(
@@ -49,6 +53,7 @@ pub fn init(sctp_transport: *SctpTranport, init_config: InitConfig) !void {
     try sctp_transport.setDefaultOptions();
     try sctp_transport.subscribeToEvents();
 
+    sctp_transport.connection_state = .new;
     sctp_transport.dtls_transport = init_config.dtls_transport;
     sctp_transport.local_port = init_config.local_port;
     sctp_transport.remote_port = init_config.remote_port;
@@ -56,11 +61,11 @@ pub fn init(sctp_transport: *SctpTranport, init_config: InitConfig) !void {
 
 pub fn connect(sctp_transport: *SctpTranport) !void {
     c.usrsctp_register_address(sctp_transport);
+    errdefer c.usrsctp_deregister_address(sctp_transport);
 
     var sock_addr = ConnAddress{
         .family = .AF_CONN,
         .port = std.mem.nativeToBig(u16, sctp_transport.local_port),
-        .addr = sctp_transport,
     };
 
     if (c.usrsctp_bind(sctp_transport.socket, @ptrCast(@alignCast(&sock_addr)), @sizeOf(ConnAddress)) != 0) {
@@ -80,6 +85,7 @@ pub fn connect(sctp_transport: *SctpTranport) !void {
 }
 
 pub fn deinit(sctp_transport: *SctpTranport) void {
+    c.usrsctp_deregister_address(sctp_transport);
     c.usrsctp_close(sctp_transport.socket);
 }
 
@@ -150,16 +156,33 @@ fn receive_cb(
 ) callconv(.c) c_int {
     _ = sock;
     _ = addr;
-    _ = rcvinfo;
-    _ = ulp_info;
 
+    const sctp_transport: *SctpTranport = @ptrCast(@alignCast(ulp_info.?));
     const data = @as([*]u8, @ptrCast(@alignCast(maybe_data orelse return 1)))[0..len];
 
     if (flags & c.MSG_NOTIFICATION != 0) {
-        std.debug.print("Notification: {x}\n", .{data});
+        sctp_transport.handleNotification(data);
         return 1;
     }
 
-    std.debug.print("Slice: {x}\n", .{data});
+    const ppid = std.mem.bigToNative(u32, rcvinfo.rcv_ppid);
+    const stream_id = rcvinfo.rcv_sid;
+
+    sctp_transport.handleAppData(ppid, stream_id, data) catch |err| {
+        Logger.err("Error handling app data: {}\n", .{err});
+    };
     return 1;
+}
+
+fn handleNotification(sctp_transport: *SctpTranport, data: []u8) void {
+    const notification: *c.sctp_notification = @ptrCast(@alignCast(data.ptr));
+    _ = notification;
+    _ = sctp_transport;
+}
+
+fn handleAppData(sctp_transport: *SctpTranport, ppid: u32, stream_id: u16, data: []u8) !void {
+    _ = sctp_transport;
+    _ = ppid;
+    _ = stream_id;
+    _ = data;
 }

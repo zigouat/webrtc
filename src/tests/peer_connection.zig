@@ -294,6 +294,9 @@ test "setRemoteDescription: set offer - do not reject bundle only m-lines" {
 }
 
 test "setRemoteDescription: set offer - data channel media does not create a transceiver" {
+    webrtc.SctpRuntime.init();
+    defer webrtc.SctpRuntime.deinit();
+
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();

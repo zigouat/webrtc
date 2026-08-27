@@ -869,6 +869,7 @@ fn initSctpTransport(pc: *PeerConnection, media: *const SDPSession.Media) !void 
     if (pc.sctp_transport != null or media.sctp_port.? == 0) return;
     pc.sctp_transport = .{
         .socket = undefined,
+        .connection_state = .new,
         .local_port = 0,
         .remote_port = 0,
         .dtls_transport = &pc.dtls_transport,
@@ -1103,6 +1104,7 @@ test {
     _ = @import("nack/send_buffer.zig");
     _ = @import("nack/receive_log.zig");
     _ = @import("nack/generator.zig");
+    _ = @import("data_channel.zig");
 }
 
 test "nextPeerConnectionState" {
