@@ -4,6 +4,8 @@ pub const PeerConnectionHandler = @import("pc/handler.zig");
 pub const RtpTransceiver = @import("rtp_transceiver.zig");
 pub const RtpSender = @import("rtp_sender.zig");
 pub const RtpReceiver = @import("rtp_receiver.zig");
+pub const SctpTransport = @import("sctp_transport.zig");
+pub const SctpRuntime = @import("sctp_runtime.zig");
 pub const SDPSession = @import("sdp_session.zig");
 
 const std = @import("std");

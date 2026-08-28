@@ -9,6 +9,7 @@ const utils = @import("utils.zig");
 
 const SDPAttribute = @import("sdp").Attribute.ParsedAttribute;
 const DtlsTransport = @import("dtls_transport.zig");
+const SctpTransport = @import("sctp_transport.zig");
 const SDPSession = @import("sdp_session.zig");
 const Demuxer = @import("pc/demuxer.zig");
 const RtpTransceiver = @import("rtp_transceiver.zig");
@@ -113,6 +114,7 @@ last_answer: ParsedSessionDescription = .empty(.answer),
 streams: std.ArrayList(webrtc.MediaStream) = .empty,
 transceivers: std.ArrayList(*webrtc.RtpTransceiver) = .empty,
 dtls_transport: DtlsTransport,
+sctp_transport: ?SctpTransport = null,
 demuxer: Demuxer,
 
 /// Used as a counter for generating mid values for transceivers.
@@ -351,7 +353,16 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
     for (offer.session.getMedias()) |*media| {
         const new_media = sdp_session.medias.addOneAssumeCapacity();
         new_media.* = .empty;
-        new_media.* = if (media.isDataChannel() or media.isRejected()) blk: {
+        if (media.isDataChannel()) {
+            new_media.* = try media.clone(pc.allocator);
+            new_media.port = 9;
+            new_media.setIceCredentials(pc.dtls_transport.ice_agent.localCredentials());
+            new_media.setup = if (media.setup == .active) .passive else .active;
+            new_media.sctp_port = pc.sctp_transport.?.local_port;
+            continue;
+        }
+
+        new_media.* = if (media.isRejected()) blk: {
             var cloned = try media.clone(pc.allocator);
             cloned.port = 0;
             cloned.bundle_only = false;
@@ -700,12 +711,11 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
 
     var media_exists: bool = false;
     for (sdp_session.getMedias()) |*media| {
-        if (media.isDataChannel()) continue;
-        const tr = pc.findTransceiverByMid(media.mid).?;
         if (media.port == 0) continue;
-
         media_exists = true;
 
+        if (media.isDataChannel()) continue;
+        const tr = pc.findTransceiverByMid(media.mid).?;
         try tr.sender.setCodecs(
             pc.dtls_transport.getIo(),
             pc.allocator,
@@ -713,7 +723,6 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
             pc.nack_config.send_buffer_size,
         );
         tr.receiver.setCodecs(media.rtp_codec_parameters);
-
         tr.sender.setHeaderExtensions(media.rtp_header_extensions);
         tr.receiver.header_extensions = media.rtp_header_extensions;
         // TODO: track removal
@@ -755,7 +764,10 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     defer track_events.deinit(pc.allocator);
     for (remote_sdp.getMedias(), 0..) |*media, idx| {
         if (media.isDataChannel()) {
-            if (!media.isRejected()) first_media = first_media orelse media;
+            if (!media.isRejected()) {
+                first_media = first_media orelse media;
+                try pc.initSctpTransport(media);
+            }
             continue;
         }
 
@@ -853,6 +865,17 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     };
 }
 
+fn initSctpTransport(pc: *PeerConnection, media: *const SDPSession.Media) !void {
+    if (pc.sctp_transport != null or media.sctp_port.? == 0) return;
+    pc.sctp_transport = undefined;
+    var sctp_transport = &(pc.sctp_transport.?);
+    try sctp_transport.init(.{
+        .dtls_transport = &pc.dtls_transport,
+        .local_port = 5000,
+        .remote_port = media.sctp_port.?,
+    });
+}
+
 fn appendTransceiver(pc: *PeerConnection, tr: *RtpTransceiver) !void {
     const io = pc.dtls_transport.getIo();
     pc.mutex.lockUncancelable(io);
@@ -907,7 +930,9 @@ fn onDtlsEvent(dtls_transport: *DtlsTransport, event: DtlsTransport.Event) void 
             const new_state = nextPeerConnectionState(ice_state, dtls_state);
             if (new_state != pc.connection_state) {
                 pc.connection_state = new_state;
-
+                if (pc.connection_state == .connected) if (pc.sctp_transport) |*sctp| sctp.connect() catch |err| {
+                    Logger.err("Failed to connect SCTP transport: {}", .{err});
+                };
                 if (pc.connection_state == .closed) pc.group.cancel(pc.dtls_transport.getIo());
                 if (pc.handler) |handler| handler.vtable.onConnectionStateChange(handler.userdata, new_state);
                 if (pc.connection_state == .closed) pc.setSignalingState(.closed);
@@ -924,6 +949,7 @@ fn onDtlsData(dtls_transport: *DtlsTransport, data_event: DtlsTransport.DataEven
     switch (data_event) {
         .rtp => |data| pc.handleRtpData(data) catch {},
         .rtcp => |data| pc.handleRtcpData(data) catch {},
+        .app_data => |data| if (pc.sctp_transport) |*sctp| sctp.handleIncomingData(data),
     }
 }
 
@@ -1071,6 +1097,7 @@ test {
     _ = @import("nack/send_buffer.zig");
     _ = @import("nack/receive_log.zig");
     _ = @import("nack/generator.zig");
+    _ = @import("data_channel.zig");
 }
 
 test "nextPeerConnectionState" {

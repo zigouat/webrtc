@@ -16,6 +16,10 @@
             .url = "git+https://github.com/allyourcodebase/mbedtls.git#55f2af148634945e9508a3a50de2ccfe65eb971f",
             .hash = "mbedtls-3.6.6-E4NUR4cWAACCHFSwZ5urTBPK4A6EZlm3pSUjfg4c3QAw",
         },
+        .usrsctp = .{
+            .url = "git+https://github.com/zigouat/usrsctp.git#3ffa5f0d38d5b921bff5756f2317620d36957b29",
+            .hash = "usrsctp-0.0.0-1JVzCAkvAADpBsvEixkvAJw0iGVGXrxjORsv54ALFd2o",
+        },
     },
     .paths = .{
         "build.zig",

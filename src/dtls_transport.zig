@@ -45,6 +45,7 @@ pub const Event = union(enum) {
 pub const DataEvent = union(enum) {
     rtp: []const u8,
     rtcp: []const u8,
+    app_data: []const u8,
 };
 
 pub const Config = struct {
@@ -145,6 +146,10 @@ pub fn sendRtcp(transport: *DtlsTransport, data: []const u8) SendError!void {
     try transport.ice_agent.sendData(encrypted);
 }
 
+pub fn sendData(transport: *DtlsTransport, data: []const u8) !void {
+    try transport.session.writeData(data);
+}
+
 pub fn close(transport: *DtlsTransport) void {
     transport.session.close();
     transport.ice_agent.close();
@@ -162,16 +167,24 @@ fn handleIceData(transport: *DtlsTransport, data: []const u8) !void {
     switch (getPacketType(data)) {
         .dtls => switch (transport.session.connection_state) {
             .new => {},
-            else => {
-                transport.handleDtlsData(data) catch |err| switch (err) {
+            else => |state| {
+                const buffer = try transport.ice_agent.createPacket();
+                defer transport.ice_agent.destroyPacket(buffer);
+                const app_data = transport.handleDtlsData(data, buffer) catch |err| switch (err) {
                     error.Canceled => return error.Canceled,
-                    error.WantData => {},
+                    error.WantData => return,
                     else => |e| {
                         transport.on_event(transport, .{ .dtls_connection_state = transport.session.connection_state });
                         return e;
                     },
                 };
-                transport.on_event(transport, .{ .dtls_connection_state = transport.session.connection_state });
+
+                if (app_data) |d| {
+                    @branchHint(.likely);
+                    transport.on_data(transport, .{ .app_data = d });
+                } else if (state != transport.session.connection_state) {
+                    transport.on_event(transport, .{ .dtls_connection_state = transport.session.connection_state });
+                }
             },
         },
         .rtp => if (transport.in_srtp_session) |*srtp_session| {
@@ -198,8 +211,8 @@ fn onIceEvent(_: ?*anyopaque, ice_agent: *ice.Agent, event: ice.Agent.Event) std
             if (state == .connected) {
                 try transport.mutex.lock(transport.getIo());
                 defer transport.mutex.unlock(transport.getIo());
-                transport.session.handleData(null) catch |err| switch (err) {
-                    error.WantData => {},
+                _ = transport.session.handleData(null, &.{}) catch |err| switch (err) {
+                    error.WantData => return,
                     else => |e| Logger.err("Error occurred while handling dtls message: {}", .{e}),
                 };
             }
@@ -254,17 +267,17 @@ fn handleFinTimeout(transport: *DtlsTransport, time_ms: u32) !void {
     try transport.mutex.lock(io);
     defer transport.mutex.unlock(io);
     transport.timer.final_timer_expired = true;
-    transport.session.handleData(null) catch |err| switch (err) {
+    _ = transport.session.handleData(null, &.{}) catch |err| switch (err) {
         error.WantData => {},
         else => |e| Logger.err("Error occurred while handling dtls message: {}", .{e}),
     };
 }
 
-fn handleDtlsData(transport: *DtlsTransport, data: []const u8) !void {
+fn handleDtlsData(transport: *DtlsTransport, data: []const u8, out_data: []u8) !?[]const u8 {
     try transport.mutex.lock(transport.getIo());
     defer transport.mutex.unlock(transport.getIo());
 
-    try transport.session.handleData(data);
+    const result = try transport.session.handleData(data, out_data);
     errdefer transport.session.connection_state = .failed;
 
     // TODO: don't set connection state of dtls until we create the whole srtp session.
@@ -284,6 +297,8 @@ fn handleDtlsData(transport: *DtlsTransport, data: []const u8) !void {
         }
         transport.out_srtp_session = try srtp.Session.init(transport.getIo(), transport.allocator, &srtp_profile.local_keying_material, profile);
     }
+
+    return result;
 }
 
 fn getPacketType(data: []const u8) PacketType {

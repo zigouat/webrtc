@@ -161,24 +161,23 @@ pub const Session = struct {
         @memcpy(&session.peer_fingerprint, fingerprint);
     }
 
-    pub fn handleData(session: *Session, data: ?[]const u8) HandleDataError!void {
+    pub fn handleData(session: *Session, data: ?[]const u8, out_buffer: []u8) HandleDataError!?[]const u8 {
+        if (session.connection_state == .new) {
+            session.connection_state = .connecting;
+        }
+
         switch (session.connection_state) {
-            .new => {
-                session.connection_state = .connecting;
-                try session.handleData(data);
-            },
             .connecting => {
                 session.received_data = data;
                 try session.handshake();
             },
             .connected => {
-                if (data == null) return;
+                if (data == null) return null;
                 session.received_data = data;
 
-                var buffer: [1400]u8 = @splat(0);
-                const ret = m.mbedtls_ssl_read(&session.ssl, (&buffer).ptr, buffer.len);
+                const ret = m.mbedtls_ssl_read(&session.ssl, (&out_buffer).ptr, out_buffer.len);
                 if (ret > 0) {
-                    // Received answer
+                    return out_buffer[0..@intCast(ret)];
                 } else switch (ret) {
                     m.MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY => {
                         Logger.warn("Peer closed connection", .{});
@@ -186,12 +185,29 @@ pub const Session = struct {
                     },
                     m.MBEDTLS_ERR_SSL_WANT_READ, m.MBEDTLS_ERR_SSL_WANT_WRITE => {},
                     else => |err_code| {
-                        m.mbedtls_strerror(err_code, buffer[0..].ptr, buffer.len);
-                        Logger.err("Error: {s}", .{buffer});
+                        m.mbedtls_strerror(err_code, out_buffer[0..].ptr, out_buffer.len);
+                        Logger.err("Error: {s}", .{out_buffer});
+                        return error.HandshakeFailed;
                     },
                 }
             },
             else => return error.InvalidState,
+        }
+
+        return null;
+    }
+
+    pub fn writeData(session: *Session, data: []const u8) !void {
+        var len = data.len;
+        var offset: usize = 0;
+
+        while (true) {
+            const ret = m.mbedtls_ssl_write(&session.ssl, data.ptr, data.len);
+            if (ret < 0) return error.WriteDataFailed;
+            if (ret < len) {
+                offset += @intCast(ret);
+                len -= @intCast(ret);
+            } else break;
         }
     }
 
@@ -474,18 +490,18 @@ fn createPeers(peer1: *WrappedSession, peer2: *WrappedSession, queue: *EventQueu
 }
 
 fn handleHandshake(peer1: *WrappedSession, peer2: *WrappedSession, queue: *EventQueue) !void {
-    const resp = peer2.session.handleData(null);
+    const resp = peer2.session.handleData(null, &.{});
     try testing.expectError(error.WantData, resp);
 
     while (queue.getOne(testing.io)) |write_event| {
         const session, const data = write_event;
         if (session == &peer1.session) {
-            peer2.session.handleData(data) catch |err| switch (err) {
+            _ = peer2.session.handleData(data, &.{}) catch |err| switch (err) {
                 error.WantData => continue,
                 else => return err,
             };
         } else if (session == &peer2.session) {
-            peer1.session.handleData(data) catch |err| switch (err) {
+            _ = peer1.session.handleData(data, &.{}) catch |err| switch (err) {
                 error.WantData => continue,
                 else => return err,
             };
@@ -497,7 +513,7 @@ fn handleHandshake(peer1: *WrappedSession, peer2: *WrappedSession, queue: *Event
     } else |err| return err;
 }
 
-test "dtls session: handshake" {
+test "Dtls session: handshake" {
     var buffer: [1]WriteEvent = undefined;
     var queue = std.Io.Queue(WriteEvent).init(&buffer);
     defer queue.close(testing.io);
@@ -508,19 +524,19 @@ test "dtls session: handshake" {
     defer peer1.deinit();
     defer peer2.deinit();
 
-    const resp = peer2.session.handleData(null);
+    const resp = peer2.session.handleData(null, &.{});
     try testing.expectError(error.WantData, resp);
 
     while (queue.getOne(testing.io)) |write_event| {
         const session, const data = write_event;
         if (session == &peer1.session) {
-            peer2.session.handleData(data) catch |err| switch (err) {
+            _ = peer2.session.handleData(data, &.{}) catch |err| switch (err) {
                 error.WantData => continue,
                 else => return err,
             };
             try testing.expect(peer2.session.connection_state == .connected);
         } else if (session == &peer2.session) {
-            peer1.session.handleData(data) catch |err| switch (err) {
+            _ = peer1.session.handleData(data, &.{}) catch |err| switch (err) {
                 error.WantData => continue,
                 else => return err,
             };
@@ -533,7 +549,7 @@ test "dtls session: handshake" {
     } else |err| return err;
 }
 
-test "dtls session: handshake failed (wrong fingerprint)" {
+test "Dtls session: handshake failed (wrong fingerprint)" {
     var buffer: [1]WriteEvent = undefined;
     var queue = std.Io.Queue(WriteEvent).init(&buffer);
     defer queue.close(testing.io);
@@ -548,19 +564,19 @@ test "dtls session: handshake failed (wrong fingerprint)" {
     testing.io.random(&fingerprint);
     peer1.session.setPeerFingerprint(&fingerprint);
 
-    var resp = peer2.session.handleData(null);
+    var resp = peer2.session.handleData(null, &.{});
     try testing.expectError(error.WantData, resp);
 
     while (queue.getOne(testing.io)) |write_event| {
         const session, const data = write_event;
         if (session == &peer1.session) {
-            resp = peer2.session.handleData(data);
+            resp = peer2.session.handleData(data, &.{});
             if (resp == error.WantData) continue;
 
             try testing.expectError(error.X509Error, resp);
             try testing.expect(peer2.session.connection_state == .failed);
         } else if (session == &peer2.session) {
-            resp = peer1.session.handleData(data);
+            resp = peer1.session.handleData(data, &.{});
             if (resp == error.WantData) continue;
 
             try testing.expectError(error.X509Error, resp);
@@ -571,7 +587,7 @@ test "dtls session: handshake failed (wrong fingerprint)" {
     } else |err| return err;
 }
 
-test "dtls session: export srtp keying material" {
+test "Dtls session: export srtp keying material" {
     var buffer: [1]WriteEvent = undefined;
     var queue = std.Io.Queue(WriteEvent).init(&buffer);
     defer queue.close(testing.io);
@@ -600,7 +616,7 @@ test "dtls session: export srtp keying material" {
     );
 }
 
-test "dtls session: close connection" {
+test "Dtls session: close connection" {
     var buffer: [1]WriteEvent = undefined;
     var queue = std.Io.Queue(WriteEvent).init(&buffer);
     defer queue.close(testing.io);
@@ -617,6 +633,6 @@ test "dtls session: close connection" {
     try testing.expect(peer1.session.connection_state == .closed);
 
     const event = try queue.getOne(testing.io);
-    try peer2.session.handleData(event.@"1");
+    _ = try peer2.session.handleData(event.@"1", &.{});
     try testing.expect(peer2.session.connection_state == .closed);
 }
