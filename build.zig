@@ -31,7 +31,6 @@ pub fn build(b: *std.Build) void {
     });
 
     mod.linkLibrary(mbedtls_artifact);
-    mod.linkLibrary(usrsctp.artifact("sctp"));
     mod.addIncludePath(config_header.getOutputDir());
 
     if (target.result.os.tag == .windows) {
