@@ -186,8 +186,8 @@ pub const Media = struct {
         errdefer allocator.free(new_media.rtp_codec_parameters);
         new_media.rtp_header_extensions = try allocator.dupe(webrtc.RtpHeaderExtensionParameter, media.rtp_header_extensions);
         errdefer allocator.free(new_media.rtp_header_extensions);
-        // new_media.candidates = try allocator.dupe(ice.Candidate, media.candidates);
-        // errdefer allocator.free(new_media.candidates);
+        new_media.candidates = try allocator.dupe(ice.Candidate, media.candidates);
+        errdefer allocator.free(new_media.candidates);
         if (media.track_id) |track_id| new_media.track_id = try allocator.dupe(u8, track_id);
         return new_media;
     }
