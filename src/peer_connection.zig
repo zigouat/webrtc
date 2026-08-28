@@ -867,14 +867,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
 
 fn initSctpTransport(pc: *PeerConnection, media: *const SDPSession.Media) !void {
     if (pc.sctp_transport != null or media.sctp_port.? == 0) return;
-    pc.sctp_transport = .{
-        .socket = undefined,
-        .connection_state = .new,
-        .local_port = 0,
-        .remote_port = 0,
-        .dtls_transport = &pc.dtls_transport,
-    };
-
+    pc.sctp_transport = undefined;
     var sctp_transport = &(pc.sctp_transport.?);
     try sctp_transport.init(.{
         .dtls_transport = &pc.dtls_transport,
@@ -937,9 +930,9 @@ fn onDtlsEvent(dtls_transport: *DtlsTransport, event: DtlsTransport.Event) void 
             const new_state = nextPeerConnectionState(ice_state, dtls_state);
             if (new_state != pc.connection_state) {
                 pc.connection_state = new_state;
-                if (pc.connection_state == .connected) {
-                    if (pc.sctp_transport) |*sctp| sctp.connect() catch @panic("Failed to connect SCTP transport");
-                }
+                if (pc.connection_state == .connected) if (pc.sctp_transport) |*sctp| sctp.connect() catch |err| {
+                    Logger.err("Failed to connect SCTP transport: {}", .{err});
+                };
                 if (pc.connection_state == .closed) pc.group.cancel(pc.dtls_transport.getIo());
                 if (pc.handler) |handler| handler.vtable.onConnectionStateChange(handler.userdata, new_state);
                 if (pc.connection_state == .closed) pc.setSignalingState(.closed);
