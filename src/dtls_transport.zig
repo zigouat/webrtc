@@ -172,7 +172,7 @@ fn handleIceData(transport: *DtlsTransport, data: []const u8) !void {
                 defer transport.ice_agent.destroyPacket(buffer);
                 const app_data = transport.handleDtlsData(data, buffer) catch |err| switch (err) {
                     error.Canceled => return error.Canceled,
-                    error.WantData => return,
+                    error.WantData => null,
                     else => |e| {
                         transport.on_event(transport, .{ .dtls_connection_state = transport.session.connection_state });
                         return e;
@@ -208,15 +208,15 @@ fn onIceEvent(_: ?*anyopaque, ice_agent: *ice.Agent, event: ice.Agent.Event) std
     switch (event) {
         .gathering_state => |state| transport.on_event(transport, .{ .ice_gathering_state = state }),
         .connection_state => |state| {
+            transport.on_event(transport, .{ .ice_connection_state = state });
             if (state == .connected) {
                 try transport.mutex.lock(transport.getIo());
                 defer transport.mutex.unlock(transport.getIo());
                 _ = transport.session.handleData(null, &.{}) catch |err| switch (err) {
-                    error.WantData => return,
+                    error.WantData => {},
                     else => |e| Logger.err("Error occurred while handling dtls message: {}", .{e}),
                 };
             }
-            transport.on_event(transport, .{ .ice_connection_state = state });
         },
         .candidate => |candidate| transport.on_event(transport, .{ .ice_candidate = candidate }),
         else => {},
