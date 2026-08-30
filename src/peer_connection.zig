@@ -947,7 +947,7 @@ fn onDtlsEvent(dtls_transport: *DtlsTransport, event: DtlsTransport.Event) void 
             const new_state = nextPeerConnectionState(ice_state, dtls_state);
             if (new_state != pc.connection_state) {
                 pc.connection_state = new_state;
-                if (pc.connection_state == .connected) pc.sctp_transport.connect(&pc.dtls_transport) catch |err| {
+                if (pc.connection_state == .connected) pc.maybeConnectSctpTransport() catch |err| {
                     Logger.err("Failed to connect SCTP transport: {}", .{err});
                 };
 
@@ -1042,8 +1042,18 @@ fn removeTransceivers(pc: *PeerConnection) void {
 }
 
 fn maybeCloseSctpTransport(pc: *PeerConnection, sdp_session: *const SDPSession) void {
-    for (sdp_session.getMedias()) |*media| if (media.isDataChannel()) {
+    if (sdp_session.getApplicationMedia()) |*media| {
         if (media.isRejected() or media.sctp_port.? == 0) pc.sctp_transport.close();
+    }
+}
+
+fn maybeConnectSctpTransport(pc: *PeerConnection) !void {
+    const local_sess = pc.local_description.?.session;
+    const remote_sess = pc.remote_description.?.session;
+    if (local_sess.getApplicationMedia()) |*local| if (remote_sess.getApplicationMedia()) |*remote| {
+        if (local.isRejected() or remote.isRejected()) return;
+        if (local.sctp_port.? == 0 or remote.sctp_port.? == 0) return;
+        try pc.sctp_transport.connect(&pc.dtls_transport);
     };
 }
 
