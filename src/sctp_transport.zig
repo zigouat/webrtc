@@ -176,3 +176,49 @@ fn handleAppData(sctp_transport: *SctpTranport, ppid: u32, stream_id: u16, data:
     _ = stream_id;
     _ = data;
 }
+
+fn testAssocChange(state: sctp.Notification.AssocChange.State) sctp.Notification.AssocChange {
+    return .{
+        .type = .assoc_change,
+        .flags = 0,
+        .length = 0,
+        .state = state,
+        .err = 0,
+        .outbound_streams = 0,
+        .inbound_streams = 0,
+        .assoc_id = 0,
+        ._sac_info = .{},
+    };
+}
+
+test "SctpTransport.handleAssocChange: COMM_UP transitions to connected" {
+    var transport = init(.{ .local_port = 5000, .remote_port = 5000 });
+
+    var assoc_change = testAssocChange(.COMM_UP);
+    transport.handleAssocChange(&assoc_change);
+
+    try std.testing.expectEqual(.connected, transport.connection_state);
+}
+
+test "SctpTransport.handleAssocChange: COMM_LOST/SHUTDOWN_COMP/CANT_STR_ASSOC transition to closed" {
+    const states = [_]sctp.Notification.AssocChange.State{ .COMM_LOST, .SHUTDOWN_COMP, .CANT_STR_ASSOC };
+    for (states) |state| {
+        var transport = init(.{ .local_port = 5000, .remote_port = 5000 });
+        transport.connection_state = .connected;
+
+        var assoc_change = testAssocChange(state);
+        transport.handleAssocChange(&assoc_change);
+
+        try std.testing.expectEqual(.closed, transport.connection_state);
+    }
+}
+
+test "SctpTransport.handleAssocChange: RESTART leaves connection state unchanged" {
+    var transport = init(.{ .local_port = 5000, .remote_port = 5000 });
+    transport.connection_state = .connected;
+
+    var assoc_change = testAssocChange(.RESTART);
+    transport.handleAssocChange(&assoc_change);
+
+    try std.testing.expectEqual(.connected, transport.connection_state);
+}
