@@ -1042,7 +1042,7 @@ fn removeTransceivers(pc: *PeerConnection) void {
 }
 
 fn maybeCloseSctpTransport(pc: *PeerConnection, sdp_session: *const SDPSession) void {
-    if (sdp_session.getApplicationMedia()) |*media| {
+    if (sdp_session.getApplicationMedia()) |media| {
         if (media.isRejected() or media.sctp_port.? == 0) pc.sctp_transport.close();
     }
 }
@@ -1050,7 +1050,7 @@ fn maybeCloseSctpTransport(pc: *PeerConnection, sdp_session: *const SDPSession) 
 fn maybeConnectSctpTransport(pc: *PeerConnection) !void {
     const local_sess = pc.local_description.?.session;
     const remote_sess = pc.remote_description.?.session;
-    if (local_sess.getApplicationMedia()) |*local| if (remote_sess.getApplicationMedia()) |*remote| {
+    if (local_sess.getApplicationMedia()) |local| if (remote_sess.getApplicationMedia()) |remote| {
         if (local.isRejected() or remote.isRejected()) return;
         if (local.sctp_port.? == 0 or remote.sctp_port.? == 0) return;
         try pc.sctp_transport.connect(&pc.dtls_transport);
