@@ -35,7 +35,6 @@ pub fn init(init_config: InitConfig) SctpTranport {
 pub fn connect(sctp_transport: *SctpTranport, dtls_transport: *DtlsTransport) !void {
     if (sctp_transport.connection_state != .new) return;
 
-    std.debug.print("Connect\n", .{});
     sctp_transport.dtls_transport = dtls_transport;
     sctp_transport.connection_state = .connecting;
 
@@ -141,9 +140,28 @@ fn receive_cb(
 }
 
 fn handleNotification(sctp_transport: *SctpTranport, data: []u8) void {
-    const notification: *sctp.Notification = @ptrCast(@alignCast(data.ptr));
-    _ = notification;
-    _ = sctp_transport;
+    const notif: *sctp.Notification = @ptrCast(@alignCast(data.ptr));
+    Logger.info("handle notification: {s}", .{@tagName(notif.header.type)});
+
+    switch (notif.header.type) {
+        .assoc_change => sctp_transport.handleAssocChange(&notif.assoc_change),
+        .shutdown => sctp_transport.close(),
+        else => {},
+    }
+}
+
+fn handleAssocChange(sctp_transport: *SctpTranport, assoc_change: *sctp.Notification.AssocChange) void {
+    switch (assoc_change.state) {
+        .COMM_UP => {
+            Logger.debug("sctp association up", .{});
+            sctp_transport.connection_state = .connected;
+        },
+        .COMM_LOST, .SHUTDOWN_COMP, .CANT_STR_ASSOC => {
+            Logger.debug("sctp association down", .{});
+            sctp_transport.connection_state = .closed;
+        },
+        .RESTART => Logger.warn("sctp association restarted", .{}),
+    }
 }
 
 fn handleAppData(sctp_transport: *SctpTranport, ppid: u32, stream_id: u16, data: []u8) !void {
