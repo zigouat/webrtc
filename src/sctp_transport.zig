@@ -62,9 +62,13 @@ pub fn connect(sctp_transport: *SctpTranport, dtls_transport: *DtlsTransport) !v
 }
 
 pub fn close(sctp_transport: *SctpTranport) void {
-    if (sctp_transport.connection_state == .closed) return;
-    sctp_transport.connection_state = .closed;
-    sctp_transport.socket.close();
+    switch (sctp_transport.connection_state) {
+        .connecting, .connected => {
+            sctp_transport.connection_state = .closed;
+            sctp_transport.socket.close();
+        },
+        else => {},
+    }
 }
 
 pub fn deinit(sctp_transport: *SctpTranport, allocator: std.mem.Allocator) void {
@@ -72,9 +76,11 @@ pub fn deinit(sctp_transport: *SctpTranport, allocator: std.mem.Allocator) void 
         allocator.destroy(data_channel);
     }
     sctp_transport.data_channels.deinit(allocator);
-    sctp.deregisterAddress(sctp_transport);
     switch (sctp_transport.connection_state) {
-        .connecting, .connected => sctp_transport.socket.close(),
+        .connecting, .connected => {
+            sctp.deregisterAddress(sctp_transport);
+            sctp_transport.socket.close();
+        },
         else => {},
     }
 }
