@@ -466,6 +466,11 @@ pub fn clone(s: *const SDPSession, allocator: std.mem.Allocator) !SDPSession {
     return new_session;
 }
 
+pub fn getApplicationMedia(s: *const SDPSession) ?*const Media {
+    for (s.getMedias()) |*m| if (m.isDataChannel()) return m;
+    return null;
+}
+
 fn writeFingerprint(s: *const SDPSession, w: *std.Io.Writer) !void {
     var attr = SDPAttribute{ .fingerprint = .{ .sha_256 = s.fingerprint } };
     try attr.write(w);

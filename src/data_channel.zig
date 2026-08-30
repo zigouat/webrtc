@@ -55,6 +55,7 @@ pub const Message = union(enum) {
     }
 };
 
+id: u16,
 label: []const u8,
 ordered: bool,
 

@@ -17,8 +17,8 @@
             .hash = "mbedtls-3.6.6-E4NUR4cWAACCHFSwZ5urTBPK4A6EZlm3pSUjfg4c3QAw",
         },
         .usrsctp = .{
-            .url = "git+https://github.com/zigouat/usrsctp.git#3ffa5f0d38d5b921bff5756f2317620d36957b29",
-            .hash = "usrsctp-0.0.0-1JVzCAkvAADpBsvEixkvAJw0iGVGXrxjORsv54ALFd2o",
+            .url = "git+https://github.com/zigouat/usrsctp.git#e6d647fa1edcd6872b2708944f55bbb5a30996d0",
+            .hash = "usrsctp-0.0.0-1JVzCD4yAACGenwkFufO5dITI48t26iXfvIR5JwnB0f3",
         },
     },
     .paths = .{

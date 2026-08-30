@@ -6,3 +6,5 @@ pub const max_packet_size = 1500;
 
 pub const sdp_rejected_port = 0;
 pub const sdp_default_port = 9;
+
+pub const default_sctp_port = 5000;

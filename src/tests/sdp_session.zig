@@ -506,6 +506,56 @@ test "parse: data channel media requires sctp-port" {
     try testing.expectError(error.SctpPortRequired, SDPSession.parse(testing.allocator, sdp));
 }
 
+test "getApplicationMedia: returns null when no application media" {
+    const sdp = head ++
+        \\a=group:BUNDLE 0
+        \\m=video 9 UDP/TLS/RTP/SAVPF 96
+        \\c=IN IP4 0.0.0.0
+        \\a=rtpmap:96 VP8/90000
+        \\a=mid:0
+        \\a=ice-ufrag:YBvMzurJIEpKGlbQ
+        \\a=ice-pwd:xWVHffXavbkalUfEXPyeKkyMRnyyYggx
+        \\a=rtcp-mux
+        \\
+    ;
+
+    var session: SDPSession = try .parse(testing.allocator, sdp);
+    defer session.deinit(testing.allocator);
+
+    try testing.expectEqual(1, session.getMedias().len);
+    try testing.expect(session.getApplicationMedia() == null);
+}
+
+test "getApplicationMedia: returns the application media" {
+    const sdp = head ++
+        \\a=group:BUNDLE 0 1
+        \\m=video 9 UDP/TLS/RTP/SAVPF 96
+        \\c=IN IP4 0.0.0.0
+        \\a=rtpmap:96 VP8/90000
+        \\a=setup:actpass
+        \\a=mid:0
+        \\a=ice-ufrag:YBvMzurJIEpKGlbQ
+        \\a=ice-pwd:xWVHffXavbkalUfEXPyeKkyMRnyyYggx
+        \\a=rtcp-mux
+        \\m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+        \\c=IN IP4 0.0.0.0
+        \\a=setup:actpass
+        \\a=mid:1
+        \\a=ice-ufrag:YBvMzurJIEpKGlbQ
+        \\a=ice-pwd:xWVHffXavbkalUfEXPyeKkyMRnyyYggx
+        \\a=sctp-port:5000
+        \\
+    ;
+
+    var session: SDPSession = try .parse(testing.allocator, sdp);
+    defer session.deinit(testing.allocator);
+
+    try testing.expectEqual(2, session.getMedias().len);
+    const media = session.getApplicationMedia() orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(5000, media.sctp_port);
+    try testing.expectEqual(try Mid.fromInt(1), media.mid);
+}
+
 test "write: media" {
     var media: SDPSession.Media = .empty;
     media.kind = .audio;
