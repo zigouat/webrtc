@@ -189,7 +189,7 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
         .nack_config = config.peer_config.nack_config,
         .media_engine = config.media_engine,
         .handler = config.handler,
-        .sctp_transport = SctpTransport.init(.{
+        .sctp_transport = SctpTransport.init(allocator, .{
             .local_port = constants.default_sctp_port,
             .remote_port = 0,
         }),
@@ -460,9 +460,13 @@ pub fn writeLocalDescription(pc: *PeerConnection, w: *Io.Writer) !void {
     return if (sess_desc) |*desc| try pc.writeDescriptionWithCandidates(desc, w) else error.NoLocalDescription;
 }
 
-pub fn createDataChannel(pc: *PeerConnection, label: []const u8) !*DataChannel {
+/// Create a new data channel.
+pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataChannel.Parameters) !*DataChannel {
     try pc.checkNotClosed();
-    return try pc.sctp_transport.addDataChannel(pc.allocator, label);
+    if (label.len > constants.max_data_channel_label_length) return error.LabelTooLong;
+    if (params.protocol.len > constants.max_data_channel_label_length) return error.ProtocolTooLong;
+    if (params.max_packet_lifetime != 0 and params.max_retransmits != 0) return error.InvalidParameters;
+    return try pc.sctp_transport.addDataChannel(pc.allocator, label, params);
 }
 
 pub fn close(pc: *PeerConnection) void {

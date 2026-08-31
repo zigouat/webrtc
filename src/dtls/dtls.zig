@@ -76,6 +76,8 @@ pub const Session = struct {
 
     pub const HandleDataError = error{InvalidState} || HandshakeError;
 
+    pub const Role = enum { client, server };
+
     const SessionKeys = struct {
         tls_profile: u32,
         master_secret: []const u8,
@@ -215,6 +217,10 @@ pub const Session = struct {
         try session.handshake();
     }
 
+    pub fn getRole(session: *const Session) Role {
+        return if (m.mbedtls_ssl_conf_get_endpoint(&session.ssl_conf) == m.MBEDTLS_SSL_IS_SERVER) .server else .client;
+    }
+
     pub fn exportSrtpKeyingMaterial(session: *Session) !SrtpProfile {
         var profile: m.mbedtls_dtls_srtp_info = .{};
         m.mbedtls_ssl_get_dtls_srtp_negotiation_result(&session.ssl, &profile);
@@ -241,7 +247,7 @@ pub const Session = struct {
 
                 var srtp_profile: SrtpProfile = undefined;
                 srtp_profile.profile = value;
-                if (m.mbedtls_ssl_conf_get_endpoint(&session.ssl_conf) == m.MBEDTLS_SSL_IS_SERVER) {
+                if (session.getRole() == .server) {
                     @memcpy(srtp_profile.remote_keying_material[0..16], keying_material[0..16]);
                     @memcpy(srtp_profile.remote_keying_material[16..], keying_material[32..46]);
                     @memcpy(srtp_profile.local_keying_material[0..16], keying_material[16..32]);

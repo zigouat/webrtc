@@ -155,6 +155,10 @@ pub fn close(transport: *DtlsTransport) void {
     transport.ice_agent.close();
 }
 
+pub fn getRole(transport: *const DtlsTransport) dtls.Session.Role {
+    return transport.session.getRole();
+}
+
 fn onIceData(_: ?*anyopaque, ice_agent: *ice.Agent, data: []const u8) std.Io.Cancelable!void {
     const transport: *DtlsTransport = @alignCast(@fieldParentPtr("ice_agent", ice_agent));
     transport.handleIceData(data) catch |err| switch (err) {

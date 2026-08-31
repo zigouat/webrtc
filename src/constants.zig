@@ -8,3 +8,4 @@ pub const sdp_rejected_port = 0;
 pub const sdp_default_port = 9;
 
 pub const default_sctp_port = 5000;
+pub const max_data_channel_label_length = 256;
