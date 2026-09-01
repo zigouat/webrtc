@@ -2,6 +2,8 @@ const std = @import("std");
 
 const DataChannel = @This();
 
+pub const State = enum { connecting, open, closing, closed };
+
 pub const MessageType = enum(u8) {
     ack = 0x02,
     open = 0x03,
@@ -89,12 +91,22 @@ pub const Parameters = struct {
     id: ?u16 = null,
 };
 
+pub const Event = union(enum) {
+    open: void,
+    close: void,
+    err: void,
+    text_message: []const u8,
+    binary_message: []const u8,
+};
+
 id: ?u16,
 label: []const u8,
 ordered: bool,
 max_packet_lifetime: u32,
 max_retransmits: u32,
 protocol: []const u8,
+ready_state: State,
+on_event: ?*const fn (data_channel: *DataChannel, event: Event) void = null,
 
 pub fn init(allocator: std.mem.Allocator, label: []const u8, params: Parameters) std.mem.Allocator.Error!DataChannel {
     const slice = try allocator.alloc(u8, label.len + params.protocol.len);
@@ -108,6 +120,7 @@ pub fn init(allocator: std.mem.Allocator, label: []const u8, params: Parameters)
         .max_packet_lifetime = params.max_packet_lifetime,
         .max_retransmits = params.max_retransmits,
         .protocol = slice[label.len..],
+        .ready_state = State.connecting,
     };
 }
 
@@ -134,6 +147,29 @@ pub fn writeOpenMessage(data_channel: *DataChannel, buffer: []u8) std.Io.Writer.
     try w.writeAll(data_channel.protocol);
 
     return w.buffered();
+}
+
+pub fn format(data_channel: *DataChannel, writer: *std.Io.Writer) !void {
+    try writer.print("DataChannel {{ id: {?}, label: \"{s}\", ordered: {}, max_packet_lifetime: {}, max_retransmits: {}, protocol: \"{s}\", ready_state: {} }}", .{
+        data_channel.id,
+        data_channel.label,
+        data_channel.ordered,
+        data_channel.max_packet_lifetime,
+        data_channel.max_retransmits,
+        data_channel.protocol,
+        data_channel.ready_state,
+    });
+}
+
+pub fn setReadyState(data_channel: *DataChannel, state: State) void {
+    data_channel.ready_state = state;
+    if (data_channel.on_event) |on_event| {
+        switch (state) {
+            .open => on_event(data_channel, .open),
+            .closed => on_event(data_channel, .close),
+            else => {},
+        }
+    }
 }
 
 fn getChannelType(data_channel: *DataChannel) Message.ChannelType {
