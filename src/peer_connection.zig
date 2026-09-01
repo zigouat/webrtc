@@ -768,7 +768,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
         try pc.dtls_transport.gatherCandidates(pc.last_answer.getIceRole());
     }
 
-    try pc.demuxer.updateMaps(pc.dtls_transport.getIo(), &sdp_session);
+    try pc.demuxer.updateMaps(pc.dtls_transport.getIo(), &sdp_session, pc.transceivers.items);
     try pc.startRtpRtcpInterceptors(renegotiation);
     pc.maybeCloseSctpTransport(&sdp_session);
 
@@ -878,7 +878,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
 
     switch (session_desc.type) {
         .answer => {
-            try pc.demuxer.updateMaps(pc.dtls_transport.getIo(), &remote_sdp);
+            try pc.demuxer.updateMaps(pc.dtls_transport.getIo(), &remote_sdp, pc.transceivers.items);
             try pc.startRtpRtcpInterceptors(renegotiation);
             pc.maybeCloseSctpTransport(&remote_sdp);
 
@@ -1000,8 +1000,15 @@ fn handleRtpData(pc: *PeerConnection, data: []const u8) !void {
     const io = pc.dtls_transport.getIo();
     var packet = try rtp.Packet.parse(data);
 
-    const mid = try pc.demuxer.getMid(io, &packet) orelse return;
-    const tr = pc.findTransceiverByMid(mid) orelse return;
+    const tr = switch (pc.demuxer.getTransceiver(io, &packet)) {
+        .transceiver => |tr| tr,
+        .mid => |mid| blk: {
+            const tr = pc.findTransceiverByMid(mid) orelse return;
+            try pc.demuxer.cacheSsrc(io, packet.header.ssrc, tr);
+            break :blk tr;
+        },
+        .none => return,
+    };
 
     if (try tr.receiver.handleRtpPacket(&packet)) {
         if (tr.receiver.nack) if (pc.nack_generator) |*nack_generator| {

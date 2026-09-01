@@ -3,70 +3,82 @@ const SDPSession = @import("../sdp_session.zig");
 const rtp = @import("rtp");
 const Mid = @import("../mid.zig");
 const webrtc = @import("../webrtc.zig");
+const RtpTransceiver = @import("../rtp_transceiver.zig");
 
 const Demuxer = @This();
 
 const max_entries = 1000;
 
+pub const Lookup = union(enum) {
+    transceiver: *RtpTransceiver,
+    mid: Mid.Int,
+    none,
+};
+
 generated_ssrc: std.AutoHashMap(u32, void),
-ssrc_to_mid: std.AutoHashMap(u32, Mid.Int),
-pt_to_mid: std.AutoHashMap(u8, Mid.Int),
+ssrc_to_transceiver: std.AutoHashMap(u32, *RtpTransceiver),
+pt_to_transceiver: std.AutoHashMap(u8, *RtpTransceiver),
 mid_id: ?u16 = null,
 mutex: std.Io.Mutex = .init,
 
 pub fn init(allocator: std.mem.Allocator) Demuxer {
     return .{
         .generated_ssrc = .init(allocator),
-        .pt_to_mid = .init(allocator),
-        .ssrc_to_mid = .init(allocator),
+        .pt_to_transceiver = .init(allocator),
+        .ssrc_to_transceiver = .init(allocator),
     };
 }
 
 pub fn deinit(demuxer: *Demuxer) void {
     demuxer.generated_ssrc.deinit();
-    demuxer.pt_to_mid.deinit();
-    demuxer.ssrc_to_mid.deinit();
+    demuxer.pt_to_transceiver.deinit();
+    demuxer.ssrc_to_transceiver.deinit();
 }
 
-pub fn updateMaps(demuxer: *Demuxer, io: std.Io, sdp_session: *const SDPSession) !void {
+pub fn updateMaps(demuxer: *Demuxer, io: std.Io, sdp_session: *const SDPSession, transceivers: []const *RtpTransceiver) !void {
     try demuxer.mutex.lock(io);
     defer demuxer.mutex.unlock(io);
 
     for (sdp_session.getMedias()) |*media| {
-        if (media.ssrc) |ssrc| try demuxer.addEntry(ssrc, media.mid);
-        if (media.rtx_ssrc) |ssrc| try demuxer.addEntry(ssrc, media.mid);
-
         if (demuxer.mid_id == null) for (media.rtp_header_extensions) |ext| if (std.mem.eql(u8, ext.uri, webrtc.mid_extension_uri)) {
             demuxer.mid_id = ext.id;
         };
+
+        const tr = findTransceiverByMid(transceivers, media.mid) orelse continue;
+
+        if (media.ssrc) |ssrc| try demuxer.addEntry(ssrc, tr);
+        if (media.rtx_ssrc) |ssrc| try demuxer.addEntry(ssrc, tr);
 
         inner: for (media.rtp_codec_parameters) |codec| {
             for (sdp_session.getMedias()) |*m| if (media.mid != m.mid and m.hasPayload(codec.payload_type))
                 continue :inner;
 
-            try demuxer.pt_to_mid.put(codec.payload_type, media.mid);
+            try demuxer.pt_to_transceiver.put(codec.payload_type, tr);
         }
     }
 }
 
-pub fn getMid(demuxer: *Demuxer, io: std.Io, packet: *const rtp.Packet) !?Mid.Int {
-    try demuxer.mutex.lock(io);
+pub fn getTransceiver(demuxer: *Demuxer, io: std.Io, packet: *const rtp.Packet) Lookup {
+    demuxer.mutex.lockUncancelable(io);
     defer demuxer.mutex.unlock(io);
 
-    if (demuxer.ssrc_to_mid.get(packet.header.ssrc)) |mid| {
+    if (demuxer.ssrc_to_transceiver.get(packet.header.ssrc)) |tr| {
         @branchHint(.likely);
-        return mid;
+        return .{ .transceiver = tr };
     }
 
-    if (demuxer.mid_id != null) if (getMidFromPacket(packet, demuxer.mid_id.?) catch return null) |mid| {
-        if (mid.len <= 3) {
-            const packed_mid = Mid.fromBytes(mid) catch unreachable;
-            try demuxer.addEntry(packet.header.ssrc, packed_mid);
-            return packed_mid;
-        }
+    if (demuxer.mid_id != null) if (getMidFromPacket(packet, demuxer.mid_id.?) catch return .none) |mid| {
+        if (mid.len <= 3) return .{ .mid = Mid.fromBytes(mid) catch unreachable };
     };
 
-    return if (demuxer.pt_to_mid.get(packet.header.payload_type)) |value| value else null;
+    if (demuxer.pt_to_transceiver.get(packet.header.payload_type)) |tr| return .{ .transceiver = tr };
+    return .none;
+}
+
+pub fn cacheSsrc(demuxer: *Demuxer, io: std.Io, ssrc: u32, tr: *RtpTransceiver) !void {
+    try demuxer.mutex.lock(io);
+    defer demuxer.mutex.unlock(io);
+    try demuxer.addEntry(ssrc, tr);
 }
 
 pub fn registerRandomSsrc(demuxer: *Demuxer, io: std.Io) !u32 {
@@ -91,9 +103,14 @@ fn getMidFromPacket(packet: *const rtp.Packet, mid_id: u16) !?[]const u8 {
     return null;
 }
 
-fn addEntry(demuxer: *Demuxer, ssrc: u32, mid: Mid.Int) !void {
-    if (demuxer.ssrc_to_mid.count() >= max_entries) return error.TooManyEntries;
-    try demuxer.ssrc_to_mid.put(ssrc, mid);
+fn findTransceiverByMid(transceivers: []const *RtpTransceiver, mid: Mid.Int) ?*RtpTransceiver {
+    for (transceivers) |tr| if (tr.mid) |tr_mid| if (tr_mid == mid) return tr;
+    return null;
+}
+
+fn addEntry(demuxer: *Demuxer, ssrc: u32, tr: *RtpTransceiver) !void {
+    if (demuxer.ssrc_to_transceiver.count() >= max_entries) return error.TooManyEntries;
+    try demuxer.ssrc_to_transceiver.put(ssrc, tr);
     try demuxer.generated_ssrc.put(ssrc, {});
 }
 
@@ -158,65 +175,102 @@ fn testPacket(ssrc: u32) rtp.Packet {
     };
 }
 
+fn testTransceiver(allocator: std.mem.Allocator, io: std.Io, mid: Mid.Int) !*RtpTransceiver {
+    const tr = try allocator.create(RtpTransceiver);
+    tr.* = .{
+        .sender = .init(null),
+        .receiver = .init(.init(io, .video)),
+        .kind = .video,
+        .direction = .sendrecv,
+        .mid = mid,
+        .transport = undefined,
+    };
+    return tr;
+}
+
 test "Demuxer.updateMaps" {
-    var demuxer = init(std.testing.allocator);
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    var demuxer = init(allocator);
     defer demuxer.deinit();
 
-    var session = try testSdpSession(std.testing.allocator);
-    defer session.deinit(std.testing.allocator);
+    var session = try testSdpSession(allocator);
+    defer session.deinit(allocator);
 
-    try demuxer.updateMaps(std.testing.io, &session);
+    const tr1 = try testTransceiver(allocator, io, mid_1);
+    defer tr1.deinit(io, allocator);
+    const tr2 = try testTransceiver(allocator, io, mid_2);
+    defer tr2.deinit(io, allocator);
+    const tr3 = try testTransceiver(allocator, io, mid_3);
+    defer tr3.deinit(io, allocator);
+    const transceivers = [_]*RtpTransceiver{ tr1, tr2, tr3 };
+
+    try demuxer.updateMaps(io, &session, &transceivers);
 
     try std.testing.expectEqual(mid_ext_id, demuxer.mid_id.?);
 
-    try std.testing.expectEqual(3, demuxer.ssrc_to_mid.count());
-    try std.testing.expectEqual(mid_1, demuxer.ssrc_to_mid.get(0x10101010).?);
-    try std.testing.expectEqual(mid_1, demuxer.ssrc_to_mid.get(0x30303030).?);
-    try std.testing.expectEqual(mid_3, demuxer.ssrc_to_mid.get(0x20202020).?);
+    try std.testing.expectEqual(3, demuxer.ssrc_to_transceiver.count());
+    try std.testing.expectEqual(tr1, demuxer.ssrc_to_transceiver.get(0x10101010).?);
+    try std.testing.expectEqual(tr1, demuxer.ssrc_to_transceiver.get(0x30303030).?);
+    try std.testing.expectEqual(tr3, demuxer.ssrc_to_transceiver.get(0x20202020).?);
 
-    try std.testing.expectEqual(5, demuxer.pt_to_mid.count());
-    var entry = demuxer.pt_to_mid.get(97);
+    try std.testing.expectEqual(5, demuxer.pt_to_transceiver.count());
+    var entry = demuxer.pt_to_transceiver.get(97);
     try std.testing.expect(entry != null);
-    try std.testing.expectEqual(mid_1, entry.?);
+    try std.testing.expectEqual(tr1, entry.?);
 
-    entry = demuxer.pt_to_mid.get(99);
+    entry = demuxer.pt_to_transceiver.get(99);
     try std.testing.expect(entry != null);
-    try std.testing.expectEqual(mid_2, entry.?);
+    try std.testing.expectEqual(tr2, entry.?);
 
-    entry = demuxer.pt_to_mid.get(100);
+    entry = demuxer.pt_to_transceiver.get(100);
     try std.testing.expect(entry != null);
-    try std.testing.expectEqual(mid_2, entry.?);
+    try std.testing.expectEqual(tr2, entry.?);
 
-    entry = demuxer.pt_to_mid.get(105);
+    entry = demuxer.pt_to_transceiver.get(105);
     try std.testing.expect(entry != null);
-    try std.testing.expectEqual(mid_3, entry.?);
+    try std.testing.expectEqual(tr3, entry.?);
 
-    entry = demuxer.pt_to_mid.get(106);
+    entry = demuxer.pt_to_transceiver.get(106);
     try std.testing.expect(entry != null);
-    try std.testing.expectEqual(mid_3, entry.?);
+    try std.testing.expectEqual(tr3, entry.?);
 }
 
-test "Demuxer.getMid" {
+test "Demuxer.getTransceiver" {
     const io = std.testing.io;
+    const allocator = std.testing.allocator;
 
-    var demuxer = init(std.testing.allocator);
+    var demuxer = init(allocator);
     defer demuxer.deinit();
 
-    var session = try testSdpSession(std.testing.allocator);
-    defer session.deinit(std.testing.allocator);
+    var session = try testSdpSession(allocator);
+    defer session.deinit(allocator);
 
-    try demuxer.updateMaps(io, &session);
+    const tr1 = try testTransceiver(allocator, io, mid_1);
+    defer tr1.deinit(io, allocator);
+    const tr2 = try testTransceiver(allocator, io, mid_2);
+    defer tr2.deinit(io, allocator);
+    const tr3 = try testTransceiver(allocator, io, mid_3);
+    defer tr3.deinit(io, allocator);
+    const transceivers = [_]*RtpTransceiver{ tr1, tr2, tr3 };
+
+    try demuxer.updateMaps(io, &session, &transceivers);
 
     var packet = testPacket(0);
-    const mid = try demuxer.getMid(io, &packet);
-    try std.testing.expect(mid != null);
+    var lookup = demuxer.getTransceiver(io, &packet);
+    try std.testing.expectEqual(.transceiver, std.meta.activeTag(lookup));
+    try std.testing.expectEqual(tr2, lookup.transceiver);
 
     packet.header.payload_type = 96;
-    try std.testing.expect(try demuxer.getMid(io, &packet) == null);
+    lookup = demuxer.getTransceiver(io, &packet);
+    try std.testing.expectEqual(.none, std.meta.activeTag(lookup));
 
     packet.header.ssrc = 0x10101010;
     packet.header.payload_type = 10;
-    try std.testing.expect(try demuxer.getMid(io, &packet) != null);
+    lookup = demuxer.getTransceiver(io, &packet);
+    try std.testing.expectEqual(.transceiver, std.meta.activeTag(lookup));
+    try std.testing.expectEqual(tr1, lookup.transceiver);
 }
 
 test "Demuxer.registerRandomSsrc: returns unique ssrcs and tracks them" {
@@ -234,16 +288,25 @@ test "Demuxer.registerRandomSsrc: returns unique ssrcs and tracks them" {
     try std.testing.expectEqual(2, demuxer.generated_ssrc.count());
 }
 
-test "Demuxer.getMid: falls back to the mid header extension when ssrc is unknown" {
+test "Demuxer.getTransceiver: falls back to the mid header extension when ssrc is unknown" {
     const io = std.testing.io;
+    const allocator = std.testing.allocator;
 
-    var demuxer = init(std.testing.allocator);
+    var demuxer = init(allocator);
     defer demuxer.deinit();
 
-    var session = try testSdpSession(std.testing.allocator);
-    defer session.deinit(std.testing.allocator);
+    var session = try testSdpSession(allocator);
+    defer session.deinit(allocator);
 
-    try demuxer.updateMaps(io, &session);
+    const tr1 = try testTransceiver(allocator, io, mid_1);
+    defer tr1.deinit(io, allocator);
+    const tr2 = try testTransceiver(allocator, io, mid_2);
+    defer tr2.deinit(io, allocator);
+    const tr3 = try testTransceiver(allocator, io, mid_3);
+    defer tr3.deinit(io, allocator);
+    const transceivers = [_]*RtpTransceiver{ tr1, tr2, tr3 };
+
+    try demuxer.updateMaps(io, &session, &transceivers);
     try std.testing.expectEqual(mid_ext_id, demuxer.mid_id.?);
 
     var ext_buffer: [64]u8 = undefined;
@@ -266,25 +329,41 @@ test "Demuxer.getMid: falls back to the mid header extension when ssrc is unknow
         .payload = &.{},
     };
 
-    try std.testing.expectEqual(mid_1, (try demuxer.getMid(io, &packet)).?);
-    try std.testing.expect(demuxer.ssrc_to_mid.contains(packet.header.ssrc));
-    try std.testing.expectEqual(mid_1, (try demuxer.getMid(io, &packet)).?);
+    var lookup = demuxer.getTransceiver(io, &packet);
+    try std.testing.expectEqual(.mid, std.meta.activeTag(lookup));
+    try std.testing.expectEqual(mid_1, lookup.mid);
+
+    try std.testing.expect(!demuxer.ssrc_to_transceiver.contains(packet.header.ssrc));
+
+    try demuxer.cacheSsrc(io, packet.header.ssrc, tr1);
+    try std.testing.expect(demuxer.ssrc_to_transceiver.contains(packet.header.ssrc));
+
+    lookup = demuxer.getTransceiver(io, &packet);
+    try std.testing.expectEqual(.transceiver, std.meta.activeTag(lookup));
+    try std.testing.expectEqual(tr1, lookup.transceiver);
 }
 
-test "Demuxer.getMid: returs error when count entries exceeds max_entries" {
-    var demuxer = init(std.testing.allocator);
+test "Demuxer.getTransceiver: returs error when count entries exceeds max_entries" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    var demuxer = init(allocator);
     demuxer.mid_id = mid_ext_id;
     defer demuxer.deinit();
+
+    const tr = try testTransceiver(allocator, io, mid_1);
+    defer tr.deinit(io, allocator);
 
     var packet = testPacket(0xBEBEBEBE);
     packet.extension = .{ .profile = .one_byte, .data = &.{ 0x40, '1', 0, 0 } };
 
+    var ssrc: u32 = 0xBEBEBEBE;
     for (0..max_entries) |_| {
-        const mid = try demuxer.getMid(std.testing.io, &packet);
-        try std.testing.expect(mid != null);
-        try std.testing.expectEqual(mid_1, mid.?);
-        packet.header.ssrc += 1;
+        try demuxer.cacheSsrc(io, packet.header.ssrc, tr);
+        ssrc += 1;
+        packet.header.ssrc = ssrc;
     }
 
-    try std.testing.expectError(error.TooManyEntries, demuxer.getMid(std.testing.io, &packet));
+    try std.testing.expectEqual(mid_1, demuxer.getTransceiver(io, &packet).mid);
+    try std.testing.expectError(error.TooManyEntries, demuxer.cacheSsrc(io, packet.header.ssrc, tr));
 }
