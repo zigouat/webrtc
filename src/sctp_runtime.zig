@@ -18,7 +18,7 @@ fn sendSctpData(addr: ?*anyopaque, buffer: ?*anyopaque, len: usize, _: u8, _: u8
         const data = buf[0..len];
         sctp_transport.sendData(data) catch |err| {
             std.log.err("Failed to send SCTP data: {}", .{err});
-            return sctp.c.EIO;
+            return sctp.Error.IO;
         };
     }
 

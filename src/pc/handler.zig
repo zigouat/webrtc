@@ -1,6 +1,7 @@
 //! This file defines the Handler struct, which is used to handle events from the PeerConnection.
 
 const std = @import("std");
+const webrtc = @import("../webrtc.zig");
 const ice = @import("ice");
 const PeerConnection = @import("../peer_connection.zig");
 const RtpTransceiver = @import("../webrtc.zig").RtpTransceiver;
@@ -23,6 +24,8 @@ const VTable = struct {
     onTrack: *const fn (?*anyopaque, RtpTransceiver.TrackEventInit) void = onTrack,
     /// Called when a new ICE candidate is found.
     onIceCandidate: *const fn (?*anyopaque, ?ice.Candidate) void = onIceCandidate,
+    /// Called when a new remote data channel is created.
+    onDataChannel: *const fn (?*anyopaque, *webrtc.DataChannel) void = onDataChannel,
 };
 
 fn onNegotiationNeeded(userdata: ?*anyopaque) void {
@@ -52,4 +55,9 @@ fn onTrack(userdata: ?*anyopaque, event: RtpTransceiver.TrackEventInit) void {
 fn onIceCandidate(userdata: ?*anyopaque, candidate: ?ice.Candidate) void {
     _ = userdata;
     _ = candidate;
+}
+
+fn onDataChannel(userdata: ?*anyopaque, channel: *webrtc.DataChannel) void {
+    _ = userdata;
+    _ = channel;
 }

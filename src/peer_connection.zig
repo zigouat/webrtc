@@ -189,9 +189,10 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
         .nack_config = config.peer_config.nack_config,
         .media_engine = config.media_engine,
         .handler = config.handler,
-        .sctp_transport = SctpTransport.init(.{
+        .sctp_transport = SctpTransport.init(io, allocator, .{
             .local_port = constants.default_sctp_port,
             .remote_port = 0,
+            .on_event = onSctpTransportEvent,
         }),
     };
 }
@@ -460,9 +461,13 @@ pub fn writeLocalDescription(pc: *PeerConnection, w: *Io.Writer) !void {
     return if (sess_desc) |*desc| try pc.writeDescriptionWithCandidates(desc, w) else error.NoLocalDescription;
 }
 
-pub fn createDataChannel(pc: *PeerConnection, label: []const u8) !*DataChannel {
+/// Create a new data channel.
+pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataChannel.Parameters) !*DataChannel {
     try pc.checkNotClosed();
-    return try pc.sctp_transport.addDataChannel(pc.allocator, label);
+    if (label.len > constants.max_data_channel_label_length) return error.LabelTooLong;
+    if (params.protocol.len > constants.max_data_channel_label_length) return error.ProtocolTooLong;
+    if (params.max_packet_lifetime != 0 and params.max_retransmits != 0) return error.InvalidParameters;
+    return try pc.sctp_transport.addDataChannel(pc.allocator, label, params);
 }
 
 pub fn close(pc: *PeerConnection) void {
@@ -970,6 +975,16 @@ fn onDtlsData(dtls_transport: *DtlsTransport, data_event: DtlsTransport.DataEven
         .rtp => |data| pc.handleRtpData(data) catch {},
         .rtcp => |data| pc.handleRtcpData(data) catch {},
         .app_data => |data| pc.sctp_transport.handleIncomingData(data),
+    }
+}
+
+fn onSctpTransportEvent(sctp_transport: *SctpTransport, event: SctpTransport.Event) void {
+    const pc: *PeerConnection = @alignCast(@fieldParentPtr("sctp_transport", sctp_transport));
+    switch (event) {
+        .data_channel => |channel| if (pc.handler) |handler| {
+            handler.vtable.onDataChannel(handler.userdata, channel);
+        },
+        .connection_state => |state| Logger.debug("SCTP connection state changed: {}", .{state}),
     }
 }
 

@@ -1,3 +1,4 @@
+pub const DataChannel = @import("data_channel.zig");
 pub const MediaEngine = @import("configuration/media_engine.zig");
 pub const PeerConnection = @import("peer_connection.zig");
 pub const PeerConnectionHandler = @import("pc/handler.zig");
