@@ -7,9 +7,11 @@ const SctpTranport = @This();
 
 const Logger = std.log.scoped(.sctp_transport);
 
-const DCEP_PPID: u32 = 50;
-const TEXT_MESSAGE_PPID: u32 = 51;
-const BINARY_MESSAGE_PPID: u32 = 53;
+pub const DCEP_PPID: u32 = 50;
+pub const TEXT_MESSAGE_PPID: u32 = 51;
+pub const BINARY_MESSAGE_PPID: u32 = 53;
+pub const EMPTY_TEXT_MESSAGE_PPID: u32 = 56;
+pub const EMPTY_BINRAY_MESSAGE_PPID: u32 = 57;
 
 pub const ConnectionState = enum(u8) { new, connecting, connected, closed };
 
@@ -190,7 +192,7 @@ fn receive_cb(
 fn newDataChannel(sctp_transport: *SctpTranport, allocator: std.mem.Allocator, label: []const u8, params: DataChannel.Parameters) !*DataChannel {
     const data_channel = try allocator.create(DataChannel);
     errdefer allocator.destroy(data_channel);
-    data_channel.* = try .init(allocator, label, params);
+    data_channel.* = try .init(allocator, label, sctp_transport, params);
     errdefer data_channel.deinit(allocator);
 
     sctp_transport.mutex.lockUncancelable(sctp_transport.io);
@@ -294,17 +296,25 @@ fn handleAppData(sctp_transport: *SctpTranport, ppid: u32, stream_id: u16, data:
                 },
             }
         },
-        TEXT_MESSAGE_PPID, BINARY_MESSAGE_PPID => if (sctp_transport.getDataChannelBySid(stream_id)) |data_channel| {
+        TEXT_MESSAGE_PPID,
+        EMPTY_TEXT_MESSAGE_PPID,
+        BINARY_MESSAGE_PPID,
+        EMPTY_BINRAY_MESSAGE_PPID,
+        => if (sctp_transport.getDataChannelBySid(stream_id)) |data_channel| {
             if (data_channel.on_event) |on_event| {
                 const event: DataChannel.Event =
                     if (ppid == TEXT_MESSAGE_PPID)
                         .{ .text_message = data }
+                    else if (ppid == EMPTY_TEXT_MESSAGE_PPID)
+                        .{ .text_message = "" }
+                    else if (ppid == EMPTY_BINRAY_MESSAGE_PPID)
+                        .{ .binary_message = &.{} }
                     else
                         .{ .binary_message = data };
-                on_event(data_channel, event);
+                on_event(data_channel.userdata, data_channel, event);
             }
         },
-        else => {},
+        else => Logger.debug("Received data with unknown ppid: {}", .{ppid}),
     }
 }
 

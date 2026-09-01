@@ -1,6 +1,8 @@
 const std = @import("std");
+const SctpTransport = @import("sctp_transport.zig");
 
 const DataChannel = @This();
+const EventCallback = *const fn (userdata: ?*anyopaque, data_channel: *DataChannel, event: DataChannel.Event) void;
 
 pub const State = enum { connecting, open, closing, closed };
 
@@ -106,9 +108,16 @@ max_packet_lifetime: u32,
 max_retransmits: u32,
 protocol: []const u8,
 ready_state: State,
-on_event: ?*const fn (data_channel: *DataChannel, event: Event) void = null,
+sctp_tranport: *SctpTransport,
+userdata: ?*anyopaque,
+on_event: ?EventCallback,
 
-pub fn init(allocator: std.mem.Allocator, label: []const u8, params: Parameters) std.mem.Allocator.Error!DataChannel {
+pub fn init(
+    allocator: std.mem.Allocator,
+    label: []const u8,
+    sctp_transport: *SctpTransport,
+    params: Parameters,
+) std.mem.Allocator.Error!DataChannel {
     const slice = try allocator.alloc(u8, label.len + params.protocol.len);
     @memcpy(slice[0..label.len], label);
     @memcpy(slice[label.len..], params.protocol);
@@ -121,6 +130,9 @@ pub fn init(allocator: std.mem.Allocator, label: []const u8, params: Parameters)
         .max_retransmits = params.max_retransmits,
         .protocol = slice[label.len..],
         .ready_state = State.connecting,
+        .sctp_tranport = sctp_transport,
+        .userdata = null,
+        .on_event = null,
     };
 }
 
@@ -135,7 +147,7 @@ pub fn writeOpenMessage(data_channel: *DataChannel, buffer: []u8) std.Io.Writer.
     try w.writeInt(u8, @intFromEnum(MessageType.open), .big);
     const channel_type = data_channel.getChannelType();
     try w.writeInt(u8, @intFromEnum(channel_type), .big);
-    try w.writeInt(u16, 256, .big); // priority
+    try w.writeInt(u16, 0, .big); // priority
     try w.writeInt(u32, switch (channel_type) {
         .reliable, .reliable_unordered => 0,
         .partial_reliable_rexmit, .partial_reliable_rexmit_unordered => data_channel.max_retransmits,
@@ -163,13 +175,47 @@ pub fn format(data_channel: *DataChannel, writer: *std.Io.Writer) !void {
 
 pub fn setReadyState(data_channel: *DataChannel, state: State) void {
     data_channel.ready_state = state;
-    if (data_channel.on_event) |on_event| {
-        switch (state) {
-            .open => on_event(data_channel, .open),
-            .closed => on_event(data_channel, .close),
-            else => {},
-        }
+    if (data_channel.on_event) |on_event| switch (state) {
+        .open => on_event(data_channel.userdata, data_channel, .open),
+        .closed => on_event(data_channel.userdata, data_channel, .close),
+        else => {},
+    };
+}
+
+pub const SendError = error{ SendFailed, InvalidState };
+
+pub fn sendText(data_channel: *DataChannel, data: []const u8) SendError!void {
+    if (data.len == 0)
+        try data_channel.send(&[_]u8{0}, SctpTransport.EMPTY_TEXT_MESSAGE_PPID)
+    else
+        try data_channel.send(data, SctpTransport.TEXT_MESSAGE_PPID);
+}
+
+pub fn sendBinary(data_channel: *DataChannel, data: []const u8) SendError!void {
+    if (data.len == 0)
+        try data_channel.send(&[_]u8{0}, SctpTransport.EMPTY_BINRAY_MESSAGE_PPID)
+    else
+        try data_channel.send(data, SctpTransport.BINARY_MESSAGE_PPID);
+}
+
+pub fn registerCallback(data_channel: *DataChannel, userdata: ?*anyopaque, callback: EventCallback) void {
+    data_channel.userdata = userdata;
+    data_channel.on_event = callback;
+}
+
+fn send(data_channel: *DataChannel, data: []const u8, ppid: u32) SendError!void {
+    if (data_channel.ready_state != .open or data_channel.id == null) {
+        @branchHint(.unlikely);
+        return error.InvalidState;
     }
+
+    try data_channel.sctp_tranport.socket.send(data, .{
+        .ppid = ppid,
+        .sid = data_channel.id.?,
+        .ordered = data_channel.ordered,
+        .max_retransmits = data_channel.max_retransmits,
+        .max_lifetime = data_channel.max_packet_lifetime,
+    });
 }
 
 fn getChannelType(data_channel: *DataChannel) Message.ChannelType {
@@ -210,4 +256,23 @@ test "DataChannel.Message.parse" {
     try testing.expectEqual(0, open_msg.reliability_param);
     try testing.expectEqualStrings("data", open_msg.label);
     try testing.expectEqualStrings("", open_msg.protocol);
+}
+
+test "DataChannel.writeOpenMessage" {
+    const expected = [_]u8{
+        0x03, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x04,
+        0x00, 0x00, 0x64, 0x61, 0x74,
+        0x61,
+    };
+    var buffer: [1024]u8 = undefined;
+
+    var data_channel = try init(testing.allocator, "data", undefined, .{
+        .id = 0,
+        .ordered = true,
+    });
+    defer data_channel.deinit(testing.allocator);
+
+    const written = try data_channel.writeOpenMessage(&buffer);
+    try testing.expectEqualSlices(u8, &expected, written);
 }

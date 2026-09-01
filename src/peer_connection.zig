@@ -984,7 +984,7 @@ fn onSctpTransportEvent(sctp_transport: *SctpTransport, event: SctpTransport.Eve
         .data_channel => |channel| if (pc.handler) |handler| {
             handler.vtable.onDataChannel(handler.userdata, channel);
         },
-        else => {},
+        .connection_state => |state| Logger.debug("SCTP connection state changed: {}", .{state}),
     }
 }
 
