@@ -182,6 +182,18 @@ pub fn setReadyState(data_channel: *DataChannel, state: State) void {
     };
 }
 
+pub fn close(data_channel: *DataChannel) !void {
+    if (data_channel.ready_state == .closing or data_channel.ready_state == .closed) return;
+
+    const sid = data_channel.id orelse {
+        data_channel.setReadyState(.closed);
+        data_channel.sctp_tranport.deleteDataChannel(data_channel);
+        return;
+    };
+    try data_channel.sctp_tranport.resetStreams(&.{sid}, .{ .outgoing = true });
+    data_channel.setReadyState(.closing);
+}
+
 pub const SendError = error{ SendFailed, InvalidState };
 
 pub fn sendText(data_channel: *DataChannel, data: []const u8) SendError!void {
@@ -275,4 +287,13 @@ test "DataChannel.writeOpenMessage" {
 
     const written = try data_channel.writeOpenMessage(&buffer);
     try testing.expectEqualSlices(u8, &expected, written);
+}
+
+test "DataChannel.close: no-op if already closing or closed" {
+    var data_channel = try init(testing.allocator, "chan", undefined, .{});
+    data_channel.setReadyState(.closed);
+    defer data_channel.deinit(testing.allocator);
+
+    try data_channel.close();
+    try testing.expectEqual(.closed, data_channel.ready_state);
 }

@@ -129,8 +129,8 @@ mid: u16 = 0,
 nack_config: NackConfig,
 nack_generator: ?NackGenerator = null,
 
-group: std.Io.Group = .init,
-mutex: std.Io.Mutex = .init,
+group: Io.Group = .init,
+mutex: Io.Mutex = .init,
 
 const ParsedSessionDescription = struct {
     desc_type: webrtc.SessionDescriptionType,
@@ -472,6 +472,7 @@ pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataCha
 
 pub fn close(pc: *PeerConnection) void {
     pc.dtls_transport.close();
+    pc.sctp_transport.close();
 }
 
 fn deinitDescriptions(pc: *PeerConnection, descriptions: []const *?ParsedSessionDescription) void {
