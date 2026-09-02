@@ -175,17 +175,15 @@ fn testPacket(ssrc: u32) rtp.Packet {
     };
 }
 
-fn testTransceiver(allocator: std.mem.Allocator, io: std.Io, mid: Mid.Int) !*RtpTransceiver {
-    const tr = try allocator.create(RtpTransceiver);
-    tr.* = .{
+fn testTransceiver(mid: Mid.Int) RtpTransceiver {
+    return .{
         .sender = .init(null),
-        .receiver = .init(.init(io, .video)),
+        .receiver = .init(.initWithId("track", .video)),
         .kind = .video,
         .direction = .sendrecv,
         .mid = mid,
         .transport = undefined,
     };
-    return tr;
 }
 
 test "Demuxer.updateMaps" {
@@ -198,43 +196,40 @@ test "Demuxer.updateMaps" {
     var session = try testSdpSession(allocator);
     defer session.deinit(allocator);
 
-    const tr1 = try testTransceiver(allocator, io, mid_1);
-    defer tr1.deinit(io, allocator);
-    const tr2 = try testTransceiver(allocator, io, mid_2);
-    defer tr2.deinit(io, allocator);
-    const tr3 = try testTransceiver(allocator, io, mid_3);
-    defer tr3.deinit(io, allocator);
-    const transceivers = [_]*RtpTransceiver{ tr1, tr2, tr3 };
+    var tr1 = testTransceiver(mid_1);
+    var tr2 = testTransceiver(mid_2);
+    var tr3 = testTransceiver(mid_3);
+    const transceivers = [_]*RtpTransceiver{ &tr1, &tr2, &tr3 };
 
     try demuxer.updateMaps(io, &session, &transceivers);
 
     try std.testing.expectEqual(mid_ext_id, demuxer.mid_id.?);
 
     try std.testing.expectEqual(3, demuxer.ssrc_to_transceiver.count());
-    try std.testing.expectEqual(tr1, demuxer.ssrc_to_transceiver.get(0x10101010).?);
-    try std.testing.expectEqual(tr1, demuxer.ssrc_to_transceiver.get(0x30303030).?);
-    try std.testing.expectEqual(tr3, demuxer.ssrc_to_transceiver.get(0x20202020).?);
+    try std.testing.expectEqual(&tr1, demuxer.ssrc_to_transceiver.get(0x10101010).?);
+    try std.testing.expectEqual(&tr1, demuxer.ssrc_to_transceiver.get(0x30303030).?);
+    try std.testing.expectEqual(&tr3, demuxer.ssrc_to_transceiver.get(0x20202020).?);
 
     try std.testing.expectEqual(5, demuxer.pt_to_transceiver.count());
     var entry = demuxer.pt_to_transceiver.get(97);
     try std.testing.expect(entry != null);
-    try std.testing.expectEqual(tr1, entry.?);
+    try std.testing.expectEqual(&tr1, entry.?);
 
     entry = demuxer.pt_to_transceiver.get(99);
     try std.testing.expect(entry != null);
-    try std.testing.expectEqual(tr2, entry.?);
+    try std.testing.expectEqual(&tr2, entry.?);
 
     entry = demuxer.pt_to_transceiver.get(100);
     try std.testing.expect(entry != null);
-    try std.testing.expectEqual(tr2, entry.?);
+    try std.testing.expectEqual(&tr2, entry.?);
 
     entry = demuxer.pt_to_transceiver.get(105);
     try std.testing.expect(entry != null);
-    try std.testing.expectEqual(tr3, entry.?);
+    try std.testing.expectEqual(&tr3, entry.?);
 
     entry = demuxer.pt_to_transceiver.get(106);
     try std.testing.expect(entry != null);
-    try std.testing.expectEqual(tr3, entry.?);
+    try std.testing.expectEqual(&tr3, entry.?);
 }
 
 test "Demuxer.getTransceiver" {
@@ -247,20 +242,17 @@ test "Demuxer.getTransceiver" {
     var session = try testSdpSession(allocator);
     defer session.deinit(allocator);
 
-    const tr1 = try testTransceiver(allocator, io, mid_1);
-    defer tr1.deinit(io, allocator);
-    const tr2 = try testTransceiver(allocator, io, mid_2);
-    defer tr2.deinit(io, allocator);
-    const tr3 = try testTransceiver(allocator, io, mid_3);
-    defer tr3.deinit(io, allocator);
-    const transceivers = [_]*RtpTransceiver{ tr1, tr2, tr3 };
+    var tr1 = testTransceiver(mid_1);
+    var tr2 = testTransceiver(mid_2);
+    var tr3 = testTransceiver(mid_3);
+    const transceivers = [_]*RtpTransceiver{ &tr1, &tr2, &tr3 };
 
     try demuxer.updateMaps(io, &session, &transceivers);
 
     var packet = testPacket(0);
     var lookup = demuxer.getTransceiver(io, &packet);
     try std.testing.expectEqual(.transceiver, std.meta.activeTag(lookup));
-    try std.testing.expectEqual(tr2, lookup.transceiver);
+    try std.testing.expectEqual(&tr2, lookup.transceiver);
 
     packet.header.payload_type = 96;
     lookup = demuxer.getTransceiver(io, &packet);
@@ -270,7 +262,7 @@ test "Demuxer.getTransceiver" {
     packet.header.payload_type = 10;
     lookup = demuxer.getTransceiver(io, &packet);
     try std.testing.expectEqual(.transceiver, std.meta.activeTag(lookup));
-    try std.testing.expectEqual(tr1, lookup.transceiver);
+    try std.testing.expectEqual(&tr1, lookup.transceiver);
 }
 
 test "Demuxer.registerRandomSsrc: returns unique ssrcs and tracks them" {
@@ -298,13 +290,10 @@ test "Demuxer.getTransceiver: falls back to the mid header extension when ssrc i
     var session = try testSdpSession(allocator);
     defer session.deinit(allocator);
 
-    const tr1 = try testTransceiver(allocator, io, mid_1);
-    defer tr1.deinit(io, allocator);
-    const tr2 = try testTransceiver(allocator, io, mid_2);
-    defer tr2.deinit(io, allocator);
-    const tr3 = try testTransceiver(allocator, io, mid_3);
-    defer tr3.deinit(io, allocator);
-    const transceivers = [_]*RtpTransceiver{ tr1, tr2, tr3 };
+    var tr1 = testTransceiver(mid_1);
+    var tr2 = testTransceiver(mid_2);
+    var tr3 = testTransceiver(mid_3);
+    const transceivers = [_]*RtpTransceiver{ &tr1, &tr2, &tr3 };
 
     try demuxer.updateMaps(io, &session, &transceivers);
     try std.testing.expectEqual(mid_ext_id, demuxer.mid_id.?);
@@ -335,12 +324,12 @@ test "Demuxer.getTransceiver: falls back to the mid header extension when ssrc i
 
     try std.testing.expect(!demuxer.ssrc_to_transceiver.contains(packet.header.ssrc));
 
-    try demuxer.cacheSsrc(io, packet.header.ssrc, tr1);
+    try demuxer.cacheSsrc(io, packet.header.ssrc, &tr1);
     try std.testing.expect(demuxer.ssrc_to_transceiver.contains(packet.header.ssrc));
 
     lookup = demuxer.getTransceiver(io, &packet);
     try std.testing.expectEqual(.transceiver, std.meta.activeTag(lookup));
-    try std.testing.expectEqual(tr1, lookup.transceiver);
+    try std.testing.expectEqual(&tr1, lookup.transceiver);
 }
 
 test "Demuxer.getTransceiver: returs error when count entries exceeds max_entries" {
@@ -351,19 +340,18 @@ test "Demuxer.getTransceiver: returs error when count entries exceeds max_entrie
     demuxer.mid_id = mid_ext_id;
     defer demuxer.deinit();
 
-    const tr = try testTransceiver(allocator, io, mid_1);
-    defer tr.deinit(io, allocator);
+    var tr = testTransceiver(mid_1);
 
     var packet = testPacket(0xBEBEBEBE);
     packet.extension = .{ .profile = .one_byte, .data = &.{ 0x40, '1', 0, 0 } };
 
     var ssrc: u32 = 0xBEBEBEBE;
     for (0..max_entries) |_| {
-        try demuxer.cacheSsrc(io, packet.header.ssrc, tr);
+        try demuxer.cacheSsrc(io, packet.header.ssrc, &tr);
         ssrc += 1;
         packet.header.ssrc = ssrc;
     }
 
     try std.testing.expectEqual(mid_1, demuxer.getTransceiver(io, &packet).mid);
-    try std.testing.expectError(error.TooManyEntries, demuxer.cacheSsrc(io, packet.header.ssrc, tr));
+    try std.testing.expectError(error.TooManyEntries, demuxer.cacheSsrc(io, packet.header.ssrc, &tr));
 }
