@@ -77,7 +77,7 @@ pub fn deleteSource(self: *NackGenerator, io: Io, ssrc: u32) void {
 }
 
 fn buildAndSendNack(self: *NackGenerator, dtls_transport: *DtlsTransport) !void {
-    var buffer: [1200]u8 = @splat(0);
+    var buffer: [1240]u8 = @splat(0);
     const io = dtls_transport.getIo();
 
     const duration = Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(self.interval) };
@@ -91,7 +91,7 @@ fn buildAndSendNack(self: *NackGenerator, dtls_transport: *DtlsTransport) !void 
         defer self.mutex.unlock(io);
 
         var it = NackGeneratorIterator.init(self);
-        var slice: []u8 = buffer[0..];
+        var slice: []u8 = buffer[0..1200];
         while (true) {
             const msg = it.next(slice) catch {
                 if (slice.len == buffer.len) {
@@ -99,7 +99,7 @@ fn buildAndSendNack(self: *NackGenerator, dtls_transport: *DtlsTransport) !void 
                     break;
                 }
 
-                dtls_transport.sendRtcp(buffer[0 .. buffer.len - slice.len]) catch |err| {
+                dtls_transport.sendRtcp(&buffer, buffer.len - slice.len) catch |err| {
                     Logger.err("Failed to send rtcp nack: {}", .{err});
                 };
                 slice = buffer[0..];
@@ -112,7 +112,7 @@ fn buildAndSendNack(self: *NackGenerator, dtls_transport: *DtlsTransport) !void 
             }
 
             if (slice.len != buffer.len) {
-                dtls_transport.sendRtcp(buffer[0 .. buffer.len - slice.len]) catch |err| {
+                dtls_transport.sendRtcp(&buffer, buffer.len - slice.len) catch |err| {
                     Logger.err("Failed to send rtcp nack: {}", .{err});
                 };
             }
