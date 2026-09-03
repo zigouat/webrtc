@@ -216,23 +216,23 @@ pub fn sendSample(sender: *RtpSender, sample: *const MediaPacket) SendError!void
     defer tr.transport.ice_agent.destroyPacket(buffer);
 
     const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[constants.rtp_default_header_size..]);
-    buffer = buffer[0 .. header_size + constants.max_rtp_payload_size];
+    const rtp_buffer = buffer[0 .. header_size + constants.max_rtp_payload_size];
 
     //TODO: refactor this mess
     switch (sender.packetizer) {
         .vp8 => |*p| {
             var it = p.packetize(sample);
-            while (it.next(buffer[header_size..])) |*packet|
+            while (it.next(rtp_buffer[header_size..])) |*packet|
                 try sendAndRecord(tr, packet, header_size, buffer, timestamp);
         },
         .h264 => |*p| {
             var it = p.packetize(sample);
-            while (try it.next(buffer[header_size..])) |*packet|
+            while (try it.next(rtp_buffer[header_size..])) |*packet|
                 try sendAndRecord(tr, packet, header_size, buffer, timestamp);
         },
         .opus => |*p| {
             var it = p.packetize(sample);
-            while (it.next(buffer[header_size..])) |*packet|
+            while (it.next(rtp_buffer[header_size..])) |*packet|
                 try sendAndRecord(tr, packet, header_size, buffer, timestamp);
         },
         else => return,
@@ -383,7 +383,7 @@ fn writeHeaderExtensions(sender: *RtpSender, mid: Mid.Int, buffer: []u8) !usize 
 
 fn writeHeaderAndSend(tr: *RtpTransceiver, header: rtp.Packet.Header, header_size: usize, payload_len: usize, buffer: []u8) SendError!void {
     std.mem.writeInt(u96, buffer[0..constants.rtp_default_header_size], @bitCast(header), .big);
-    try tr.transport.sendRtp(buffer[0 .. header_size + payload_len]);
+    try tr.transport.sendRtp(buffer, header_size + payload_len);
 }
 
 fn sendAndRecord(tr: *RtpTransceiver, rtp_packet: *const rtp.Packet, header_size: usize, buffer: []u8, timestamp: i64) !void {

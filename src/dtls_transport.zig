@@ -130,19 +130,15 @@ pub fn getConnectionState(transport: *const DtlsTransport) struct { ice.Connecti
     return .{ transport.ice_agent.connectionState(), transport.session.connection_state };
 }
 
-pub fn sendRtp(transport: *DtlsTransport, data: []const u8) SendError!void {
+pub fn sendRtp(transport: *DtlsTransport, buffer: []u8, rtp_payload: usize) SendError!void {
     if (transport.session.connection_state != .connected) return;
-    const buffer = try transport.ice_agent.createPacket();
-    defer transport.ice_agent.destroyPacket(buffer);
-    const encrypted = try transport.out_srtp_session.?.encryptRtp(data, buffer);
+    const encrypted = try transport.out_srtp_session.?.encryptRtp(buffer[0..rtp_payload], buffer);
     try transport.ice_agent.sendData(encrypted);
 }
 
-pub fn sendRtcp(transport: *DtlsTransport, data: []const u8) SendError!void {
+pub fn sendRtcp(transport: *DtlsTransport, buffer: []u8, rtcp_payload: usize) SendError!void {
     if (transport.session.connection_state != .connected) return;
-    const buffer = try transport.ice_agent.createPacket();
-    defer transport.ice_agent.destroyPacket(buffer);
-    const encrypted = try transport.out_srtp_session.?.encryptRtcp(data, buffer);
+    const encrypted = try transport.out_srtp_session.?.encryptRtcp(buffer[0..rtcp_payload], buffer);
     try transport.ice_agent.sendData(encrypted);
 }
 
@@ -192,14 +188,12 @@ fn handleIceData(transport: *DtlsTransport, data: []const u8) !void {
             },
         },
         .rtp => if (transport.in_srtp_session) |*srtp_session| {
-            const buffer = try transport.ice_agent.createPacket();
-            defer transport.ice_agent.destroyPacket(buffer);
+            const buffer = @constCast(data.ptr[0..ice.Agent.max_message_size]);
             const rtp_packet = try srtp_session.decryptRtp(data, buffer);
             transport.on_data(transport, .{ .rtp = rtp_packet });
         },
         .rtcp => if (transport.in_srtp_session) |*srtp_session| {
-            const buffer = try transport.ice_agent.createPacket();
-            defer transport.ice_agent.destroyPacket(buffer);
+            const buffer = @constCast(data.ptr[0..ice.Agent.max_message_size]);
             const rtcp_packet = try srtp_session.decryptRtcp(data, buffer);
             transport.on_data(transport, .{ .rtcp = rtcp_packet });
         },

@@ -88,13 +88,13 @@ pub fn handleRtpPacket(receiver: *RtpReceiver, packet: *rtp.Packet) !bool {
 /// Sends a Picture Loss Indication (PLI) RTCP packet to the remote peer.
 pub fn sendPli(receiver: *RtpReceiver) DtlsTransport.SendError!void {
     // 4 bytes header + PLI size is 8 bytes
-    var buffer: [12]u8 = undefined;
+    var buffer: [64]u8 = undefined;
     const header: rtcp.Header = .{ .rc = 1, .payload_type = .ps_fb, .length = 2, .padding = false };
     std.mem.writeInt(u32, buffer[0..4], @bitCast(header), .big);
     (rtcp.PLI{ .sender_ssrc = 0, .media_ssrc = receiver.ssrc orelse 0 }).encode(buffer[4..12]);
 
     const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("receiver", receiver));
-    try tr.transport.sendRtcp(&buffer);
+    try tr.transport.sendRtcp(&buffer, 12);
 }
 
 pub fn registerCallback(receiver: *RtpReceiver, userdata: ?*anyopaque, callback: Callback) void {
