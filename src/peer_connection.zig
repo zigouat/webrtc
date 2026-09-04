@@ -87,18 +87,15 @@ pub const RTCConfiguration = struct {
     ice_servers: []const ice.IceServer = &.{},
 };
 
-pub const PeerConfiguration = struct {
-    nack_config: NackConfig = .{},
-};
-
 pub const Config = struct {
     /// This is W3C's RTCConfiguration, which defines a set of parameters to configure the PeerConnection.
     rtc_configuration: RTCConfiguration = .{},
-    /// This is the internal configuration for the PeerConnection, which defines a set of parameters to configure the PeerConnection.
-    peer_config: PeerConfiguration = .{},
     /// The media engine used to advertise and negotiate codecs. Owned by the caller.
     media_engine: *webrtc.MediaEngine,
+    /// The PeerConnection handler. This is used to notify the application of events related to the PeerConnection.
     handler: ?PCHandler = null,
+    /// NACK configuration. This is used to configure the NACK generator/responder for the PeerConnection.
+    nack_config: NackConfig = .{},
 };
 
 allocator: std.mem.Allocator,
@@ -186,7 +183,7 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
         .allocator = allocator,
         .dtls_transport = dtls_transport,
         .demuxer = .init(allocator),
-        .nack_config = config.peer_config.nack_config,
+        .nack_config = config.nack_config,
         .media_engine = config.media_engine,
         .handler = config.handler,
         .sctp_transport = SctpTransport.init(io, allocator, .{
