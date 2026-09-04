@@ -58,8 +58,6 @@ pub fn build(b: *std.Build) void {
             }),
         });
 
-        b.installArtifact(exe);
-
         const run_step = b.step("run-" ++ app.name, "Run the app");
 
         const run_cmd = b.addRunArtifact(exe);
