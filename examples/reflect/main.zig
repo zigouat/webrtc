@@ -1,5 +1,6 @@
 const std = @import("std");
 const webrtc = @import("webrtc");
+const common = @import("common");
 
 const Io = std.Io;
 
@@ -83,7 +84,7 @@ pub fn main(init: std.process.Init) !void {
     try pc.setLocalDescription(answer);
 
     try handler.gathering_done.wait(io);
-    try writeAnswerToStdout(io, init.gpa, &pc);
+    try common.writeSdpToStdout(io, init.gpa, &pc);
 
     try handler.done.wait(io);
 }
@@ -105,26 +106,6 @@ fn readOfferFromStdin(io: Io, allocator: std.mem.Allocator) ![]const u8 {
     try base64_decoder.decode(offer, base64_offer);
 
     return offer;
-}
-
-fn writeAnswerToStdout(io: Io, allocator: std.mem.Allocator, pc: *webrtc.PeerConnection) !void {
-    var local_desc = (try pc.getLocalDescription()).?;
-    defer local_desc.deinit(allocator);
-
-    var writer = Io.Writer.Allocating.init(allocator);
-    defer writer.deinit();
-
-    var formatter = std.json.Formatter(webrtc.SessionDescription){
-        .value = local_desc,
-        .options = .{},
-    };
-    try formatter.format(&writer.writer);
-
-    var stdout = Io.File.stdout().writer(io, &.{});
-
-    const base64_encoder = std.base64.standard.Encoder;
-    try base64_encoder.encodeWriter(&stdout.interface, writer.written());
-    try stdout.interface.writeAll("\n");
 }
 
 fn sendBackRtp(userdata: ?*anyopaque, _: *webrtc.RtpReceiver, event: webrtc.RtpReceiver.TrackEvent) void {

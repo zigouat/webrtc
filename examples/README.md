@@ -11,6 +11,9 @@ The examples are a rewrite of the [pion](https://github.com/pion/webrtc) example
 * [Reflect](reflect): Demonstrates how to send video from your browser to the server and back to your browser.
 * [Broadcast](broadcast): The broadcast example demonstrates how to broadcast a video to multiple peers. A broadcaster uploads the video once and the server forwards it to all other peers.
 
+### Data Channel API
+* [Data Channels](data-channels): The data-channels example shows how you can send/recv DataChannel messages from a web browser.
+
 ### Usage
 
 All examples will start a web server at port `9000` that will serve the javascript/html files. Head to your browser and open `http://localhost:9000` to start playing the video.
@@ -18,7 +21,7 @@ All examples will start a web server at port `9000` that will serve the javascri
 For building the project, check each example's README.md for instructions. Most examples can be built and run with the following command:
 
 ```bash
-zig build run -- <args>
+zig build run-<app-name> -- <args>
 ```
 
-Where `<args>` are the arguments for the example. For example, the play-from-disk example takes a single argument, which is the path to the ivf file to play.
+Where `<app-name>` the name of the example (.e.g. broadcast, data_channels, ...) and `<args>` are the arguments for the example. For example, the play-from-disk example takes a single argument, which is the path to the ivf file to play.
