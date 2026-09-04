@@ -9,6 +9,15 @@ pub fn build(b: *std.Build) void {
     const media_formats = b.dependency("media_formats", .{ .target = target, .optimize = optimize });
     const protocols = b.dependency("media_protocols", .{ .target = target, .optimize = optimize });
 
+    const common_mod = b.addModule("common", .{
+        .root_source_file = b.path("common/utils.zig"),
+        .optimize = optimize,
+        .target = target,
+        .imports = &.{
+            .{ .name = "webrtc", .module = webrtc.module("webrtc") },
+        },
+    });
+
     const apps = &.{
         .{
             .name = "play_from_disk",
@@ -40,6 +49,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{
+                    .{ .name = "common", .module = common_mod },
                     .{ .name = "media", .module = media.module("media") },
                     .{ .name = "rtp", .module = protocols.module("rtp") },
                     .{ .name = "webrtc", .module = webrtc.module("webrtc") },
