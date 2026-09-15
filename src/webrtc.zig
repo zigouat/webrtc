@@ -357,4 +357,5 @@ test {
     _ = @import("rtp_sender.zig");
     _ = @import("mid.zig");
     _ = @import("utils.zig");
+    _ = @import("dtls/dtls2.zig");
 }

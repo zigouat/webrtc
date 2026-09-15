@@ -4,6 +4,21 @@ const webrtc = @import("webrtc.zig");
 const RtpCodec = webrtc.RtpCodecParameters;
 const RtpHeaderExtension = webrtc.RtpHeaderExtensionParameter;
 
+pub fn generateP256KeyPairDer(io: std.Io, buffer: []u8) ![]const u8 {
+    const P256 = std.crypto.ecc.P256;
+
+    const priv_key = P256.scalar.random(io, .big);
+    const pub_key = try P256.basePoint.mul(priv_key, .big);
+
+    var w = std.Io.Writer.fixed(buffer);
+    try w.writeAll(&[_]u8{ 0x30, 0x77, 0x02, 0x01, 0x01, 0x04, 0x20 });
+    try w.writeAll(&priv_key);
+    try w.writeAll(&[_]u8{ 0xA0, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07 });
+    try w.writeAll(&[_]u8{ 0xA1, 0x44, 0x03, 0x42, 0x00 });
+    try w.writeAll(&pub_key.toUncompressedSec1());
+    return w.buffered();
+}
+
 /// Returns the codecs from `a` that are also present in `b` (matched by `RtpCodecParameters.eql`),
 /// including any associated RTX codecs. Result follows `b`'s order and is owned by the caller.
 /// Used when building an answer, where inputs are `const` and a fresh owned slice is needed.
