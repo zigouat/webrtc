@@ -2,7 +2,7 @@ const std = @import("std");
 const sctp = @import("sctp");
 
 const DataChannel = @import("data_channel.zig");
-const DtlsTransport = @import("dtls_transport2.zig");
+const DtlsTransport = @import("dtls_transport.zig");
 const SctpTranport = @This();
 
 const Logger = std.log.scoped(.sctp_transport);

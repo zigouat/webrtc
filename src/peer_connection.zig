@@ -4,12 +4,12 @@ const rtp = @import("rtp");
 const rtcp = @import("rtcp");
 
 const webrtc = @import("webrtc.zig");
-const dtls = @import("dtls/dtls2.zig");
+const dtls = @import("dtls/dtls.zig");
 const utils = @import("utils.zig");
 const constants = @import("constants.zig");
 
 const SDPAttribute = @import("sdp").Attribute.ParsedAttribute;
-const DtlsTransport = @import("dtls_transport2.zig");
+const DtlsTransport = @import("dtls_transport.zig");
 const SctpTransport = @import("sctp_transport.zig");
 const SDPSession = @import("sdp_session.zig");
 const Demuxer = @import("pc/demuxer.zig");
@@ -1143,7 +1143,6 @@ fn doSendReports(pc: *PeerConnection) !void {
 test {
     _ = @import("tests/peer_connection.zig");
     _ = @import("pc/demuxer.zig");
-    _ = @import("dtls/dtls.zig");
     _ = @import("nack/send_buffer.zig");
     _ = @import("nack/receive_log.zig");
     _ = @import("nack/generator.zig");

@@ -1,11 +1,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const stun = @import("stun");
+const utils = @import("../utils.zig");
 const m = @import("c.zig").mtls;
 
-const P256 = std.crypto.ecc.P256;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
-const Logger = std.log.scoped(.dtls);
+const Logger = std.log.scoped(.dtls2);
 
 const srtp_profiles = [_]u16{
     m.MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_80,
@@ -15,28 +16,10 @@ const srtp_profiles = [_]u16{
 
 const max_srtp_keying_material_size = 30;
 
-pub const P256KeyPair = struct {
-    priv_key: [32]u8,
-    pub_key: P256,
-
-    pub fn init(io: std.Io) !P256KeyPair {
-        const priv_key = P256.scalar.random(io, .big);
-        const pub_key = try P256.basePoint.mul(priv_key, .big);
-        return .{ .priv_key = priv_key, .pub_key = pub_key };
-    }
-
-    pub fn toDer(key_pair: *const P256KeyPair, buffer: []u8) ![]const u8 {
-        var w = std.Io.Writer.fixed(buffer);
-        try w.writeAll(&[_]u8{ 0x30, 0x77, 0x02, 0x01, 0x01, 0x04, 0x20 });
-        try w.writeAll(&key_pair.priv_key);
-        try w.writeAll(&[_]u8{ 0xA0, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07 });
-        try w.writeAll(&[_]u8{ 0xA1, 0x44, 0x03, 0x42, 0x00 });
-        try w.writeAll(&key_pair.pub_key.toUncompressedSec1());
-        return w.buffered();
-    }
-};
+const dtls_mtu: u16 = 1400;
 
 pub const ConnectionState = enum { new, connecting, connected, failed, closed };
+pub const Role = enum { client, server };
 
 pub const SrtpProfile = struct {
     profile: u16,
@@ -44,29 +27,31 @@ pub const SrtpProfile = struct {
     remote_keying_material: [max_srtp_keying_material_size]u8,
 };
 
+const SessionKeys = struct {
+    tls_profile: u32,
+    master_secret: []const u8,
+    rand_bytes: [64]u8,
+};
+
+const max_datagram_size = 1500;
+
 pub const Session = struct {
-    const KEYINIG_EXTRACTOR_LABEL = "EXTRACTOR-dtls_srtp";
+    const Self = @This();
+    const max_events = 6;
+    const KEYING_EXTRACTOR_LABEL = "EXTRACTOR-dtls_srtp";
 
-    io: std.Io,
-    connection_state: ConnectionState,
-    key: m.mbedtls_pk_context,
-    ssl: m.mbedtls_ssl_context,
-    ssl_conf: m.mbedtls_ssl_config,
-    crt: m.mbedtls_x509_crt,
-    received_data: ?[]const u8,
-    handshake_timer_value: struct { u32, u32 },
-    session_keys: SessionKeys,
-    peer_fingerprint: [32]u8,
+    pub const ReadResult = union(enum) {
+        app_data: []const u8,
+        consumed: void,
+    };
 
-    // Callbacks
-    on_send_data: *const fn (*Session, []const u8) i32,
-    on_set_timer: *const fn (*Session, u32, u32) void,
-    on_get_timer_state: *const fn (*Session) i32,
+    pub const Event = union(enum) {
+        connection_state: ConnectionState,
+        srtp_keying_material: SrtpProfile,
+    };
 
     pub const HandshakeError = error{
-        /// The handshake is not complete yet, more data is needed.
-        WantData,
-        /// The handshake failed due to an error.
+        /// The handshake failed due to a retransmission timeout.
         Timeout,
         /// The handshake failed due to a certificate error.
         X509Error,
@@ -74,36 +59,58 @@ pub const Session = struct {
         HandshakeFailed,
     };
 
-    pub const HandleDataError = error{InvalidState} || HandshakeError;
-
-    pub const Role = enum { client, server };
-
-    const SessionKeys = struct {
-        tls_profile: u32,
-        master_secret: []const u8,
-        rand_bytes: [64]u8,
-    };
+    pub const HandleReadError = error{InvalidState} || HandshakeError;
 
     pub const Config = struct {
         key_pair: []const u8,
-        on_send_data: *const fn (*Session, []const u8) i32,
-        on_set_timer: *const fn (*Session, u32, u32) void,
-        on_get_timer_state: *const fn (*Session) i32,
         debug_level: u8 = 0,
     };
 
-    pub fn init(io: std.Io, config: Config) !Session {
-        var session: Session = undefined;
+    random: std.Random,
+    connection_state: ConnectionState,
+    key: m.mbedtls_pk_context,
+    ssl: m.mbedtls_ssl_context,
+    ssl_conf: m.mbedtls_ssl_config,
+    crt: m.mbedtls_x509_crt,
+    received_data: ?[]const u8,
+    session_keys: SessionKeys,
+    peer_fingerprint: [32]u8,
 
-        session.io = io;
+    now: i64,
+    int_deadline: i64,
+    int_expired: bool,
+    fin_deadline: i64,
+    fin_expired: bool,
+
+    events_out: stun.BoundedDeque(Event, max_events),
+
+    direct_out: ?[]u8,
+    direct_out_len: usize,
+
+    handshake_out: [max_datagram_size]u8,
+    handshake_out_len: usize,
+    handshake_needed: bool,
+    setup: bool = false,
+
+    pub fn init(random: std.Random, session_config: Config) !Self {
+        var session: Self = undefined;
+
+        session.random = random;
         session.connection_state = .new;
-        session.on_send_data = config.on_send_data;
-        session.on_set_timer = config.on_set_timer;
-        session.on_get_timer_state = config.on_get_timer_state;
         session.received_data = null;
-        session.handshake_timer_value = .{ 0, 0 };
         session.session_keys = undefined;
         session.peer_fingerprint = @splat(0);
+        session.now = 0;
+        session.int_deadline = std.math.maxInt(i64);
+        session.fin_deadline = std.math.maxInt(i64);
+        session.int_expired = false;
+        session.fin_expired = false;
+        session.events_out = .empty;
+        session.direct_out = null;
+        session.direct_out_len = 0;
+        session.handshake_out = undefined;
+        session.handshake_out_len = 0;
+        session.handshake_needed = false;
 
         m.mbedtls_pk_init(&session.key);
         m.mbedtls_ssl_init(&session.ssl);
@@ -113,22 +120,22 @@ pub const Session = struct {
 
         if (m.mbedtls_pk_parse_key(
             &session.key,
-            config.key_pair.ptr,
-            config.key_pair.len + 1,
+            session_config.key_pair.ptr,
+            session_config.key_pair.len + 1,
             null,
             0,
-            random,
-            &session.io,
+            mbedtlsRandom,
+            &session.random,
         ) != 0) return error.FailedParsePrivateKey;
 
-        try session.createCertificate(io);
-        m.mbedtls_debug_set_threshold(config.debug_level);
+        try session.createCertificate();
+        m.mbedtls_debug_set_threshold(session_config.debug_level);
 
         return session;
     }
 
-    pub fn setRole(session: *Session, server: bool) !void {
-        m.mbedtls_ssl_conf_rng(&session.ssl_conf, random, &session.io);
+    pub fn setRole(session: *Self, server: bool) !void {
+        m.mbedtls_ssl_conf_rng(&session.ssl_conf, mbedtlsRandom, &session.random);
 
         if (m.mbedtls_ssl_config_defaults(
             &session.ssl_conf,
@@ -148,58 +155,99 @@ pub const Session = struct {
 
         if (m.mbedtls_ssl_setup(&session.ssl, &session.ssl_conf) != 0) return error.SslSetupFailed;
 
+        m.mbedtls_ssl_set_mtu(&session.ssl, dtls_mtu);
         m.mbedtls_ssl_set_bio(&session.ssl, session, sendData, recvData, recvDataTimeout);
         m.mbedtls_ssl_set_timer_cb(&session.ssl, session, setTimer, getTimer);
+
+        session.setup = true;
     }
 
-    pub fn deinit(session: *Session) void {
+    pub fn deinit(session: *Self) void {
         m.mbedtls_pk_free(&session.key);
         m.mbedtls_ssl_free(&session.ssl);
         m.mbedtls_ssl_config_free(&session.ssl_conf);
         m.mbedtls_x509_crt_free(&session.crt);
     }
 
-    pub fn setPeerFingerprint(session: *Session, fingerprint: *const [32]u8) void {
+    pub fn setPeerFingerprint(session: *Self, fingerprint: *const [32]u8) void {
         @memcpy(&session.peer_fingerprint, fingerprint);
     }
 
-    pub fn handleData(session: *Session, data: ?[]const u8, out_buffer: []u8) HandleDataError!?[]const u8 {
-        if (session.connection_state == .new) {
-            session.connection_state = .connecting;
-        }
+    pub fn getFingerprint(session: *Self, fingerprint: *[32]u8) void {
+        const cert = session.crt.raw.p[0..session.crt.raw.len];
+        Sha256.hash(cert, fingerprint, .{});
+    }
+
+    pub fn getRole(session: *const Self) Role {
+        return if (m.mbedtls_ssl_conf_get_endpoint(&session.ssl_conf) == m.MBEDTLS_SSL_IS_SERVER) .server else .client;
+    }
+
+    /// Feed one received datagram into the session. Returns `.app_data` once
+    /// the handshake is complete and the datagram carried decrypted
+    /// application data (SCTP); otherwise `.consumed`.
+    pub fn handleRead(session: *Self, data: []const u8, now: i64, out_buffer: []u8) HandleReadError!ReadResult {
+        if (!session.setup) return .consumed;
+
+        session.now = now;
+        if (session.connection_state == .new) session.setConnectionState(.connecting);
 
         switch (session.connection_state) {
             .connecting => {
                 session.received_data = data;
-                try session.handshake();
+                try session.handshakeStep();
+                return .consumed;
             },
             .connected => {
-                if (data == null) return null;
                 session.received_data = data;
 
-                const ret = m.mbedtls_ssl_read(&session.ssl, (&out_buffer).ptr, out_buffer.len);
-                if (ret > 0) {
-                    return out_buffer[0..@intCast(ret)];
-                } else switch (ret) {
+                const ret = m.mbedtls_ssl_read(&session.ssl, out_buffer.ptr, out_buffer.len);
+                if (ret > 0) return .{ .app_data = out_buffer[0..@intCast(ret)] };
+
+                switch (ret) {
                     m.MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY => {
                         Logger.warn("Peer closed connection", .{});
-                        session.connection_state = .closed;
+                        session.setConnectionState(.closed);
                     },
                     m.MBEDTLS_ERR_SSL_WANT_READ, m.MBEDTLS_ERR_SSL_WANT_WRITE => {},
                     else => |err_code| {
-                        m.mbedtls_strerror(err_code, out_buffer[0..].ptr, out_buffer.len);
+                        m.mbedtls_strerror(err_code, out_buffer.ptr, out_buffer.len);
                         Logger.err("Error: {s}", .{out_buffer});
                         return error.HandshakeFailed;
                     },
                 }
+                return .consumed;
             },
             else => return error.InvalidState,
         }
-
-        return null;
     }
 
-    pub fn writeData(session: *Session, data: []const u8) !void {
+    pub fn handleTimeout(session: *Self, now: i64) void {
+        session.now = now;
+        session.received_data = null;
+
+        if (session.connection_state == .new) {
+            session.setConnectionState(.connecting);
+            session.handshake_needed = true;
+            return;
+        }
+
+        if (now >= session.fin_deadline) {
+            session.fin_deadline = std.math.maxInt(i64);
+            session.fin_expired = true;
+            if (session.connection_state == .connecting) session.handshake_needed = true;
+        }
+
+        if (now >= session.int_deadline) {
+            session.int_deadline = std.math.maxInt(i64);
+            session.int_expired = true;
+        }
+    }
+
+    pub fn writeData(session: *Self, data: []const u8, out_buffer: []u8) !usize {
+        session.direct_out = out_buffer;
+        session.direct_out_len = 0;
+        defer session.direct_out = null;
+
         var len = data.len;
         var offset: usize = 0;
 
@@ -211,22 +259,174 @@ pub const Session = struct {
                 len -= @intCast(ret);
             } else break;
         }
+
+        return session.direct_out_len;
     }
 
-    pub fn handleTimeout(session: *Session) HandshakeError!void {
-        try session.handshake();
+    pub fn close(session: *Self) void {
+        _ = m.mbedtls_ssl_close_notify(&session.ssl);
+        session.setConnectionState(.closed);
     }
 
-    pub fn getRole(session: *const Session) Role {
-        return if (m.mbedtls_ssl_conf_get_endpoint(&session.ssl_conf) == m.MBEDTLS_SSL_IS_SERVER) .server else .client;
+    pub fn pollEvent(session: *Self) ?Event {
+        return session.events_out.popFront();
     }
 
-    pub fn exportSrtpKeyingMaterial(session: *Session) !SrtpProfile {
+    pub fn pollTransmit(session: *Self) ?[]const u8 {
+        if (session.handshake_out_len == 0 and session.handshake_needed and session.connection_state == .connecting) {
+            session.handshakeStep() catch {};
+        }
+
+        if (session.handshake_out_len == 0) return null;
+        defer session.handshake_out_len = 0;
+        return session.handshake_out[0..session.handshake_out_len];
+    }
+
+    pub fn pollTimeout(session: *Self) ?i64 {
+        const deadline = @min(session.int_deadline, session.fin_deadline);
+        return if (deadline == std.math.maxInt(i64)) return null else deadline;
+    }
+
+    fn setConnectionState(session: *Self, state: ConnectionState) void {
+        session.connection_state = state;
+        session.events_out.pushBack(.{ .connection_state = state }) catch |err| {
+            Logger.warn("Dropping dtls2 event, queue full: {}", .{err});
+        };
+    }
+
+    fn createCertificate(session: *Self) !void {
+        if (m.psa_crypto_init() != m.PSA_SUCCESS) return error.CryptoInitFailed;
+
+        var cert: m.mbedtls_x509write_cert = undefined;
+        m.mbedtls_x509write_crt_init(&cert);
+        defer m.mbedtls_x509write_crt_free(&cert);
+
+        m.mbedtls_x509write_crt_set_md_alg(&cert, m.MBEDTLS_MD_SHA256);
+        m.mbedtls_x509write_crt_set_issuer_key(&cert, &session.key);
+        m.mbedtls_x509write_crt_set_subject_key(&cert, &session.key);
+        var ret = m.mbedtls_x509write_crt_set_validity(&cert, "20250101000000", "20350101000000");
+        try checkError(ret);
+
+        var serial: [16]u8 = @splat(0);
+        session.random.bytes(&serial);
+        serial[0] = (serial[0] & 0x7F) | 0x01;
+        ret = m.mbedtls_x509write_crt_set_serial_raw(&cert, serial[0..].ptr, serial.len);
+        try checkError(ret);
+
+        ret = m.mbedtls_x509write_crt_set_subject_name(&cert, "CN=Zig WebRTC");
+        try checkError(ret);
+        ret = m.mbedtls_x509write_crt_set_issuer_name(&cert, "CN=Zig WebRTC");
+        try checkError(ret);
+
+        var buffer: [4096]u8 = @splat(0);
+        ret = m.mbedtls_x509write_crt_der(&cert, buffer[0..].ptr, buffer.len, mbedtlsRandom, &session.random);
+        try checkError(ret);
+
+        const len: u32 = @bitCast(ret);
+        const certificate = buffer[buffer.len - len ..];
+        ret = m.mbedtls_x509_crt_parse_der(&session.crt, certificate.ptr, certificate.len);
+        try checkError(ret);
+    }
+
+    fn handshakeStep(session: *Self) HandshakeError!void {
+        switch (m.mbedtls_ssl_handshake(&session.ssl)) {
+            0 => {
+                session.handshake_needed = false;
+                const profile = session.exportSrtpKeyingMaterial() catch |err| {
+                    Logger.err("Failed to export srtp keying material: {}", .{err});
+                    return error.HandshakeFailed;
+                };
+                session.setConnectionState(.connected);
+                session.events_out.pushBack(.{ .srtp_keying_material = profile }) catch |err| {
+                    Logger.warn("Dropping dtls2 event, queue full: {}", .{err});
+                };
+            },
+            m.MBEDTLS_ERR_SSL_WANT_READ => session.handshake_needed = false,
+            m.MBEDTLS_ERR_SSL_WANT_WRITE => session.handshake_needed = true,
+            else => |err_code| {
+                session.handshake_needed = false;
+
+                var error_buffer: [1024]u8 = undefined;
+                m.mbedtls_strerror(err_code, error_buffer[0..].ptr, error_buffer.len);
+                if (builtin.is_test) {
+                    Logger.debug("Handshake failed: {s}", .{error_buffer});
+                } else {
+                    Logger.err("Handshake failed: {s}", .{error_buffer});
+                }
+
+                session.setConnectionState(.failed);
+                return switch (err_code) {
+                    m.MBEDTLS_ERR_SSL_TIMEOUT => error.Timeout,
+                    m.MBEDTLS_ERR_X509_FATAL_ERROR => error.X509Error,
+                    else => error.HandshakeFailed,
+                };
+            },
+        }
+    }
+
+    fn sendData(ctx: ?*anyopaque, buf: [*c]const u8, len: usize) callconv(.c) i32 {
+        const session: *Self = @ptrCast(@alignCast(ctx.?));
+
+        if (session.direct_out) |dest| {
+            if (len > dest.len) return m.MBEDTLS_ERR_SSL_WANT_WRITE;
+            @memcpy(dest[0..len], buf[0..len]);
+            session.direct_out_len = len;
+            return @intCast(len);
+        }
+
+        if (session.handshake_out_len != 0 or len > session.handshake_out.len) return m.MBEDTLS_ERR_SSL_WANT_WRITE;
+
+        @memcpy(session.handshake_out[0..len], buf[0..len]);
+        session.handshake_out_len = len;
+
+        return @intCast(len);
+    }
+
+    fn recvData(ctx: ?*anyopaque, buf: [*c]u8, len: usize) callconv(.c) i32 {
+        return recvDataTimeout(ctx, buf, len, 0);
+    }
+
+    fn recvDataTimeout(ctx: ?*anyopaque, buf: [*c]u8, len: usize, timeout: u32) callconv(.c) i32 {
+        _ = timeout;
+
+        const session: *Self = @ptrCast(@alignCast(ctx.?));
+        if (session.received_data) |data| {
+            std.debug.assert(data.len <= len);
+            @memcpy(buf[0..data.len], data);
+            session.received_data = null;
+            return @intCast(data.len);
+        }
+
+        return m.MBEDTLS_ERR_SSL_WANT_READ;
+    }
+
+    fn setTimer(ctx: ?*anyopaque, int_ms: u32, fin_ms: u32) callconv(.c) void {
+        const session: *Self = @ptrCast(@alignCast(ctx.?));
+        if (fin_ms == 0) {
+            session.int_deadline = std.math.maxInt(i64);
+            session.fin_deadline = std.math.maxInt(i64);
+        } else {
+            session.int_deadline = session.now + int_ms;
+            session.fin_deadline = session.now + fin_ms;
+        }
+
+        session.int_expired = false;
+        session.fin_expired = false;
+    }
+
+    fn getTimer(ctx: ?*anyopaque) callconv(.c) i32 {
+        const session: *Self = @ptrCast(@alignCast(ctx.?));
+        if (session.fin_expired) return 2;
+        if (session.int_expired) return 1;
+        return 0;
+    }
+
+    fn exportSrtpKeyingMaterial(session: *Self) !SrtpProfile {
         var profile: m.mbedtls_dtls_srtp_info = .{};
         m.mbedtls_ssl_get_dtls_srtp_negotiation_result(&session.ssl, &profile);
         errdefer {
             _ = m.mbedtls_ssl_close_notify(&session.ssl);
-            session.connection_state = .failed;
+            session.setConnectionState(.failed);
         }
 
         switch (profile.private_chosen_dtls_srtp_profile) {
@@ -237,7 +437,7 @@ pub const Session = struct {
                     session.session_keys.tls_profile,
                     session.session_keys.master_secret.ptr,
                     session.session_keys.master_secret.len,
-                    KEYINIG_EXTRACTOR_LABEL,
+                    KEYING_EXTRACTOR_LABEL,
                     session.session_keys.rand_bytes[0..].ptr,
                     session.session_keys.rand_bytes.len,
                     &keying_material,
@@ -265,114 +465,11 @@ pub const Session = struct {
         }
     }
 
-    pub fn getFingerprint(session: *Session, fingerprint: *[32]u8) void {
-        const cert = session.crt.raw.p[0..session.crt.raw.len];
-        Sha256.hash(cert, fingerprint, .{});
-    }
-
-    pub fn close(session: *Session) void {
-        _ = m.mbedtls_ssl_close_notify(&session.ssl);
-        session.connection_state = .closed;
-    }
-
-    fn createCertificate(session: *Session, io: std.Io) !void {
-        if (m.psa_crypto_init() != m.PSA_SUCCESS) return error.CryptoInitFailed;
-
-        var cert: m.mbedtls_x509write_cert = undefined;
-        m.mbedtls_x509write_crt_init(&cert);
-        defer m.mbedtls_x509write_crt_free(&cert);
-
-        m.mbedtls_x509write_crt_set_md_alg(&cert, m.MBEDTLS_MD_SHA256);
-        m.mbedtls_x509write_crt_set_issuer_key(&cert, &session.key);
-        m.mbedtls_x509write_crt_set_subject_key(&cert, &session.key);
-        var ret = m.mbedtls_x509write_crt_set_validity(&cert, "20250101000000", "20350101000000");
-        try checkError(ret);
-
-        var serial: [16]u8 = @splat(0);
-        io.random(&serial);
-        serial[0] = (serial[0] & 0x7F) | 0x01;
-        ret = m.mbedtls_x509write_crt_set_serial_raw(&cert, serial[0..].ptr, serial.len);
-        try checkError(ret);
-
-        ret = m.mbedtls_x509write_crt_set_subject_name(&cert, "CN=Zig WebRTC");
-        try checkError(ret);
-        ret = m.mbedtls_x509write_crt_set_issuer_name(&cert, "CN=Zig WebRTC");
-        try checkError(ret);
-
-        var buffer: [4096]u8 = @splat(0);
-        ret = m.mbedtls_x509write_crt_der(&cert, buffer[0..].ptr, buffer.len, random, &session.io);
-        try checkError(ret);
-
-        const len: u32 = @bitCast(ret);
-        const certificate = buffer[buffer.len - len ..];
-        ret = m.mbedtls_x509_crt_parse_der(&session.crt, certificate.ptr, certificate.len);
-        try checkError(ret);
-    }
-
-    fn handshake(session: *Session) HandshakeError!void {
-        const result = switch (m.mbedtls_ssl_handshake(&session.ssl)) {
-            0 => session.connection_state = .connected,
-            m.MBEDTLS_ERR_SSL_WANT_READ, m.MBEDTLS_ERR_SSL_WANT_WRITE => error.WantData,
-            else => |err_code| {
-                var error_buffer: [1024]u8 = undefined;
-                m.mbedtls_strerror(err_code, error_buffer[0..].ptr, error_buffer.len);
-                if (builtin.is_test) {
-                    Logger.debug("Handshake failed: {s}", .{error_buffer});
-                } else {
-                    Logger.err("Handshake failed: {s}", .{error_buffer});
-                }
-
-                session.connection_state = .failed;
-                return switch (err_code) {
-                    m.MBEDTLS_ERR_SSL_TIMEOUT => error.Timeout,
-                    m.MBEDTLS_ERR_X509_FATAL_ERROR => error.X509Error,
-                    else => error.HandshakeFailed,
-                };
-            },
-        };
-
-        session.on_set_timer(session, session.handshake_timer_value.@"0", session.handshake_timer_value.@"1");
-        return result;
-    }
-
-    fn sendData(ctx: ?*anyopaque, buf: [*c]const u8, len: usize) callconv(.c) i32 {
-        const session: *Session = @ptrCast(@alignCast(ctx.?));
-        return session.on_send_data(session, buf[0..len]);
-    }
-
-    fn recvData(ctx: ?*anyopaque, buf: [*c]u8, len: usize) callconv(.c) i32 {
-        return recvDataTimeout(ctx, buf, len, 0);
-    }
-
-    fn recvDataTimeout(ctx: ?*anyopaque, buf: [*c]u8, len: usize, timeout: u32) callconv(.c) i32 {
-        _ = timeout;
-
-        const session: *Session = @ptrCast(@alignCast(ctx.?));
-        if (session.received_data) |data| {
-            std.debug.assert(data.len <= len);
-            @memcpy(buf[0..data.len], data);
-            session.received_data = null;
-            return @intCast(data.len);
-        }
-
-        return m.MBEDTLS_ERR_SSL_WANT_READ;
-    }
-
-    fn setTimer(ctx: ?*anyopaque, int_ms: u32, fin_ms: u32) callconv(.c) void {
-        const session: *Session = @ptrCast(@alignCast(ctx.?));
-        session.handshake_timer_value = .{ int_ms, fin_ms };
-    }
-
-    fn getTimer(ctx: ?*anyopaque) callconv(.c) i32 {
-        const session: *Session = @ptrCast(@alignCast(ctx.?));
-        return session.on_get_timer_state(session);
-    }
-
     fn verifyCertificateFingerprint(ctx: ?*anyopaque, crt: [*c]m.mbedtls_x509_crt, flag: c_int, cn: [*c]u32) callconv(.c) i32 {
         _ = flag;
         _ = cn;
 
-        const session: *Session = @ptrCast(@alignCast(ctx.?));
+        const session: *Self = @ptrCast(@alignCast(ctx.?));
         const cert = crt.*.raw.p[0..crt.*.raw.len];
         var fingerprint: [Sha256.digest_length]u8 = @splat(0);
         Sha256.hash(cert, &fingerprint, .{});
@@ -391,7 +488,7 @@ pub const Session = struct {
     ) callconv(.c) void {
         _ = key_type;
 
-        const session: *Session = @ptrCast(@alignCast(ctx.?));
+        const session: *Self = @ptrCast(@alignCast(ctx.?));
         const max_dtls_random_bytes = 32;
 
         session.session_keys = .{
@@ -404,9 +501,9 @@ pub const Session = struct {
         @memcpy(session.session_keys.rand_bytes[max_dtls_random_bytes..], server_random[0..max_dtls_random_bytes]);
     }
 
-    fn random(ctx: ?*anyopaque, data: [*c]u8, len: usize) callconv(.c) c_int {
-        const io: *std.Io = @ptrCast(@alignCast(ctx));
-        io.randomSecure(data[0..len]) catch return m.PSA_ERROR_INSUFFICIENT_ENTROPY;
+    fn mbedtlsRandom(ctx: ?*anyopaque, data: [*c]u8, len: usize) callconv(.c) c_int {
+        const rand: *std.Random = @ptrCast(@alignCast(ctx));
+        rand.bytes(data[0..len]);
         return 0;
     }
 
@@ -435,179 +532,143 @@ pub const Session = struct {
 };
 
 const testing = std.testing;
-const WriteEvent = struct { *Session, []const u8 };
-const EventQueue = std.Io.Queue(WriteEvent);
 
-const WrappedSession = struct {
-    io: std.Io,
-    session: Session,
-    queue: *EventQueue,
+fn initTestSession(random: std.Random) !Session {
+    var buffer: [4096]u8 = @splat(0);
+    const der_key = try utils.generateP256KeyPairDer(testing.io, &buffer);
+    return Session.init(random, .{ .key_pair = der_key });
+}
 
-    fn init(io: std.Io, queue: *EventQueue) !WrappedSession {
-        var key_pair = try P256KeyPair.init(io);
-        var buffer: [4096]u8 = @splat(0);
-        const der_key = try P256KeyPair.toDer(&key_pair, &buffer);
+fn createPeers(peer1: *Session, peer2: *Session, random: std.Random) !void {
+    peer1.* = try initTestSession(random);
+    peer2.* = try initTestSession(random);
 
-        const session = try Session.init(io, .{
-            .key_pair = der_key,
-            .on_get_timer_state = getTimerState,
-            .on_send_data = sendData,
-            .on_set_timer = setTimer,
-        });
-
-        return .{ .io = io, .session = session, .queue = queue };
-    }
-
-    fn deinit(self: *WrappedSession) void {
-        self.session.deinit();
-    }
-
-    fn getTimerState(session: *Session) i32 {
-        _ = session;
-        return 0;
-    }
-
-    fn sendData(session: *Session, data: []const u8) i32 {
-        const wrapped_session: *WrappedSession = @alignCast(@fieldParentPtr("session", session));
-        wrapped_session.queue.putOneUncancelable(wrapped_session.io, .{ session, data }) catch @panic("Failed");
-        return @intCast(data.len);
-    }
-
-    fn setTimer(session: *Session, int_ms: u32, fin_ms: u32) void {
-        _ = session;
-        _ = int_ms;
-        _ = fin_ms;
-    }
-};
-
-fn createPeers(peer1: *WrappedSession, peer2: *WrappedSession, queue: *EventQueue) !void {
-    peer1.* = try WrappedSession.init(testing.io, queue);
-    peer2.* = try WrappedSession.init(testing.io, queue);
-
-    try peer1.session.setRole(true);
-    try peer2.session.setRole(false);
+    try peer1.setRole(true);
+    try peer2.setRole(false);
 
     var fingerprint: [32]u8 = @splat(0);
-    peer1.session.getFingerprint(&fingerprint);
-    peer2.session.setPeerFingerprint(&fingerprint);
+    peer1.getFingerprint(&fingerprint);
+    peer2.setPeerFingerprint(&fingerprint);
 
-    peer2.session.getFingerprint(&fingerprint);
-    peer1.session.setPeerFingerprint(&fingerprint);
+    peer2.getFingerprint(&fingerprint);
+    peer1.setPeerFingerprint(&fingerprint);
 }
 
-fn handleHandshake(peer1: *WrappedSession, peer2: *WrappedSession, queue: *EventQueue) !void {
-    const resp = peer2.session.handleData(null, &.{});
-    try testing.expectError(error.WantData, resp);
+fn driveHandshake(peer1: *Session, peer2: *Session) !void {
+    var now: i64 = 0;
+    peer2.handleTimeout(now); // client kicks off the first flight
 
-    while (queue.getOne(testing.io)) |write_event| {
-        const session, const data = write_event;
-        if (session == &peer1.session) {
-            _ = peer2.session.handleData(data, &.{}) catch |err| switch (err) {
-                error.WantData => continue,
-                else => return err,
-            };
-        } else if (session == &peer2.session) {
-            _ = peer1.session.handleData(data, &.{}) catch |err| switch (err) {
-                error.WantData => continue,
-                else => return err,
-            };
+    var buf: [1500]u8 = undefined;
+    while (peer1.connection_state != .connected or peer2.connection_state != .connected) {
+        var progressed = false;
+
+        while (peer2.pollTransmit()) |dgram| {
+            _ = try peer1.handleRead(dgram, now, &buf);
+            progressed = true;
+        }
+        while (peer1.pollTransmit()) |dgram| {
+            _ = try peer2.handleRead(dgram, now, &buf);
+            progressed = true;
         }
 
-        if (peer1.session.connection_state == .connected and peer2.session.connection_state == .connected) {
-            break;
+        if (!progressed) {
+            now += 1;
+            if (peer1.pollTimeout()) |deadline| if (now >= deadline) peer1.handleTimeout(now);
+            if (peer2.pollTimeout()) |deadline| if (now >= deadline) peer2.handleTimeout(now);
         }
-    } else |err| return err;
+    }
 }
 
-test "Dtls session: handshake" {
-    var buffer: [1]WriteEvent = undefined;
-    var queue = std.Io.Queue(WriteEvent).init(&buffer);
-    defer queue.close(testing.io);
+fn expectSrtpKeyingMaterial(session: *Session) !SrtpProfile {
+    while (session.pollEvent()) |event| {
+        if (event == .srtp_keying_material) return event.srtp_keying_material;
+    }
+    return error.NoSrtpKeyingMaterialEvent;
+}
 
-    var peer1: WrappedSession = undefined;
-    var peer2: WrappedSession = undefined;
-    try createPeers(&peer1, &peer2, &queue);
+test "Dtls2 session: handshake" {
+    var peer1: Session = undefined;
+    var peer2: Session = undefined;
+    var prng = std.Random.DefaultPrng.init(testing.random_seed);
+    try createPeers(&peer1, &peer2, prng.random());
     defer peer1.deinit();
     defer peer2.deinit();
 
-    const resp = peer2.session.handleData(null, &.{});
-    try testing.expectError(error.WantData, resp);
+    try driveHandshake(&peer1, &peer2);
 
-    while (queue.getOne(testing.io)) |write_event| {
-        const session, const data = write_event;
-        if (session == &peer1.session) {
-            _ = peer2.session.handleData(data, &.{}) catch |err| switch (err) {
-                error.WantData => continue,
-                else => return err,
-            };
-            try testing.expect(peer2.session.connection_state == .connected);
-        } else if (session == &peer2.session) {
-            _ = peer1.session.handleData(data, &.{}) catch |err| switch (err) {
-                error.WantData => continue,
-                else => return err,
-            };
-            try testing.expect(peer1.session.connection_state == .connected);
-        }
-
-        if (peer1.session.connection_state == .connected and peer2.session.connection_state == .connected) {
-            break;
-        }
-    } else |err| return err;
+    try testing.expect(peer1.connection_state == .connected);
+    try testing.expect(peer2.connection_state == .connected);
 }
 
-test "Dtls session: handshake failed (wrong fingerprint)" {
-    var buffer: [1]WriteEvent = undefined;
-    var queue = std.Io.Queue(WriteEvent).init(&buffer);
-    defer queue.close(testing.io);
+test "Dtls2 session: pollEvent reports connected transition" {
+    var peer1: Session = undefined;
+    var peer2: Session = undefined;
+    var prng = std.Random.DefaultPrng.init(testing.random_seed);
+    try createPeers(&peer1, &peer2, prng.random());
+    defer peer1.deinit();
+    defer peer2.deinit();
 
-    var peer1: WrappedSession = undefined;
-    var peer2: WrappedSession = undefined;
-    try createPeers(&peer1, &peer2, &queue);
+    try driveHandshake(&peer1, &peer2);
+
+    var saw_connected = false;
+    while (peer1.pollEvent()) |event| {
+        if (event == .connection_state and event.connection_state == .connected) saw_connected = true;
+    }
+    try testing.expect(saw_connected);
+}
+
+test "Dtls2 session: handshake failed (wrong fingerprint)" {
+    var peer1: Session = undefined;
+    var peer2: Session = undefined;
+    var prng = std.Random.DefaultPrng.init(testing.random_seed);
+    try createPeers(&peer1, &peer2, prng.random());
     defer peer1.deinit();
     defer peer2.deinit();
 
     var fingerprint: [32]u8 = @splat(0);
     testing.io.random(&fingerprint);
-    peer1.session.setPeerFingerprint(&fingerprint);
+    peer1.setPeerFingerprint(&fingerprint);
 
-    var resp = peer2.session.handleData(null, &.{});
-    try testing.expectError(error.WantData, resp);
+    var now: i64 = 0;
+    peer2.handleTimeout(now);
 
-    while (queue.getOne(testing.io)) |write_event| {
-        const session, const data = write_event;
-        if (session == &peer1.session) {
-            resp = peer2.session.handleData(data, &.{});
-            if (resp == error.WantData) continue;
-
-            try testing.expectError(error.X509Error, resp);
-            try testing.expect(peer2.session.connection_state == .failed);
-        } else if (session == &peer2.session) {
-            resp = peer1.session.handleData(data, &.{});
-            if (resp == error.WantData) continue;
-
-            try testing.expectError(error.X509Error, resp);
-            try testing.expect(peer1.session.connection_state == .failed);
+    var buf: [1500]u8 = undefined;
+    while (true) {
+        if (peer2.pollTransmit()) |dgram| {
+            if (peer1.handleRead(dgram, now, &buf)) |_| {} else |err| {
+                try testing.expectEqual(error.X509Error, err);
+                try testing.expect(peer1.connection_state == .failed);
+                break;
+            }
+            continue;
+        }
+        if (peer1.pollTransmit()) |dgram| {
+            if (peer2.handleRead(dgram, now, &buf)) |_| {} else |err| {
+                try testing.expectEqual(error.X509Error, err);
+                try testing.expect(peer2.connection_state == .failed);
+                break;
+            }
+            continue;
         }
 
-        break;
-    } else |err| return err;
+        now += 1;
+        if (peer1.pollTimeout()) |deadline| if (now >= deadline) peer1.handleTimeout(now);
+        if (peer2.pollTimeout()) |deadline| if (now >= deadline) peer2.handleTimeout(now);
+    }
 }
 
-test "Dtls session: export srtp keying material" {
-    var buffer: [1]WriteEvent = undefined;
-    var queue = std.Io.Queue(WriteEvent).init(&buffer);
-    defer queue.close(testing.io);
-
-    var peer1: WrappedSession = undefined;
-    var peer2: WrappedSession = undefined;
-    try createPeers(&peer1, &peer2, &queue);
+test "Dtls2 session: export srtp keying material" {
+    var peer1: Session = undefined;
+    var peer2: Session = undefined;
+    var prng = std.Random.DefaultPrng.init(testing.random_seed);
+    try createPeers(&peer1, &peer2, prng.random());
     defer peer1.deinit();
     defer peer2.deinit();
 
-    try handleHandshake(&peer1, &peer2, &queue);
+    try driveHandshake(&peer1, &peer2);
 
-    const peer1_keying_material = try peer1.session.exportSrtpKeyingMaterial();
-    const peer2_keying_material = try peer2.session.exportSrtpKeyingMaterial();
+    const peer1_keying_material = try expectSrtpKeyingMaterial(&peer1);
+    const peer2_keying_material = try expectSrtpKeyingMaterial(&peer2);
 
     try testing.expect(peer1_keying_material.profile == peer2_keying_material.profile);
     try testing.expectEqualSlices(
@@ -622,23 +683,21 @@ test "Dtls session: export srtp keying material" {
     );
 }
 
-test "Dtls session: close connection" {
-    var buffer: [1]WriteEvent = undefined;
-    var queue = std.Io.Queue(WriteEvent).init(&buffer);
-    defer queue.close(testing.io);
-
-    var peer1: WrappedSession = undefined;
-    var peer2: WrappedSession = undefined;
-    try createPeers(&peer1, &peer2, &queue);
+test "Dtls2 session: close connection" {
+    var peer1: Session = undefined;
+    var peer2: Session = undefined;
+    var prng = std.Random.DefaultPrng.init(testing.random_seed);
+    try createPeers(&peer1, &peer2, prng.random());
     defer peer1.deinit();
     defer peer2.deinit();
 
-    try handleHandshake(&peer1, &peer2, &queue);
+    try driveHandshake(&peer1, &peer2);
 
-    peer1.session.close();
-    try testing.expect(peer1.session.connection_state == .closed);
+    peer1.close();
+    try testing.expect(peer1.connection_state == .closed);
 
-    const event = try queue.getOne(testing.io);
-    _ = try peer2.session.handleData(event.@"1", &.{});
-    try testing.expect(peer2.session.connection_state == .closed);
+    const dgram = peer1.pollTransmit() orelse return error.ExpectedTransmit;
+    var buf: [1500]u8 = undefined;
+    _ = try peer2.handleRead(dgram, 0, &buf);
+    try testing.expect(peer2.connection_state == .closed);
 }
