@@ -50,7 +50,7 @@ pub const Media = struct {
     direction: Direction,
     ice_ufrag: []const u8,
     ice_pwd: []const u8,
-    candidates: []ice.Candidate,
+    candidates: []const ice.Candidate,
     end_of_candidates: bool,
     setup: sdp.Attribute.Setup,
     fingerprint: ?[32]u8,

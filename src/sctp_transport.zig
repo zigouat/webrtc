@@ -200,8 +200,8 @@ fn newDataChannel(sctp_transport: *SctpTranport, allocator: std.mem.Allocator, l
 }
 
 fn sendOpenChannelMessage(sctp_transport: *SctpTranport, data_channel: *DataChannel) !void {
-    const buffer = try sctp_transport.dtls_transport.ice_agent.createPacket();
-    defer sctp_transport.dtls_transport.ice_agent.destroyPacket(buffer);
+    const buffer = try sctp_transport.dtls_transport.createPacket();
+    defer sctp_transport.dtls_transport.destroyPacket(buffer);
 
     const message = try data_channel.writeOpenMessage(buffer);
     try sctp_transport.socket.send(message, .{

@@ -23,6 +23,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "media", .module = media.module("media") },
             .{ .name = "sdp", .module = media_protocols.module("sdp") },
             .{ .name = "ice", .module = media_protocols.module("ice") },
+            .{ .name = "stun", .module = media_protocols.module("stun") },
             .{ .name = "rtp", .module = media_protocols.module("rtp") },
             .{ .name = "rtcp", .module = media_protocols.module("rtcp") },
             .{ .name = "srtp", .module = media_protocols.module("srtp") },

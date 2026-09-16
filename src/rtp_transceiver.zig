@@ -128,7 +128,7 @@ pub fn toSdpMedia(tr: *RtpTransceiver, allocator: std.mem.Allocator, media_engin
     );
     media.rtcp_mux = true;
     media.rtcp_rsize = false;
-    media.setIceCredentials(tr.transport.ice_agent.localCredentials());
+    media.setIceCredentials(tr.transport.ice_agent.getLocalCredentials());
 
     try tr.addSenderFields(allocator, &media);
     if (tr.mid) |mid| media.mid = mid;
@@ -178,7 +178,7 @@ pub fn toSdpMediaAnswer(
     ) else &.{};
 
     if (!rejected) {
-        answer.setIceCredentials(tr.transport.ice_agent.localCredentials());
+        answer.setIceCredentials(tr.transport.ice_agent.getLocalCredentials());
     }
 
     if (!rejected) try tr.addSenderFields(allocator, &answer);
@@ -379,7 +379,7 @@ test "toSdpMedia" {
     try testing.expect(media.track_id != null);
     try testing.expectEqualStrings(media.track_id.?, tr.sender.track.?.getId());
 
-    const ice_credentials = transport.ice_agent.localCredentials();
+    const ice_credentials = transport.ice_agent.getLocalCredentials();
     try testing.expectEqualStrings(ice_credentials.username, media.ice_ufrag);
     try testing.expectEqualStrings(ice_credentials.password, media.ice_pwd);
 
@@ -430,7 +430,7 @@ test "toSdpMediaAnswer: answer to offer" {
         try testing.expect(codec.rtp_codec.rtcp_feedbacks == webrtc.RtcpFeedbacks{ .nack = true, .nack_pli = true });
     }
 
-    const ice_credentials = transport.ice_agent.localCredentials();
+    const ice_credentials = transport.ice_agent.getLocalCredentials();
     try testing.expectEqualStrings(ice_credentials.username, answer_media.ice_ufrag);
     try testing.expectEqualStrings(ice_credentials.password, answer_media.ice_pwd);
 }

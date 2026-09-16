@@ -363,7 +363,7 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
         if (media.isDataChannel()) {
             new_media.* = try media.clone(pc.allocator);
             new_media.port = constants.sdp_default_port;
-            new_media.setIceCredentials(pc.dtls_transport.ice_agent.localCredentials());
+            new_media.setIceCredentials(pc.dtls_transport.ice_agent.getLocalCredentials());
             new_media.setup = if (media.setup == .active) .passive else .active;
             new_media.sctp_port = pc.sctp_transport.local_port;
             continue;
@@ -627,7 +627,7 @@ fn initDataChannelMedia(pc: *PeerConnection, media: *SDPSession.Media) !void {
     media.port = constants.sdp_default_port;
     media.sctp_port = pc.sctp_transport.local_port;
     media.mid = try Mid.fromInt(pc.mid);
-    media.setIceCredentials(pc.dtls_transport.ice_agent.localCredentials());
+    media.setIceCredentials(pc.dtls_transport.ice_agent.getLocalCredentials());
     pc.mid +%= 1;
 }
 
@@ -689,14 +689,10 @@ fn writeDescriptionWithCandidates(pc: *PeerConnection, sess_desc: *const ParsedS
     };
 
     const ice_agent = &pc.dtls_transport.ice_agent;
-    const io = pc.dtls_transport.getIo();
 
     if (maybe_media) |media| {
-        ice_agent.mutex.lockUncancelable(io);
-        defer ice_agent.mutex.unlock(io);
-
-        media.candidates = ice_agent.localCandidates();
-        media.end_of_candidates = ice_agent.gatheringState() == .complete;
+        media.candidates = ice_agent.candidates[0..ice_agent.candidates_len];
+        media.end_of_candidates = ice_agent.gathering_state == .complete;
         defer media.candidates = &.{};
 
         try sess_desc.session.write(w);
@@ -721,7 +717,7 @@ fn applyLocalOffer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescript
         transceiver.mid = media.mid;
     }
 
-    if (pc.dtls_transport.ice_agent.gatheringState() == .new) {
+    if (pc.dtls_transport.ice_agent.gathering_state == .new) {
         try pc.dtls_transport.gatherCandidates(pc.last_offer.getIceRole());
     }
 
@@ -1024,14 +1020,12 @@ fn findSenderBySsrc(pc: *PeerConnection, ssrc: u32) ?*RtpSender {
 
 fn writeIceCandidates(pc: *PeerConnection, w: *Io.Writer) !void {
     const ice_agent = &pc.dtls_transport.ice_agent;
-    try ice_agent.mutex.lock(pc.dtls_transport.getIo());
-    defer ice_agent.mutex.unlock(pc.dtls_transport.getIo());
 
-    for (ice_agent.localCandidates()) |*candidate| {
+    for (ice_agent.candidates[0..ice_agent.candidates_len]) |*candidate| {
         try w.print("a=candidate:{f}\r\n", .{candidate});
     }
 
-    if (ice_agent.gatheringState() == .complete) {
+    if (ice_agent.gathering_state == .complete) {
         const attr: SDPAttribute = .end_of_candidates;
         try attr.write(w);
     }
@@ -1129,8 +1123,8 @@ fn doSendReports(pc: *PeerConnection) !void {
         try io.sleep(.fromMilliseconds(sleep_ms + 500), .awake);
         if (pc.connection_state != .connected) continue;
 
-        const buffer = try pc.dtls_transport.ice_agent.createPacket();
-        defer pc.dtls_transport.ice_agent.destroyPacket(buffer);
+        const buffer = try pc.dtls_transport.createPacket();
+        defer pc.dtls_transport.destroyPacket(buffer);
         const timestamp = Io.Timestamp.now(io, .real).toMicroseconds();
 
         try pc.mutex.lock(io);
@@ -1149,7 +1143,6 @@ fn doSendReports(pc: *PeerConnection) !void {
 test {
     _ = @import("tests/peer_connection.zig");
     _ = @import("pc/demuxer.zig");
-    _ = @import("dtls/dtls.zig");
     _ = @import("nack/send_buffer.zig");
     _ = @import("nack/receive_log.zig");
     _ = @import("nack/generator.zig");
