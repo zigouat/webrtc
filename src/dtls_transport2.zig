@@ -200,9 +200,9 @@ pub fn sendRtcp(transport: *DtlsTransport, buffer: []u8, rtcp_payload: usize) Se
 }
 
 pub fn sendData(transport: *DtlsTransport, data: []const u8) !void {
-    _ = transport;
-    _ = data;
-    // try transport.session.writeData(data);
+    var buffer: [1500]u8 = undefined;
+    const size = try transport.session.writeData(data, &buffer);
+    try transport.socket.send(transport.io, &transport.dest, buffer[0..size]);
 }
 
 pub fn close(transport: *DtlsTransport) void {
@@ -230,7 +230,9 @@ fn handleSocketData(userdata: ?*anyopaque, socket: *Io.net.Socket, inc: Io.net.I
     }, now, &resp) catch return .none;
 
     switch (read_result) {
-        .app_data => |data| transport.handleIceData(data) catch return .close,
+        .app_data => |data| transport.handleIceData(data) catch |err| {
+            Logger.warn("Error while handling ice data: {}", .{err});
+        },
         .consumed => transport.drainIceEvents() catch |e| Logger.err("Error while draining events: {}", .{e}),
     }
 
@@ -345,9 +347,11 @@ fn drainDtlsEvents(transport: *DtlsTransport) !void {
 fn handleIceData(transport: *DtlsTransport, data: []const u8) !void {
     switch (getPacketType(data)) {
         .dtls => {
+            const buffer = try transport.memory_pool.create(transport.allocator);
+            defer transport.memory_pool.destroy(buffer);
             const now = Io.Timestamp.now(transport.io, .awake).toMilliseconds();
-            switch (try transport.session.handleRead(data, now, &.{})) {
-                .app_data => {},
+            switch (try transport.session.handleRead(data, now, buffer)) {
+                .app_data => |app_data| transport.on_data(transport, .{ .app_data = app_data }),
                 .consumed => try transport.drainDtlsEvents(),
             }
         },

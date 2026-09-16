@@ -248,8 +248,17 @@ pub const Session = struct {
         session.direct_out_len = 0;
         defer session.direct_out = null;
 
-        const ret = m.mbedtls_ssl_write(&session.ssl, data.ptr, data.len);
-        if (ret < 0) return error.WriteDataFailed;
+        var len = data.len;
+        var offset: usize = 0;
+
+        while (true) {
+            const ret = m.mbedtls_ssl_write(&session.ssl, data.ptr, data.len);
+            if (ret < 0) return error.WriteDataFailed;
+            if (ret < len) {
+                offset += @intCast(ret);
+                len -= @intCast(ret);
+            } else break;
+        }
 
         return session.direct_out_len;
     }
