@@ -22,6 +22,7 @@ pub const SendError = srtp.EncryptError || std.Io.net.Socket.SendError || error{
 allocator: std.mem.Allocator,
 io: Io,
 memory_pool: std.heap.MemoryPool([max_message_size]u8),
+pool_mutex: std.Io.Mutex = .init,
 timer_manager: TimerManager,
 socket_handler: SocketHandler,
 prng: *std.Random.DefaultCsprng,
@@ -153,6 +154,8 @@ pub fn applyIceAttributes(transport: *DtlsTransport, media: *SDPSession.Media) !
 pub fn gatherCandidates(transport: *DtlsTransport, role: ice.Role) !void {
     transport.ice_agent.role = role;
     var it = try ice.IfIterator.init(transport.allocator, .{});
+    defer it.deinit(transport.allocator);
+
     var has_ipv6 = false;
     var addrs: std.ArrayList(std.Io.net.IpAddress) = .empty;
     defer addrs.deinit(transport.allocator);
@@ -178,14 +181,14 @@ pub fn gatherCandidates(transport: *DtlsTransport, role: ice.Role) !void {
 }
 
 pub fn createPacket(transport: *DtlsTransport) ![]u8 {
-    transport.mutex.lockUncancelable(transport.io);
-    defer transport.mutex.unlock(transport.io);
+    transport.pool_mutex.lockUncancelable(transport.io);
+    defer transport.pool_mutex.unlock(transport.io);
     return try transport.memory_pool.create(transport.allocator);
 }
 
 pub fn destroyPacket(transport: *DtlsTransport, buffer: []const u8) void {
-    transport.mutex.lockUncancelable(transport.io);
-    defer transport.mutex.unlock(transport.io);
+    transport.pool_mutex.lockUncancelable(transport.io);
+    defer transport.pool_mutex.unlock(transport.io);
     transport.memory_pool.destroy(@ptrCast(@alignCast(@constCast(buffer))));
 }
 
@@ -407,8 +410,8 @@ fn drainDtlsEvents(transport: *DtlsTransport) !void {
 fn handleIceData(transport: *DtlsTransport, data: []const u8) !void {
     switch (getPacketType(data)) {
         .dtls => {
-            const buffer = try transport.memory_pool.create(transport.allocator);
-            defer transport.memory_pool.destroy(buffer);
+            const buffer = try transport.createPacket();
+            defer transport.destroyPacket(buffer);
             const now = Io.Timestamp.now(transport.io, .awake).toMilliseconds();
             switch (try transport.session.handleRead(data, now, buffer)) {
                 .app_data => |app_data| transport.on_data(transport, .{ .app_data = app_data }),

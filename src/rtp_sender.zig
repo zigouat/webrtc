@@ -245,8 +245,8 @@ pub fn sendSample(sender: *RtpSender, sample: *const MediaPacket) SendError!void
 pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) SendError!void {
     const tr = try checkAndGetTransceiver(sender);
 
-    var buffer = try tr.transport.ice_agent.createPacket();
-    defer tr.transport.ice_agent.destroyPacket(buffer);
+    var buffer = try tr.transport.createPacket();
+    defer tr.transport.destroyPacket(buffer);
 
     const timestamp = Io.Timestamp.now(tr.transport.getIo(), .real).toMicroseconds();
     const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[constants.rtp_default_header_size..]);
