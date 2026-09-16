@@ -1,7 +1,7 @@
 const std = @import("std");
 const rtp = @import("rtp");
 const rtcp = @import("rtcp");
-const DtlsTransport = @import("../dtls_transport.zig");
+const DtlsTransport = @import("../dtls_transport2.zig");
 
 const NackGenerator = @This();
 const Io = std.Io;

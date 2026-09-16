@@ -212,8 +212,8 @@ pub fn sendSample(sender: *RtpSender, sample: *const MediaPacket) SendError!void
     const tr = try checkAndGetTransceiver(sender);
     const timestamp = Io.Timestamp.now(tr.transport.getIo(), .real).toMicroseconds();
 
-    var buffer = try tr.transport.ice_agent.createPacket();
-    defer tr.transport.ice_agent.destroyPacket(buffer);
+    var buffer = try tr.transport.createPacket();
+    defer tr.transport.destroyPacket(buffer);
 
     const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[constants.rtp_default_header_size..]);
     const rtp_buffer = buffer[0 .. header_size + constants.max_rtp_payload_size];
@@ -307,8 +307,8 @@ pub fn handleNack(sender: *RtpSender, nack: rtcp.Nack) !void {
     const tr = try checkAndGetTransceiver(sender);
 
     var it = nack.iterateSequenceNumbers();
-    var buffer = try tr.transport.ice_agent.createPacket();
-    defer tr.transport.ice_agent.destroyPacket(buffer);
+    var buffer = try tr.transport.createPacket();
+    defer tr.transport.destroyPacket(buffer);
 
     const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[constants.rtp_default_header_size..]);
     // RFC 4588: RTX payload is the original sequence number followed by the original payload.

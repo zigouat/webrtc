@@ -358,4 +358,5 @@ test {
     _ = @import("mid.zig");
     _ = @import("utils.zig");
     _ = @import("dtls/dtls2.zig");
+    _ = @import("dtls_transport2.zig");
 }

@@ -2,7 +2,7 @@ const std = @import("std");
 const constants = @import("constants.zig");
 const webrtc = @import("webrtc.zig");
 const utils = @import("utils.zig");
-const DtlsTransport = @import("dtls_transport.zig");
+const DtlsTransport = @import("dtls_transport2.zig");
 const SDPSession = @import("sdp_session.zig");
 const RtpSender = @import("rtp_sender.zig");
 const RtpReceiver = @import("rtp_receiver.zig");
@@ -128,7 +128,7 @@ pub fn toSdpMedia(tr: *RtpTransceiver, allocator: std.mem.Allocator, media_engin
     );
     media.rtcp_mux = true;
     media.rtcp_rsize = false;
-    media.setIceCredentials(tr.transport.ice_agent.localCredentials());
+    media.setIceCredentials(tr.transport.ice_agent.getLocalCredentials());
 
     try tr.addSenderFields(allocator, &media);
     if (tr.mid) |mid| media.mid = mid;
