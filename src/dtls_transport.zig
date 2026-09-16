@@ -7,6 +7,7 @@ const utils = @import("utils.zig");
 const SDPSession = @import("sdp_session.zig");
 const SocketHandler = @import("io/socket_handler.zig");
 const TimerManager = @import("io/timer_manager.zig");
+const DnsResolver = @import("io/dns_resolver.zig");
 
 const DtlsTransport = @This();
 const Io = std.Io;
@@ -26,6 +27,7 @@ prng: *std.Random.DefaultCsprng,
 mutex: std.Io.Mutex = .init,
 group: Io.Group = .init,
 
+ice_servers: []const ice.IceServer,
 ice_agent: IceAgent,
 session: dtls.Session,
 in_srtp_session: ?srtp.Session = null,
@@ -83,6 +85,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, config: Config) !DtlsTrans
         .io = io,
         .prng = prng,
         .memory_pool = .empty,
+        .ice_servers = config.ice_servers,
         .socket_handler = .init(),
         .timer_manager = .{},
         .ice_agent = ice_agent,
@@ -149,6 +152,7 @@ pub fn applyIceAttributes(transport: *DtlsTransport, media: *SDPSession.Media) !
 pub fn gatherCandidates(transport: *DtlsTransport, role: ice.Role) !void {
     transport.ice_agent.role = role;
     var it = try ice.IfIterator.init(transport.allocator, .{});
+    var has_ipv6 = false;
     var addrs: std.ArrayList(std.Io.net.IpAddress) = .empty;
     defer addrs.deinit(transport.allocator);
 
@@ -161,11 +165,12 @@ pub fn gatherCandidates(transport: *DtlsTransport, role: ice.Role) !void {
             handleSocketData,
         ) orelse continue;
 
+        if (std.meta.activeTag(addr) == .ip6) has_ipv6 = true;
         try addrs.append(transport.allocator, socket.address);
     }
+    try transport.addStunAndTurnServers(has_ipv6);
 
     const now = Io.Timestamp.now(transport.io, .awake).toMilliseconds();
-
     try transport.ice_agent.addLocalAddrs(addrs.items, now);
     try transport.group.concurrent(transport.io, TimerManager.run, .{ &transport.timer_manager, transport.io });
     try transport.drainIceEvents();
@@ -212,6 +217,60 @@ pub fn close(transport: *DtlsTransport) void {
 
 pub fn getRole(transport: *const DtlsTransport) dtls.Role {
     return transport.session.getRole();
+}
+
+fn addStunAndTurnServers(transport: *DtlsTransport, has_ipv6: bool) Io.Cancelable!void {
+    for (transport.ice_servers) |ice_server| {
+        transport.resolveIceServer(ice_server, has_ipv6) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => Logger.warn("Failed to resolve ICE server {s}: {}", .{ ice_server.url, err }),
+        };
+    }
+}
+
+fn resolveIceServer(transport: *DtlsTransport, ice_server: ice.IceServer, has_ipv6: bool) !void {
+    const server = try ice.ParsedServerUrl.parse(ice_server.url);
+    if (server.scheme != .stun and server.scheme != .turn) return;
+    if (server.transport == .tcp) return;
+
+    var resolver = try DnsResolver.init(server.host);
+    try resolver.resolve(transport.io, server.port);
+    while (try resolver.next(transport.io)) |addr| {
+        if (!has_ipv6 and std.meta.activeTag(addr) == .ip6) continue;
+
+        const local_addr = switch (std.meta.activeTag(addr)) {
+            .ip4 => Io.net.IpAddress{ .ip4 = .unspecified(0) },
+            .ip6 => Io.net.IpAddress{ .ip6 = .unspecified(0) },
+        };
+
+        const socket = try transport.socket_handler.registerSocket(
+            transport.io,
+            transport.allocator,
+            &local_addr,
+            transport,
+            handleSocketData,
+        ) orelse continue;
+        errdefer transport.socket_handler.unregisterSocket(transport.io, socket);
+
+        try transport.ice_agent.addStunServer(socket.address, addr);
+        if (server.scheme == .turn) {
+            const turn_socket = try transport.socket_handler.registerSocket(
+                transport.io,
+                transport.allocator,
+                &local_addr,
+                transport,
+                handleSocketData,
+            ) orelse continue;
+            errdefer transport.socket_handler.unregisterSocket(transport.io, turn_socket);
+
+            try transport.ice_agent.addTurnServer(
+                turn_socket.address,
+                addr,
+                ice_server.username,
+                ice_server.credential,
+            );
+        }
+    }
 }
 
 fn handleSocketData(userdata: ?*anyopaque, socket: *Io.net.Socket, inc: Io.net.IncomingMessage) !SocketHandler.ReturnAction {
