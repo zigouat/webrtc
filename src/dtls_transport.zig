@@ -14,13 +14,14 @@ const Io = std.Io;
 const Logger = std.log.scoped(.dtls_transport);
 const IceAgent = ice.agent.Agent(.{});
 
+const max_message_size = 1500;
 const PacketType = enum { rtp, rtcp, dtls, unknown };
 
 pub const SendError = srtp.EncryptError || std.Io.net.Socket.SendError || error{ WriteFailed, UnknownAttribute };
 
 allocator: std.mem.Allocator,
 io: Io,
-memory_pool: std.heap.MemoryPool([1500]u8),
+memory_pool: std.heap.MemoryPool([max_message_size]u8),
 timer_manager: TimerManager,
 socket_handler: SocketHandler,
 prng: *std.Random.DefaultCsprng,
@@ -205,7 +206,7 @@ pub fn sendRtcp(transport: *DtlsTransport, buffer: []u8, rtcp_payload: usize) Se
 }
 
 pub fn sendData(transport: *DtlsTransport, data: []const u8) !void {
-    var buffer: [1500]u8 = undefined;
+    var buffer: [max_message_size]u8 = undefined;
     const size = try transport.session.writeData(data, &buffer);
     try transport.socket.send(transport.io, &transport.dest, buffer[0..size]);
 }
@@ -415,12 +416,12 @@ fn handleIceData(transport: *DtlsTransport, data: []const u8) !void {
             }
         },
         .rtp => if (transport.in_srtp_session) |*srtp_session| {
-            const buffer = @constCast(data.ptr[0..ice.Agent3.max_message_size]);
+            const buffer = @constCast(data.ptr[0..max_message_size]);
             const rtp_packet = try srtp_session.decryptRtp(data, buffer);
             transport.on_data(transport, .{ .rtp = rtp_packet });
         },
         .rtcp => if (transport.in_srtp_session) |*srtp_session| {
-            const buffer = @constCast(data.ptr[0..ice.Agent3.max_message_size]);
+            const buffer = @constCast(data.ptr[0..max_message_size]);
             const rtcp_packet = try srtp_session.decryptRtcp(data, buffer);
             transport.on_data(transport, .{ .rtcp = rtcp_packet });
         },
