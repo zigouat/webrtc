@@ -8,6 +8,7 @@ pub fn build(b: *std.Build) void {
     const media_protocols = b.dependency("media_protocols", .{ .target = target, .optimize = optimize });
     const mbedtls = b.dependency("mbedtls", .{ .target = target, .optimize = .ReleaseFast });
     const usrsctp = b.dependency("usrsctp", .{ .target = target, .optimize = .ReleaseFast });
+    const sctp = b.dependency("sctp", .{ .target = target, .optimize = optimize });
 
     const config_header = mbedtls_config(b);
 
@@ -28,6 +29,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "rtcp", .module = media_protocols.module("rtcp") },
             .{ .name = "srtp", .module = media_protocols.module("srtp") },
             .{ .name = "sctp", .module = usrsctp.module("sctp") },
+            .{ .name = "sctp2", .module = sctp.module("sctp") },
         },
     });
 

@@ -77,9 +77,6 @@ const Handler = struct {
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
-    webrtc.SctpRuntime.init();
-    defer webrtc.SctpRuntime.deinit();
-
     var media_engine = webrtc.MediaEngine.init(.{});
     defer media_engine.deinit(init.gpa);
 

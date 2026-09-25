@@ -10,7 +10,7 @@ const constants = @import("constants.zig");
 
 const SDPAttribute = @import("sdp").Attribute.ParsedAttribute;
 const DtlsTransport = @import("dtls_transport.zig");
-const SctpTransport = @import("sctp_transport.zig");
+const SctpTransport = @import("sctp_transport2.zig");
 const SDPSession = @import("sdp_session.zig");
 const Demuxer = @import("pc/demuxer.zig");
 const RtpTransceiver = @import("rtp_transceiver.zig");
@@ -968,7 +968,9 @@ fn onDtlsData(dtls_transport: *DtlsTransport, data_event: DtlsTransport.DataEven
     switch (data_event) {
         .rtp => |data| pc.handleRtpData(data) catch {},
         .rtcp => |data| pc.handleRtcpData(data) catch {},
-        .app_data => |data| pc.sctp_transport.handleIncomingData(data),
+        .app_data => |data| pc.sctp_transport.handleRead(data) catch |err| {
+            Logger.err("Failed to handle incoming SCTP data: {}", .{err});
+        },
     }
 }
 

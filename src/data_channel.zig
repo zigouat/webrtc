@@ -1,8 +1,13 @@
 const std = @import("std");
-const SctpTransport = @import("sctp_transport.zig");
+const SctpTransport = @import("sctp_transport2.zig");
 
 const DataChannel = @This();
 const EventCallback = *const fn (userdata: ?*anyopaque, data_channel: *DataChannel, event: DataChannel.Event) void;
+
+pub const StreamResetFlag = struct {
+    outgoing: bool = false,
+    incoming: bool = false,
+};
 
 pub const State = enum { connecting, open, closing, closed };
 
@@ -196,14 +201,14 @@ pub fn close(data_channel: *DataChannel) !void {
 
 pub const SendError = error{ SendFailed, InvalidState };
 
-pub fn sendText(data_channel: *DataChannel, data: []const u8) SendError!void {
+pub fn sendText(data_channel: *DataChannel, data: []const u8) !void {
     if (data.len == 0)
         try data_channel.send(&[_]u8{0}, SctpTransport.EMPTY_TEXT_MESSAGE_PPID)
     else
         try data_channel.send(data, SctpTransport.TEXT_MESSAGE_PPID);
 }
 
-pub fn sendBinary(data_channel: *DataChannel, data: []const u8) SendError!void {
+pub fn sendBinary(data_channel: *DataChannel, data: []const u8) !void {
     if (data.len == 0)
         try data_channel.send(&[_]u8{0}, SctpTransport.EMPTY_BINRAY_MESSAGE_PPID)
     else
@@ -215,18 +220,16 @@ pub fn registerCallback(data_channel: *DataChannel, userdata: ?*anyopaque, callb
     data_channel.on_event = callback;
 }
 
-fn send(data_channel: *DataChannel, data: []const u8, ppid: u32) SendError!void {
+fn send(data_channel: *DataChannel, data: []const u8, ppid: u32) !void {
     if (data_channel.ready_state != .open or data_channel.id == null) {
         @branchHint(.unlikely);
         return error.InvalidState;
     }
 
-    try data_channel.sctp_tranport.socket.send(data, .{
+    try data_channel.sctp_tranport.sendData(data, .{
         .ppid = ppid,
-        .sid = data_channel.id.?,
-        .ordered = data_channel.ordered,
-        .max_retransmits = data_channel.max_retransmits,
-        .max_lifetime = data_channel.max_packet_lifetime,
+        .stream_id = data_channel.id.?,
+        .unordered = !data_channel.ordered,
     });
 }
 
