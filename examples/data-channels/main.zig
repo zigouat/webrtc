@@ -11,6 +11,7 @@ const Handler = struct {
     gathering_done: Io.Event,
     done: Io.Event,
     grp: Io.Group,
+    pc: *webrtc.PeerConnection = undefined,
 
     fn init(io: Io) Handler {
         return Handler{
@@ -38,13 +39,14 @@ const Handler = struct {
     }
 
     fn onConnectionStateChange(userdata: ?*anyopaque, state: webrtc.PeerConnection.ConnectionState) void {
+        std.log.info("Connection state: {}\n", .{state});
         const handler: *Handler = @ptrCast(@alignCast(userdata.?));
         if (state == .closed or state == .failed) handler.done.set(handler.io);
     }
 
     fn onDataChannel(userdata: ?*anyopaque, data_channel: *webrtc.DataChannel) void {
         const handler: *Handler = @ptrCast(@alignCast(userdata.?));
-        data_channel.registerCallback(handler, receiveData);
+        handler.grp.concurrent(handler.io, sendMessage, .{ handler.io, handler.pc, data_channel }) catch @panic("ConcurrencyUnavailable");
     }
 
     fn receiveData(userdata: ?*anyopaque, data_channel: *webrtc.DataChannel, event: webrtc.DataChannel.Event) void {
@@ -52,7 +54,7 @@ const Handler = struct {
         switch (event) {
             .open => {
                 std.log.info("Data channel {s} opened", .{data_channel.label});
-                handler.grp.concurrent(handler.io, sendMessage, .{ handler.io, data_channel }) catch @panic("ConcurrencyUnavailable");
+                // handler.grp.concurrent(handler.io, sendMessage, .{ handler.io, data_channel }) catch @panic("ConcurrencyUnavailable");
             },
             .text_message => |msg| std.debug.print("[{s}]: {s}\n", .{ data_channel.label, msg }),
             .close => {
@@ -63,13 +65,14 @@ const Handler = struct {
         }
     }
 
-    fn sendMessage(io: Io, data_channel: *webrtc.DataChannel) !void {
+    fn sendMessage(io: Io, pc: *webrtc.PeerConnection, data_channel: *webrtc.DataChannel) !void {
         var message: [20]u8 = @splat(0);
 
         while (true) {
             try io.sleep(.fromSeconds(5), .awake);
             common.rand_string(io, &message);
-            data_channel.sendText(&message) catch return;
+            pc.sendDataChannelMessage(data_channel, &message) catch return;
+            // data_channel.sendText(&message) catch return;
         }
     }
 };
@@ -86,6 +89,8 @@ pub fn main(init: std.process.Init) !void {
         .media_engine = &media_engine,
     });
     defer pc.deinit();
+
+    handler.pc = &pc;
 
     const offer = try common.readSdpFromStdin(io, init.gpa);
     defer offer.deinit();

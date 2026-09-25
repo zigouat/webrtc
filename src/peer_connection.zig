@@ -189,7 +189,6 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
         .sctp_transport = SctpTransport.init(io, allocator, .{
             .local_port = constants.default_sctp_port,
             .remote_port = 0,
-            .on_event = onSctpTransportEvent,
         }),
     };
 }
@@ -464,7 +463,18 @@ pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataCha
     if (label.len > constants.max_data_channel_label_length) return error.LabelTooLong;
     if (params.protocol.len > constants.max_data_channel_label_length) return error.ProtocolTooLong;
     if (params.max_packet_lifetime != 0 and params.max_retransmits != 0) return error.InvalidParameters;
-    return try pc.sctp_transport.addDataChannel(pc.allocator, label, params);
+    return try pc.sctp_transport.addDataChannel(label, params);
+}
+
+pub fn sendDataChannelMessage(pc: *PeerConnection, data_channel: *DataChannel, message: []const u8) !void {
+    try pc.checkNotClosed();
+    try pc.sctp_transport.sendDataChannelMessage(data_channel, message, false);
+
+    var buffer: [1200]u8 = undefined;
+    const now = Io.Timestamp.now(pc.dtls_transport.io, .awake).toMilliseconds();
+    while (pc.sctp_transport.pollTransmits(&buffer, now)) |data| {
+        try pc.dtls_transport.sendData(data);
+    }
 }
 
 pub fn close(pc: *PeerConnection) void {
@@ -968,19 +978,40 @@ fn onDtlsData(dtls_transport: *DtlsTransport, data_event: DtlsTransport.DataEven
     switch (data_event) {
         .rtp => |data| pc.handleRtpData(data) catch {},
         .rtcp => |data| pc.handleRtcpData(data) catch {},
-        .app_data => |data| pc.sctp_transport.handleRead(data) catch |err| {
-            Logger.err("Failed to handle incoming SCTP data: {}", .{err});
-        },
-    }
-}
+        .app_data => |data| {
+            var buffer: [1500]u8 = undefined;
+            const now = Io.Timestamp.now(dtls_transport.io, .awake).toMilliseconds();
+            pc.sctp_transport.handleRead(data, now) catch |err| {
+                Logger.err("Failed to handle incoming SCTP data: {}", .{err});
+            };
 
-fn onSctpTransportEvent(sctp_transport: *SctpTransport, event: SctpTransport.Event) void {
-    const pc: *PeerConnection = @alignCast(@fieldParentPtr("sctp_transport", sctp_transport));
-    switch (event) {
-        .data_channel => |channel| if (pc.handler) |handler| {
-            handler.vtable.onDataChannel(handler.userdata, channel);
+            while (pc.sctp_transport.pollEvent()) |event| switch (event) {
+                .connection_state => |state| Logger.info("SCTP connection state changed: {}", .{state}),
+                .data_channel => |channel| if (pc.handler) |handler| {
+                    handler.vtable.onDataChannel(handler.userdata, channel);
+                },
+                .data_channel_open => |data_channel| {
+                    std.debug.print("Data channel {s} open\n", .{data_channel.label});
+                },
+                .data_channel_close => |data_channel| {
+                    std.debug.print("Data channel {s} closed\n", .{data_channel.label});
+                },
+                .data_channel_message => |message| {
+                    const m = switch (message.message) {
+                        .text => |text| text,
+                        .binary => |bin| bin,
+                    };
+                    defer pc.allocator.free(m);
+                    std.debug.print("Data channel {s} received message: {s}\n", .{ message.channel.label, m });
+                },
+            };
+
+            while (pc.sctp_transport.pollTransmits(&buffer, now)) |d| {
+                pc.dtls_transport.sendData(d) catch |err| {
+                    Logger.err("Failed to send SCTP data: {}", .{err});
+                };
+            }
         },
-        .connection_state => |state| Logger.debug("SCTP connection state changed: {}", .{state}),
     }
 }
 
@@ -1069,7 +1100,15 @@ fn maybeConnectSctpTransport(pc: *PeerConnection) !void {
     if (local_sess.getApplicationMedia()) |local| if (remote_sess.getApplicationMedia()) |remote| {
         if (local.isRejected() or remote.isRejected()) return;
         if (local.sctp_port.? == 0 or remote.sctp_port.? == 0) return;
-        try pc.sctp_transport.connect(&pc.dtls_transport);
+        try pc.sctp_transport.connect(pc.dtls_transport.getRole() == .server);
+
+        const buffer = try pc.dtls_transport.createPacket();
+        defer pc.dtls_transport.destroyPacket(buffer);
+
+        const now = Io.Timestamp.now(pc.dtls_transport.getIo(), .awake).toMilliseconds();
+        while (pc.sctp_transport.pollTransmits(buffer, now)) |data| {
+            try pc.dtls_transport.sendData(data);
+        }
     };
 }
 

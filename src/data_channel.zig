@@ -2,7 +2,6 @@ const std = @import("std");
 const SctpTransport = @import("sctp_transport2.zig");
 
 const DataChannel = @This();
-const EventCallback = *const fn (userdata: ?*anyopaque, data_channel: *DataChannel, event: DataChannel.Event) void;
 
 pub const StreamResetFlag = struct {
     outgoing: bool = false,
@@ -98,14 +97,6 @@ pub const Parameters = struct {
     id: ?u16 = null,
 };
 
-pub const Event = union(enum) {
-    open: void,
-    close: void,
-    err: void,
-    text_message: []const u8,
-    binary_message: []const u8,
-};
-
 id: ?u16,
 label: []const u8,
 ordered: bool,
@@ -113,16 +104,8 @@ max_packet_lifetime: u32,
 max_retransmits: u32,
 protocol: []const u8,
 ready_state: State,
-sctp_tranport: *SctpTransport,
-userdata: ?*anyopaque,
-on_event: ?EventCallback,
 
-pub fn init(
-    allocator: std.mem.Allocator,
-    label: []const u8,
-    sctp_transport: *SctpTransport,
-    params: Parameters,
-) std.mem.Allocator.Error!DataChannel {
+pub fn init(allocator: std.mem.Allocator, label: []const u8, params: Parameters) std.mem.Allocator.Error!DataChannel {
     const slice = try allocator.alloc(u8, label.len + params.protocol.len);
     @memcpy(slice[0..label.len], label);
     @memcpy(slice[label.len..], params.protocol);
@@ -135,9 +118,6 @@ pub fn init(
         .max_retransmits = params.max_retransmits,
         .protocol = slice[label.len..],
         .ready_state = State.connecting,
-        .sctp_tranport = sctp_transport,
-        .userdata = null,
-        .on_event = null,
     };
 }
 
@@ -175,61 +155,6 @@ pub fn format(data_channel: *DataChannel, writer: *std.Io.Writer) !void {
         data_channel.max_retransmits,
         data_channel.protocol,
         data_channel.ready_state,
-    });
-}
-
-pub fn setReadyState(data_channel: *DataChannel, state: State) void {
-    data_channel.ready_state = state;
-    if (data_channel.on_event) |on_event| switch (state) {
-        .open => on_event(data_channel.userdata, data_channel, .open),
-        .closed => on_event(data_channel.userdata, data_channel, .close),
-        else => {},
-    };
-}
-
-pub fn close(data_channel: *DataChannel) !void {
-    if (data_channel.ready_state == .closing or data_channel.ready_state == .closed) return;
-
-    const sid = data_channel.id orelse {
-        data_channel.setReadyState(.closed);
-        data_channel.sctp_tranport.deleteDataChannel(data_channel);
-        return;
-    };
-    try data_channel.sctp_tranport.resetStreams(&.{sid}, .{ .outgoing = true });
-    data_channel.setReadyState(.closing);
-}
-
-pub const SendError = error{ SendFailed, InvalidState };
-
-pub fn sendText(data_channel: *DataChannel, data: []const u8) !void {
-    if (data.len == 0)
-        try data_channel.send(&[_]u8{0}, SctpTransport.EMPTY_TEXT_MESSAGE_PPID)
-    else
-        try data_channel.send(data, SctpTransport.TEXT_MESSAGE_PPID);
-}
-
-pub fn sendBinary(data_channel: *DataChannel, data: []const u8) !void {
-    if (data.len == 0)
-        try data_channel.send(&[_]u8{0}, SctpTransport.EMPTY_BINRAY_MESSAGE_PPID)
-    else
-        try data_channel.send(data, SctpTransport.BINARY_MESSAGE_PPID);
-}
-
-pub fn registerCallback(data_channel: *DataChannel, userdata: ?*anyopaque, callback: EventCallback) void {
-    data_channel.userdata = userdata;
-    data_channel.on_event = callback;
-}
-
-fn send(data_channel: *DataChannel, data: []const u8, ppid: u32) !void {
-    if (data_channel.ready_state != .open or data_channel.id == null) {
-        @branchHint(.unlikely);
-        return error.InvalidState;
-    }
-
-    try data_channel.sctp_tranport.sendData(data, .{
-        .ppid = ppid,
-        .stream_id = data_channel.id.?,
-        .unordered = !data_channel.ordered,
     });
 }
 
@@ -282,7 +207,7 @@ test "DataChannel.writeOpenMessage" {
     };
     var buffer: [1024]u8 = undefined;
 
-    var data_channel = try init(testing.allocator, "data", undefined, .{
+    var data_channel = try init(testing.allocator, "data", .{
         .id = 0,
         .ordered = true,
     });
@@ -290,13 +215,4 @@ test "DataChannel.writeOpenMessage" {
 
     const written = try data_channel.writeOpenMessage(&buffer);
     try testing.expectEqualSlices(u8, &expected, written);
-}
-
-test "DataChannel.close: no-op if already closing or closed" {
-    var data_channel = try init(testing.allocator, "chan", undefined, .{});
-    data_channel.setReadyState(.closed);
-    defer data_channel.deinit(testing.allocator);
-
-    try data_channel.close();
-    try testing.expectEqual(.closed, data_channel.ready_state);
 }
