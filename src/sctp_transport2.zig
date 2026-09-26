@@ -13,7 +13,7 @@ const BINARY_MESSAGE_PPID: u32 = 53;
 const EMPTY_TEXT_MESSAGE_PPID: u32 = 56;
 const EMPTY_BINRAY_MESSAGE_PPID: u32 = 57;
 
-pub const ChannelId = u32;
+pub const ChannelId = DataChannel.ChannelId;
 
 pub const ConnectionState = enum(u8) { new, connecting, connected, closed };
 
@@ -22,20 +22,9 @@ pub const InitConfig = struct {
     remote_port: u16,
 };
 
-pub const DataChannelEvent = union(enum) {
-    new: ChannelId,
-    open: ChannelId,
-    close: ChannelId,
-    message: struct {
-        channel_id: ChannelId,
-        binary: bool,
-        data: []const u8,
-    },
-};
-
 pub const Event = union(enum) {
     connection_state: ConnectionState,
-    data_channel: DataChannelEvent,
+    data_channel: DataChannel.Event,
 };
 
 assoc: sctp.Association,
@@ -100,7 +89,7 @@ pub fn addDataChannel(sctp_transport: *SctpTranport, label: []const u8, params: 
     errdefer {
         sctp_transport.markeDataChannelDeleted(channel_id);
         // it's safe to delete the channel here because we didn't yet provide the id to the user.
-        sctp_transport.data_channels.swapRemove(channel_id);
+        _ = sctp_transport.data_channels.swapRemove(channel_id);
     }
 
     const data_channel = sctp_transport.getDataChannel(channel_id);
@@ -112,7 +101,10 @@ pub fn addDataChannel(sctp_transport: *SctpTranport, label: []const u8, params: 
     return channel_id;
 }
 
-pub fn sendDataChannelMessage(sctp_transport: *SctpTranport, data_channel: *DataChannel, data: []const u8, binary: bool) !void {
+pub fn sendDataChannelMessage(sctp_transport: *SctpTranport, channel_id: ChannelId, data: []const u8, binary: bool) !void {
+    const data_channel = sctp_transport.getDataChannel(channel_id);
+    if (data_channel.ready_state != .open) return error.DataChannelNotOpen;
+
     const ppid = if (binary and data.len == 0)
         EMPTY_BINRAY_MESSAGE_PPID
     else if (binary)

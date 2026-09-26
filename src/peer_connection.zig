@@ -460,7 +460,7 @@ pub fn writeLocalDescription(pc: *PeerConnection, w: *Io.Writer) !void {
 }
 
 /// Create a new data channel.
-pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataChannel.Parameters) !*DataChannel {
+pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataChannel.Parameters) !DataChannel.ChannelId {
     try pc.checkNotClosed();
     if (label.len > constants.max_data_channel_label_length) return error.LabelTooLong;
     if (params.protocol.len > constants.max_data_channel_label_length) return error.ProtocolTooLong;
@@ -471,9 +471,9 @@ pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataCha
     return try pc.sctp_transport.addDataChannel(label, params);
 }
 
-pub fn sendDataChannelMessage(pc: *PeerConnection, data_channel: *DataChannel, message: []const u8) !void {
+pub fn sendDataChannelMessage(pc: *PeerConnection, channel_id: DataChannel.ChannelId, message: []const u8) !void {
     try pc.checkNotClosed();
-    try pc.sctp_transport.sendDataChannelMessage(data_channel, message, false);
+    try pc.sctp_transport.sendDataChannelMessage(channel_id, message, false);
 
     var buffer: [1200]u8 = undefined;
     const now = Io.Timestamp.now(pc.dtls_transport.io, .awake).toMilliseconds();
@@ -996,23 +996,8 @@ fn onDtlsData(dtls_transport: *DtlsTransport, data_event: DtlsTransport.DataEven
 
             while (pc.sctp_transport.pollEvent()) |event| switch (event) {
                 .connection_state => |state| Logger.info("SCTP connection state changed: {}", .{state}),
-                .data_channel => |channel_event| switch (channel_event) {
-                    .new => |id| if (pc.handler) |handler| {
-                        handler.vtable.onDataChannel(handler.userdata, pc.sctp_transport.getDataChannel(id));
-                    },
-                    .open => |id| {
-                        const data_channel = pc.sctp_transport.getDataChannel(id);
-                        std.debug.print("Data channel {s} open\n", .{data_channel.getLabel()});
-                    },
-                    .close => |id| {
-                        const data_channel = pc.sctp_transport.getDataChannel(id);
-                        std.debug.print("Data channel {s} closed\n", .{data_channel.getLabel()});
-                    },
-                    .message => |message| {
-                        defer pc.allocator.free(message.data);
-                        const data_channel = pc.sctp_transport.getDataChannel(message.channel_id);
-                        std.debug.print("Data channel {s} received message: {s}\n", .{ data_channel.getLabel(), message.data });
-                    },
+                .data_channel => |dc_event| if (pc.handler) |handler| {
+                    handler.vtable.onDataChannel(handler.userdata, dc_event);
                 },
             };
 

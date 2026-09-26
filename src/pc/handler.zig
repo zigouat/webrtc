@@ -25,7 +25,7 @@ const VTable = struct {
     /// Called when a new ICE candidate is found.
     onIceCandidate: *const fn (?*anyopaque, ?ice.Candidate) void = onIceCandidate,
     /// Called when a new remote data channel is created.
-    onDataChannel: *const fn (?*anyopaque, *webrtc.DataChannel) void = onDataChannel,
+    onDataChannel: *const fn (?*anyopaque, webrtc.DataChannel.Event) void = onDataChannel,
 };
 
 fn onNegotiationNeeded(userdata: ?*anyopaque) void {
@@ -57,7 +57,7 @@ fn onIceCandidate(userdata: ?*anyopaque, candidate: ?ice.Candidate) void {
     _ = candidate;
 }
 
-fn onDataChannel(userdata: ?*anyopaque, channel: *webrtc.DataChannel) void {
+fn onDataChannel(userdata: ?*anyopaque, event: webrtc.DataChannel.Event) void {
     _ = userdata;
-    _ = channel;
+    _ = event;
 }

@@ -3,12 +3,25 @@ const SctpTransport = @import("sctp_transport2.zig");
 
 const DataChannel = @This();
 
+pub const ChannelId = u32;
+
 pub const StreamResetFlag = struct {
     outgoing: bool = false,
     incoming: bool = false,
 };
 
 pub const State = enum { connecting, open, closing, closed };
+
+pub const Event = union(enum) {
+    new: ChannelId,
+    open: ChannelId,
+    close: ChannelId,
+    message: struct {
+        channel_id: ChannelId,
+        binary: bool,
+        data: []const u8,
+    },
+};
 
 pub const MessageType = enum(u8) {
     ack = 0x02,
