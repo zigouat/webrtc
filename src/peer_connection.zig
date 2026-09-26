@@ -128,6 +128,7 @@ nack_generator: ?NackGenerator = null,
 
 group: Io.Group = .init,
 mutex: Io.Mutex = .init,
+sctp_mutex: Io.Mutex,
 
 const ParsedSessionDescription = struct {
     desc_type: webrtc.SessionDescriptionType,
@@ -186,10 +187,11 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
         .nack_config = config.nack_config,
         .media_engine = config.media_engine,
         .handler = config.handler,
-        .sctp_transport = SctpTransport.init(io, allocator, .{
+        .sctp_transport = SctpTransport.init(allocator, .{
             .local_port = constants.default_sctp_port,
             .remote_port = 0,
         }),
+        .sctp_mutex = .init,
     };
 }
 
@@ -215,7 +217,7 @@ pub fn deinit(pc: *PeerConnection) void {
     pc.last_answer.deinit(pc.allocator);
 
     if (pc.nack_generator) |*ng| ng.deinit(io);
-    pc.sctp_transport.deinit(pc.allocator);
+    pc.sctp_transport.deinit();
     pc.dtls_transport.deinit();
     pc.demuxer.deinit();
 }
@@ -463,6 +465,9 @@ pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataCha
     if (label.len > constants.max_data_channel_label_length) return error.LabelTooLong;
     if (params.protocol.len > constants.max_data_channel_label_length) return error.ProtocolTooLong;
     if (params.max_packet_lifetime != 0 and params.max_retransmits != 0) return error.InvalidParameters;
+
+    pc.sctp_mutex.lockUncancelable(pc.dtls_transport.getIo());
+    defer pc.sctp_mutex.unlock(pc.dtls_transport.getIo());
     return try pc.sctp_transport.addDataChannel(label, params);
 }
 
@@ -981,6 +986,10 @@ fn onDtlsData(dtls_transport: *DtlsTransport, data_event: DtlsTransport.DataEven
         .app_data => |data| {
             var buffer: [1500]u8 = undefined;
             const now = Io.Timestamp.now(dtls_transport.io, .awake).toMilliseconds();
+
+            pc.sctp_mutex.lockUncancelable(dtls_transport.io);
+            defer pc.sctp_mutex.unlock(dtls_transport.io);
+
             pc.sctp_transport.handleRead(data, now) catch |err| {
                 Logger.err("Failed to handle incoming SCTP data: {}", .{err});
             };
