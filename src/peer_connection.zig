@@ -996,22 +996,23 @@ fn onDtlsData(dtls_transport: *DtlsTransport, data_event: DtlsTransport.DataEven
 
             while (pc.sctp_transport.pollEvent()) |event| switch (event) {
                 .connection_state => |state| Logger.info("SCTP connection state changed: {}", .{state}),
-                .data_channel => |channel| if (pc.handler) |handler| {
-                    handler.vtable.onDataChannel(handler.userdata, channel);
-                },
-                .data_channel_open => |data_channel| {
-                    std.debug.print("Data channel {s} open\n", .{data_channel.label});
-                },
-                .data_channel_close => |data_channel| {
-                    std.debug.print("Data channel {s} closed\n", .{data_channel.label});
-                },
-                .data_channel_message => |message| {
-                    const m = switch (message.message) {
-                        .text => |text| text,
-                        .binary => |bin| bin,
-                    };
-                    defer pc.allocator.free(m);
-                    std.debug.print("Data channel {s} received message: {s}\n", .{ message.channel.label, m });
+                .data_channel => |channel_event| switch (channel_event) {
+                    .new => |id| if (pc.handler) |handler| {
+                        handler.vtable.onDataChannel(handler.userdata, pc.sctp_transport.getDataChannel(id));
+                    },
+                    .open => |id| {
+                        const data_channel = pc.sctp_transport.getDataChannel(id);
+                        std.debug.print("Data channel {s} open\n", .{data_channel.getLabel()});
+                    },
+                    .close => |id| {
+                        const data_channel = pc.sctp_transport.getDataChannel(id);
+                        std.debug.print("Data channel {s} closed\n", .{data_channel.getLabel()});
+                    },
+                    .message => |message| {
+                        defer pc.allocator.free(message.data);
+                        const data_channel = pc.sctp_transport.getDataChannel(message.channel_id);
+                        std.debug.print("Data channel {s} received message: {s}\n", .{ data_channel.getLabel(), message.data });
+                    },
                 },
             };
 

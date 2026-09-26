@@ -98,11 +98,11 @@ pub const Parameters = struct {
 };
 
 id: ?u16,
-label: []const u8,
+slice: []const u8, // label + protocol
+label_length: u16,
 ordered: bool,
 max_packet_lifetime: u32,
 max_retransmits: u32,
-protocol: []const u8,
 ready_state: State,
 
 pub fn init(allocator: std.mem.Allocator, label: []const u8, params: Parameters) std.mem.Allocator.Error!DataChannel {
@@ -112,18 +112,27 @@ pub fn init(allocator: std.mem.Allocator, label: []const u8, params: Parameters)
 
     return DataChannel{
         .id = params.id,
-        .label = slice[0..label.len],
+        .slice = slice,
+        .label_length = @intCast(label.len),
         .ordered = params.ordered,
         .max_packet_lifetime = params.max_packet_lifetime,
         .max_retransmits = params.max_retransmits,
-        .protocol = slice[label.len..],
         .ready_state = State.connecting,
     };
 }
 
 pub fn deinit(data_channel: *DataChannel, allocator: std.mem.Allocator) void {
-    const slice = data_channel.label.ptr;
-    allocator.free(slice[0 .. data_channel.label.len + data_channel.protocol.len]);
+    allocator.free(data_channel.slice);
+    data_channel.slice = &.{};
+    data_channel.label_length = 0;
+}
+
+pub fn getLabel(data_channel: *DataChannel) []const u8 {
+    return data_channel.slice[0..data_channel.label_length];
+}
+
+pub fn getProtocol(data_channel: *DataChannel) []const u8 {
+    return data_channel.slice[data_channel.label_length..];
 }
 
 pub fn writeOpenMessage(data_channel: *DataChannel, buffer: []u8) std.Io.Writer.Error![]const u8 {
@@ -138,10 +147,9 @@ pub fn writeOpenMessage(data_channel: *DataChannel, buffer: []u8) std.Io.Writer.
         .partial_reliable_rexmit, .partial_reliable_rexmit_unordered => data_channel.max_retransmits,
         .partial_reliable_timed, .partial_reliable_timed_unordered => data_channel.max_packet_lifetime,
     }, .big);
-    try w.writeInt(u16, @intCast(data_channel.label.len), .big);
-    try w.writeInt(u16, @intCast(data_channel.protocol.len), .big);
-    try w.writeAll(data_channel.label);
-    try w.writeAll(data_channel.protocol);
+    try w.writeInt(u16, data_channel.label_length, .big);
+    try w.writeInt(u16, @intCast(data_channel.slice.len - data_channel.label_length), .big);
+    try w.writeAll(data_channel.slice);
 
     return w.buffered();
 }
@@ -149,7 +157,7 @@ pub fn writeOpenMessage(data_channel: *DataChannel, buffer: []u8) std.Io.Writer.
 pub fn format(data_channel: *DataChannel, writer: *std.Io.Writer) !void {
     try writer.print("DataChannel {{ id: {?}, label: \"{s}\", ordered: {}, max_packet_lifetime: {}, max_retransmits: {}, protocol: \"{s}\", ready_state: {} }}", .{
         data_channel.id,
-        data_channel.label,
+        data_channel.label_length,
         data_channel.ordered,
         data_channel.max_packet_lifetime,
         data_channel.max_retransmits,

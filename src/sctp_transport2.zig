@@ -7,11 +7,13 @@ const SctpTranport = @This();
 
 const Logger = std.log.scoped(.sctp_transport);
 
-pub const DCEP_PPID: u32 = 50;
-pub const TEXT_MESSAGE_PPID: u32 = 51;
-pub const BINARY_MESSAGE_PPID: u32 = 53;
-pub const EMPTY_TEXT_MESSAGE_PPID: u32 = 56;
-pub const EMPTY_BINRAY_MESSAGE_PPID: u32 = 57;
+const DCEP_PPID: u32 = 50;
+const TEXT_MESSAGE_PPID: u32 = 51;
+const BINARY_MESSAGE_PPID: u32 = 53;
+const EMPTY_TEXT_MESSAGE_PPID: u32 = 56;
+const EMPTY_BINRAY_MESSAGE_PPID: u32 = 57;
+
+pub const ChannelId = u32;
 
 pub const ConnectionState = enum(u8) { new, connecting, connected, closed };
 
@@ -20,18 +22,20 @@ pub const InitConfig = struct {
     remote_port: u16,
 };
 
+pub const DataChannelEvent = union(enum) {
+    new: ChannelId,
+    open: ChannelId,
+    close: ChannelId,
+    message: struct {
+        channel_id: ChannelId,
+        binary: bool,
+        data: []const u8,
+    },
+};
+
 pub const Event = union(enum) {
     connection_state: ConnectionState,
-    data_channel: *DataChannel,
-    data_channel_open: *DataChannel,
-    data_channel_close: *DataChannel,
-    data_channel_message: struct {
-        channel: *DataChannel,
-        message: union(enum) {
-            text: []const u8,
-            binary: []const u8,
-        },
-    },
+    data_channel: DataChannelEvent,
 };
 
 assoc: sctp.Association,
@@ -40,8 +44,8 @@ remote_port: u16,
 connection_state: ConnectionState,
 dtls_server: bool,
 max_message_size: u32,
-data_channels: std.ArrayList(*DataChannel),
-sid_to_data_channel: std.AutoHashMapUnmanaged(u16, *DataChannel),
+data_channels: std.ArrayList(DataChannel),
+sid_to_data_channel: std.AutoHashMapUnmanaged(u16, u32),
 events: std.Deque(Event) = .empty,
 
 pub fn init(allocator: std.mem.Allocator, init_config: InitConfig) SctpTranport {
@@ -85,25 +89,27 @@ pub fn deinit(sctp_transport: *SctpTranport) void {
     const allocator = sctp_transport.assoc.allocator;
     sctp_transport.close();
     sctp_transport.sid_to_data_channel.deinit(allocator);
-    for (sctp_transport.data_channels.items) |data_channel| {
-        data_channel.deinit(allocator);
-        allocator.destroy(data_channel);
-    }
+    for (sctp_transport.data_channels.items) |*data_channel| data_channel.deinit(allocator);
     sctp_transport.data_channels.deinit(allocator);
     sctp_transport.assoc.deinit();
     sctp_transport.events.deinit(allocator);
 }
 
-pub fn addDataChannel(sctp_transport: *SctpTranport, label: []const u8, params: DataChannel.Parameters) !*DataChannel {
-    const data_channel = try sctp_transport.newDataChannel(label, params);
-    errdefer sctp_transport.deleteDataChannel(data_channel);
+pub fn addDataChannel(sctp_transport: *SctpTranport, label: []const u8, params: DataChannel.Parameters) !ChannelId {
+    const channel_id = try sctp_transport.newDataChannel(label, params);
+    errdefer {
+        sctp_transport.markeDataChannelDeleted(channel_id);
+        // it's safe to delete the channel here because we didn't yet provide the id to the user.
+        sctp_transport.data_channels.swapRemove(channel_id);
+    }
 
+    const data_channel = sctp_transport.getDataChannel(channel_id);
     if (sctp_transport.connection_state == .connected) {
-        try sctp_transport.generateStreamIdForChannel(data_channel);
+        try sctp_transport.generateStreamIdForChannel(channel_id);
         try sctp_transport.sendOpenChannelMessage(data_channel);
     }
 
-    return data_channel;
+    return channel_id;
 }
 
 pub fn sendDataChannelMessage(sctp_transport: *SctpTranport, data_channel: *DataChannel, data: []const u8, binary: bool) !void {
@@ -129,12 +135,16 @@ pub fn closeDataChannel(sctp_transport: *SctpTranport, data_channel: *DataChanne
     if (data_channel.ready_state == .closing or data_channel.ready_state == .closed) return;
 
     const sid = data_channel.id orelse {
-        data_channel.ready_state = .closed;
-        sctp_transport.deleteDataChannel(data_channel);
+        sctp_transport.markeDataChannelDeleted(data_channel);
         return;
     };
     try sctp_transport.resetStreams(&.{sid}, .{ .outgoing = true });
     data_channel.ready_state = .closing;
+}
+
+pub fn getDataChannel(self: *SctpTranport, id: ChannelId) *DataChannel {
+    std.debug.assert(id < self.data_channels.items.len);
+    return &self.data_channels.items[id];
 }
 
 pub fn handleWrite(sctp_transport: *SctpTranport, data: []const u8, config: sctp.message.UserMessageConfig) !void {
@@ -159,11 +169,11 @@ pub fn handleRead(sctp_transport: *SctpTranport, data: []const u8, now: i64) !vo
             Logger.debug("sctp association up", .{});
             sctp_transport.connection_state = .connected;
 
-            var i: usize = 0;
-            while (i < sctp_transport.data_channels.items.len) {
-                const data_channel = sctp_transport.data_channels.items[i];
+            var channel_id: u32 = 0;
+            while (channel_id < sctp_transport.data_channels.items.len) {
+                const data_channel = sctp_transport.getDataChannel(channel_id);
                 const failed = blk: {
-                    sctp_transport.generateStreamIdForChannel(data_channel) catch |err| {
+                    sctp_transport.generateStreamIdForChannel(channel_id) catch |err| {
                         Logger.warn("Failed to generate stream ID for data channel: {}\n", .{err});
                         break :blk true;
                     };
@@ -174,11 +184,10 @@ pub fn handleRead(sctp_transport: *SctpTranport, data: []const u8, now: i64) !vo
                     break :blk false;
                 };
                 if (failed) {
-                    data_channel.ready_state = .closed;
-                    try sctp_transport.events.pushBack(sctp_transport.assoc.allocator, .{ .data_channel_close = data_channel });
-                    sctp_transport.deleteDataChannel(data_channel);
+                    sctp_transport.markeDataChannelDeleted(@intCast(channel_id));
+                    try sctp_transport.events.pushBack(sctp_transport.assoc.allocator, .{ .data_channel = .{ .close = channel_id } });
                 } else {
-                    i += 1;
+                    channel_id += 1;
                 }
             }
 
@@ -219,32 +228,27 @@ pub fn resetStreams(sctp_transport: *SctpTranport, stream_ids: []const u16, flag
     // try sctp_transport.socket.resetStreams(stream_ids, flags);
 }
 
-pub fn deleteDataChannel(sctp_transport: *SctpTranport, data_channel: *DataChannel) void {
+pub fn markeDataChannelDeleted(sctp_transport: *SctpTranport, channel_id: ChannelId) void {
+    const data_channel = sctp_transport.getDataChannel(channel_id);
+
     if (data_channel.id) |sid| {
         _ = sctp_transport.sid_to_data_channel.remove(sid);
     }
 
-    for (sctp_transport.data_channels.items, 0..) |item, index| {
-        if (item == data_channel) {
-            _ = sctp_transport.data_channels.swapRemove(index);
-            break;
-        }
-    }
-
-    const allocator = sctp_transport.assoc.allocator;
-    data_channel.deinit(allocator);
-    allocator.destroy(data_channel);
+    data_channel.ready_state = .closed;
+    data_channel.id = null;
+    data_channel.deinit(sctp_transport.assoc.allocator);
 }
 
-fn newDataChannel(sctp_transport: *SctpTranport, label: []const u8, params: DataChannel.Parameters) !*DataChannel {
-    const allocator = sctp_transport.assoc.allocator;
-    const data_channel = try allocator.create(DataChannel);
-    errdefer allocator.destroy(data_channel);
-    data_channel.* = try .init(allocator, label, params);
+fn newDataChannel(self: *SctpTranport, label: []const u8, params: DataChannel.Parameters) !ChannelId {
+    const allocator = self.assoc.allocator;
+    try self.data_channels.ensureUnusedCapacity(allocator, 1);
+
+    var data_channel = try DataChannel.init(allocator, label, params);
     errdefer data_channel.deinit(allocator);
 
-    try sctp_transport.data_channels.append(allocator, data_channel);
-    return data_channel;
+    self.data_channels.appendAssumeCapacity(data_channel);
+    return @intCast(self.data_channels.items.len - 1);
 }
 
 fn sendOpenChannelMessage(self: *SctpTranport, data_channel: *DataChannel) !void {
@@ -272,21 +276,26 @@ fn handleAppData(sctp_transport: *SctpTranport, ppid: u32, stream_id: u16, data:
             const message = try DataChannel.Message.parse(data);
             switch (message) {
                 .open => {
-                    const data_channel = try sctp_transport.newDataChannel(
+                    try sctp_transport.events.ensureUnusedCapacity(allocator, 2);
+
+                    const channel_id = try sctp_transport.newDataChannel(
                         message.open.label,
                         message.toParameters(stream_id),
                     );
-                    errdefer sctp_transport.deleteDataChannel(data_channel);
+                    errdefer sctp_transport.markeDataChannelDeleted(channel_id);
 
-                    try sctp_transport.putDataChannel(stream_id, data_channel);
+                    const data_channel = sctp_transport.getDataChannel(channel_id);
+                    try sctp_transport.putDataChannel(stream_id, channel_id);
                     try sctp_transport.sendAckChannelMessage(data_channel);
-                    try sctp_transport.events.pushBack(allocator, .{ .data_channel = data_channel });
+
                     data_channel.ready_state = .open;
-                    try sctp_transport.events.pushBack(allocator, .{ .data_channel_open = data_channel });
+                    sctp_transport.events.pushBackAssumeCapacity(.{ .data_channel = .{ .new = channel_id } });
+                    sctp_transport.events.pushBackAssumeCapacity(.{ .data_channel = .{ .open = channel_id } });
                 },
-                .ack => if (sctp_transport.getDataChannelBySid(stream_id)) |data_channel| {
+                .ack => if (sctp_transport.getDataChannelBySid(stream_id)) |channel_id| {
+                    const data_channel = sctp_transport.getDataChannel(channel_id);
                     data_channel.ready_state = .open;
-                    try sctp_transport.events.pushBack(allocator, .{ .data_channel_open = data_channel });
+                    try sctp_transport.events.pushBack(allocator, .{ .data_channel = .{ .open = channel_id } });
                 },
             }
         },
@@ -294,34 +303,27 @@ fn handleAppData(sctp_transport: *SctpTranport, ppid: u32, stream_id: u16, data:
         EMPTY_TEXT_MESSAGE_PPID,
         BINARY_MESSAGE_PPID,
         EMPTY_BINRAY_MESSAGE_PPID,
-        => if (sctp_transport.getDataChannelBySid(stream_id)) |data_channel| {
-            var event = Event{
-                .data_channel_message = .{
-                    .channel = data_channel,
-                    .message = undefined,
+        => if (sctp_transport.getDataChannelBySid(stream_id)) |id| {
+            const empty_data = ppid == EMPTY_TEXT_MESSAGE_PPID or ppid == EMPTY_BINRAY_MESSAGE_PPID;
+            defer if (empty_data) allocator.free(data);
+            try sctp_transport.events.pushBack(allocator, .{
+                .data_channel = .{
+                    .message = .{
+                        .channel_id = id,
+                        .binary = ppid == BINARY_MESSAGE_PPID or ppid == EMPTY_BINRAY_MESSAGE_PPID,
+                        .data = if (empty_data) &.{} else data,
+                    },
                 },
-            };
-
-            event.data_channel_message.message =
-                if (ppid == TEXT_MESSAGE_PPID)
-                    .{ .text = data }
-                else if (ppid == EMPTY_TEXT_MESSAGE_PPID)
-                    .{ .text = "" }
-                else if (ppid == EMPTY_BINRAY_MESSAGE_PPID)
-                    .{ .binary = &.{} }
-                else
-                    .{ .binary = data };
-
-            try sctp_transport.events.pushBack(allocator, event);
+            });
         },
         else => Logger.debug("Received data with unknown ppid: {}", .{ppid}),
     }
 }
 
-fn generateStreamIdForChannel(self: *SctpTranport, data_channel: *DataChannel) !void {
+fn generateStreamIdForChannel(self: *SctpTranport, channel_id: ChannelId) !void {
     const sid = try nextStreamId(self);
-    try self.sid_to_data_channel.put(self.assoc.allocator, sid, data_channel);
-    data_channel.id = sid;
+    try self.sid_to_data_channel.put(self.assoc.allocator, sid, channel_id);
+    self.getDataChannel(channel_id).id = sid;
 }
 
 fn nextStreamId(sctp_transport: *SctpTranport) !u16 {
@@ -333,18 +335,10 @@ fn nextStreamId(sctp_transport: *SctpTranport) !u16 {
     }
 }
 
-fn getDataChannelBySid(self: *SctpTranport, sid: u16) ?*DataChannel {
+fn getDataChannelBySid(self: *SctpTranport, sid: u16) ?ChannelId {
     return self.sid_to_data_channel.get(sid);
 }
 
-fn putDataChannel(self: *SctpTranport, sid: u16, data_channel: *DataChannel) !void {
-    return self.sid_to_data_channel.put(self.assoc.allocator, sid, data_channel);
-}
-
-test "abcd" {
-    std.debug.print("SCTP Transport:    {}\n", .{@sizeOf(SctpTranport)});
-    std.debug.print("Arr:               {}\n", .{@sizeOf(std.ArrayList(*DataChannel))});
-    std.debug.print("DC:                {}\n", .{@sizeOf(DataChannel)});
-    std.debug.print("Hash:              {}\n", .{@sizeOf(std.AutoHashMap(u16, *DataChannel))});
-    std.debug.print("Hash Unm:          {}\n", .{@sizeOf(std.AutoHashMapUnmanaged(u16, *DataChannel))});
+fn putDataChannel(self: *SctpTranport, sid: u16, channel_id: ChannelId) !void {
+    return self.sid_to_data_channel.put(self.assoc.allocator, sid, channel_id);
 }
