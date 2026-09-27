@@ -18,10 +18,17 @@ fn lessThan(_: void, a: Entry, b: Entry) std.math.Order {
 
 pub const Id = u64;
 
-queue: Queue = .empty,
-mutex: Io.Mutex = .init,
-wake: Io.Event = .unset,
-next_id: Id = 0,
+queue: Queue,
+mutex: Io.Mutex,
+wake: Io.Event,
+next_id: Id,
+
+pub const empty = TimerManager{
+    .queue = .empty,
+    .mutex = .init,
+    .wake = .unset,
+    .next_id = 0,
+};
 
 pub fn deinit(self: *TimerManager, allocator: std.mem.Allocator) void {
     self.queue.deinit(allocator);

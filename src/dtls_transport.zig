@@ -89,7 +89,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, config: Config) !DtlsTrans
         .memory_pool = .empty,
         .ice_servers = config.ice_servers,
         .socket_handler = .init(),
-        .timer_manager = .{},
+        .timer_manager = .empty,
         .ice_agent = ice_agent,
         .session = try dtls.Session.init(prng.random(), .{ .key_pair = certificate }),
         .on_data = config.on_data,

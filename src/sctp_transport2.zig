@@ -210,7 +210,10 @@ pub fn pollEvent(sctp_transport: *SctpTranport) ?Event {
 }
 
 pub fn hasDataChannels(sctp_transport: *SctpTranport) bool {
-    return sctp_transport.data_channels.items.len > 0;
+    for (sctp_transport.data_channels.items) |data_channel| {
+        if (data_channel.ready_state != .closed) return true;
+    }
+    return false;
 }
 
 pub fn resetStreams(sctp_transport: *SctpTranport, stream_ids: []const u16, flags: DataChannel.StreamResetFlag) !void {

@@ -44,35 +44,26 @@ const Handler = struct {
         if (state == .closed or state == .failed) handler.done.set(handler.io);
     }
 
-    fn onDataChannel(userdata: ?*anyopaque, data_channel: *webrtc.DataChannel) void {
-        const handler: *Handler = @ptrCast(@alignCast(userdata.?));
-        handler.grp.concurrent(handler.io, sendMessage, .{ handler.io, handler.pc, data_channel }) catch @panic("ConcurrencyUnavailable");
-    }
-
-    fn receiveData(userdata: ?*anyopaque, data_channel: *webrtc.DataChannel, event: webrtc.DataChannel.Event) void {
+    fn onDataChannel(userdata: ?*anyopaque, event: webrtc.DataChannel.Event) void {
         const handler: *Handler = @ptrCast(@alignCast(userdata.?));
         switch (event) {
-            .open => {
-                std.log.info("Data channel {s} opened", .{data_channel.label});
-                // handler.grp.concurrent(handler.io, sendMessage, .{ handler.io, data_channel }) catch @panic("ConcurrencyUnavailable");
+            .new => |id| std.log.info("New data channel: {}", .{id}),
+            .open => |id| {
+                std.log.info("Data channel open: {}", .{id});
+                handler.grp.concurrent(handler.io, sendMessage, .{ handler.io, handler.pc, id }) catch @panic("ConcurrencyUnavailable");
             },
-            .text_message => |msg| std.debug.print("[{s}]: {s}\n", .{ data_channel.label, msg }),
-            .close => {
-                std.log.info("Data channel {s} closed", .{data_channel.label});
-                handler.grp.cancel(handler.io);
-            },
-            else => {},
+            .close => |id| std.log.info("Data channel closed: {}", .{id}),
+            .message => |msg| std.debug.print("[{}]: {s}\n", .{ msg.channel_id, msg.data }),
         }
     }
 
-    fn sendMessage(io: Io, pc: *webrtc.PeerConnection, data_channel: *webrtc.DataChannel) !void {
+    fn sendMessage(io: Io, pc: *webrtc.PeerConnection, channel_id: webrtc.DataChannel.ChannelId) !void {
         var message: [20]u8 = @splat(0);
 
         while (true) {
             try io.sleep(.fromSeconds(5), .awake);
             common.rand_string(io, &message);
-            pc.sendDataChannelMessage(data_channel, &message) catch return;
-            // data_channel.sendText(&message) catch return;
+            pc.sendDataChannelMessage(channel_id, &message) catch return;
         }
     }
 };
