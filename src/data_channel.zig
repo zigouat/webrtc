@@ -1,10 +1,26 @@
 const std = @import("std");
-const SctpTransport = @import("sctp_transport.zig");
 
 const DataChannel = @This();
-const EventCallback = *const fn (userdata: ?*anyopaque, data_channel: *DataChannel, event: DataChannel.Event) void;
+
+pub const ChannelId = u32;
+
+pub const StreamResetFlag = struct {
+    outgoing: bool = false,
+    incoming: bool = false,
+};
 
 pub const State = enum { connecting, open, closing, closed };
+
+pub const Event = union(enum) {
+    new: ChannelId,
+    open: ChannelId,
+    close: ChannelId,
+    message: struct {
+        channel_id: ChannelId,
+        binary: bool,
+        data: []const u8,
+    },
+};
 
 pub const MessageType = enum(u8) {
     ack = 0x02,
@@ -93,52 +109,42 @@ pub const Parameters = struct {
     id: ?u16 = null,
 };
 
-pub const Event = union(enum) {
-    open: void,
-    close: void,
-    err: void,
-    text_message: []const u8,
-    binary_message: []const u8,
-};
-
 id: ?u16,
-label: []const u8,
+slice: []const u8, // label + protocol
+label_length: u16,
 ordered: bool,
 max_packet_lifetime: u32,
 max_retransmits: u32,
-protocol: []const u8,
 ready_state: State,
-sctp_tranport: *SctpTransport,
-userdata: ?*anyopaque,
-on_event: ?EventCallback,
 
-pub fn init(
-    allocator: std.mem.Allocator,
-    label: []const u8,
-    sctp_transport: *SctpTransport,
-    params: Parameters,
-) std.mem.Allocator.Error!DataChannel {
+pub fn init(allocator: std.mem.Allocator, label: []const u8, params: Parameters) std.mem.Allocator.Error!DataChannel {
     const slice = try allocator.alloc(u8, label.len + params.protocol.len);
     @memcpy(slice[0..label.len], label);
     @memcpy(slice[label.len..], params.protocol);
 
     return DataChannel{
         .id = params.id,
-        .label = slice[0..label.len],
+        .slice = slice,
+        .label_length = @intCast(label.len),
         .ordered = params.ordered,
         .max_packet_lifetime = params.max_packet_lifetime,
         .max_retransmits = params.max_retransmits,
-        .protocol = slice[label.len..],
         .ready_state = State.connecting,
-        .sctp_tranport = sctp_transport,
-        .userdata = null,
-        .on_event = null,
     };
 }
 
 pub fn deinit(data_channel: *DataChannel, allocator: std.mem.Allocator) void {
-    const slice = data_channel.label.ptr;
-    allocator.free(slice[0 .. data_channel.label.len + data_channel.protocol.len]);
+    allocator.free(data_channel.slice);
+    data_channel.slice = &.{};
+    data_channel.label_length = 0;
+}
+
+pub fn getLabel(data_channel: *DataChannel) []const u8 {
+    return data_channel.slice[0..data_channel.label_length];
+}
+
+pub fn getProtocol(data_channel: *DataChannel) []const u8 {
+    return data_channel.slice[data_channel.label_length..];
 }
 
 pub fn writeOpenMessage(data_channel: *DataChannel, buffer: []u8) std.Io.Writer.Error![]const u8 {
@@ -153,10 +159,9 @@ pub fn writeOpenMessage(data_channel: *DataChannel, buffer: []u8) std.Io.Writer.
         .partial_reliable_rexmit, .partial_reliable_rexmit_unordered => data_channel.max_retransmits,
         .partial_reliable_timed, .partial_reliable_timed_unordered => data_channel.max_packet_lifetime,
     }, .big);
-    try w.writeInt(u16, @intCast(data_channel.label.len), .big);
-    try w.writeInt(u16, @intCast(data_channel.protocol.len), .big);
-    try w.writeAll(data_channel.label);
-    try w.writeAll(data_channel.protocol);
+    try w.writeInt(u16, data_channel.label_length, .big);
+    try w.writeInt(u16, @intCast(data_channel.slice.len - data_channel.label_length), .big);
+    try w.writeAll(data_channel.slice);
 
     return w.buffered();
 }
@@ -164,69 +169,12 @@ pub fn writeOpenMessage(data_channel: *DataChannel, buffer: []u8) std.Io.Writer.
 pub fn format(data_channel: *DataChannel, writer: *std.Io.Writer) !void {
     try writer.print("DataChannel {{ id: {?}, label: \"{s}\", ordered: {}, max_packet_lifetime: {}, max_retransmits: {}, protocol: \"{s}\", ready_state: {} }}", .{
         data_channel.id,
-        data_channel.label,
+        data_channel.label_length,
         data_channel.ordered,
         data_channel.max_packet_lifetime,
         data_channel.max_retransmits,
         data_channel.protocol,
         data_channel.ready_state,
-    });
-}
-
-pub fn setReadyState(data_channel: *DataChannel, state: State) void {
-    data_channel.ready_state = state;
-    if (data_channel.on_event) |on_event| switch (state) {
-        .open => on_event(data_channel.userdata, data_channel, .open),
-        .closed => on_event(data_channel.userdata, data_channel, .close),
-        else => {},
-    };
-}
-
-pub fn close(data_channel: *DataChannel) !void {
-    if (data_channel.ready_state == .closing or data_channel.ready_state == .closed) return;
-
-    const sid = data_channel.id orelse {
-        data_channel.setReadyState(.closed);
-        data_channel.sctp_tranport.deleteDataChannel(data_channel);
-        return;
-    };
-    try data_channel.sctp_tranport.resetStreams(&.{sid}, .{ .outgoing = true });
-    data_channel.setReadyState(.closing);
-}
-
-pub const SendError = error{ SendFailed, InvalidState };
-
-pub fn sendText(data_channel: *DataChannel, data: []const u8) SendError!void {
-    if (data.len == 0)
-        try data_channel.send(&[_]u8{0}, SctpTransport.EMPTY_TEXT_MESSAGE_PPID)
-    else
-        try data_channel.send(data, SctpTransport.TEXT_MESSAGE_PPID);
-}
-
-pub fn sendBinary(data_channel: *DataChannel, data: []const u8) SendError!void {
-    if (data.len == 0)
-        try data_channel.send(&[_]u8{0}, SctpTransport.EMPTY_BINRAY_MESSAGE_PPID)
-    else
-        try data_channel.send(data, SctpTransport.BINARY_MESSAGE_PPID);
-}
-
-pub fn registerCallback(data_channel: *DataChannel, userdata: ?*anyopaque, callback: EventCallback) void {
-    data_channel.userdata = userdata;
-    data_channel.on_event = callback;
-}
-
-fn send(data_channel: *DataChannel, data: []const u8, ppid: u32) SendError!void {
-    if (data_channel.ready_state != .open or data_channel.id == null) {
-        @branchHint(.unlikely);
-        return error.InvalidState;
-    }
-
-    try data_channel.sctp_tranport.socket.send(data, .{
-        .ppid = ppid,
-        .sid = data_channel.id.?,
-        .ordered = data_channel.ordered,
-        .max_retransmits = data_channel.max_retransmits,
-        .max_lifetime = data_channel.max_packet_lifetime,
     });
 }
 
@@ -279,7 +227,7 @@ test "DataChannel.writeOpenMessage" {
     };
     var buffer: [1024]u8 = undefined;
 
-    var data_channel = try init(testing.allocator, "data", undefined, .{
+    var data_channel = try init(testing.allocator, "data", .{
         .id = 0,
         .ordered = true,
     });
@@ -287,13 +235,4 @@ test "DataChannel.writeOpenMessage" {
 
     const written = try data_channel.writeOpenMessage(&buffer);
     try testing.expectEqualSlices(u8, &expected, written);
-}
-
-test "DataChannel.close: no-op if already closing or closed" {
-    var data_channel = try init(testing.allocator, "chan", undefined, .{});
-    data_channel.setReadyState(.closed);
-    defer data_channel.deinit(testing.allocator);
-
-    try data_channel.close();
-    try testing.expectEqual(.closed, data_channel.ready_state);
 }

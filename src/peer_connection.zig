@@ -20,6 +20,7 @@ const NackConfig = @import("pc/nack_config.zig");
 const NackGenerator = @import("nack/generator.zig");
 const PCHandler = @import("pc/handler.zig");
 const DataChannel = @import("data_channel.zig");
+const TimerManager = @import("io/timer_manager.zig");
 
 const Io = std.Io;
 const PeerConnection = @This();
@@ -128,6 +129,10 @@ nack_generator: ?NackGenerator = null,
 
 group: Io.Group = .init,
 mutex: Io.Mutex = .init,
+sctp_mutex: Io.Mutex,
+
+timer_manager: TimerManager,
+sctp_deadline: i64 = std.math.maxInt(i64),
 
 const ParsedSessionDescription = struct {
     desc_type: webrtc.SessionDescriptionType,
@@ -186,11 +191,12 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
         .nack_config = config.nack_config,
         .media_engine = config.media_engine,
         .handler = config.handler,
-        .sctp_transport = SctpTransport.init(io, allocator, .{
+        .sctp_transport = SctpTransport.init(allocator, .{
             .local_port = constants.default_sctp_port,
             .remote_port = 0,
-            .on_event = onSctpTransportEvent,
         }),
+        .sctp_mutex = .init,
+        .timer_manager = .empty,
     };
 }
 
@@ -216,7 +222,8 @@ pub fn deinit(pc: *PeerConnection) void {
     pc.last_answer.deinit(pc.allocator);
 
     if (pc.nack_generator) |*ng| ng.deinit(io);
-    pc.sctp_transport.deinit(pc.allocator);
+    pc.timer_manager.deinit(pc.allocator);
+    pc.sctp_transport.deinit();
     pc.dtls_transport.deinit();
     pc.demuxer.deinit();
 }
@@ -459,12 +466,22 @@ pub fn writeLocalDescription(pc: *PeerConnection, w: *Io.Writer) !void {
 }
 
 /// Create a new data channel.
-pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataChannel.Parameters) !*DataChannel {
+pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataChannel.Parameters) !DataChannel.ChannelId {
     try pc.checkNotClosed();
     if (label.len > constants.max_data_channel_label_length) return error.LabelTooLong;
     if (params.protocol.len > constants.max_data_channel_label_length) return error.ProtocolTooLong;
     if (params.max_packet_lifetime != 0 and params.max_retransmits != 0) return error.InvalidParameters;
-    return try pc.sctp_transport.addDataChannel(pc.allocator, label, params);
+
+    pc.sctp_mutex.lockUncancelable(pc.dtls_transport.getIo());
+    defer pc.sctp_mutex.unlock(pc.dtls_transport.getIo());
+    return try pc.sctp_transport.addDataChannel(label, params);
+}
+
+pub fn sendDataChannelMessage(pc: *PeerConnection, channel_id: DataChannel.ChannelId, message: []const u8) !void {
+    try pc.checkNotClosed();
+    try pc.sctp_transport.sendDataChannelMessage(channel_id, message, false);
+    const now = Io.Timestamp.now(pc.dtls_transport.io, .awake).toMilliseconds();
+    try pc.drainSctpTransport(now);
 }
 
 pub fn close(pc: *PeerConnection) void {
@@ -759,6 +776,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
 
     // if there's no negotiated media, don't start connectivity checks
     if (media_exists and !renegotiation) {
+        try pc.group.concurrent(pc.dtls_transport.getIo(), TimerManager.run, .{ &pc.timer_manager, pc.dtls_transport.getIo() });
         try pc.dtls_transport.gatherCandidates(pc.last_answer.getIceRole());
     }
 
@@ -968,17 +986,20 @@ fn onDtlsData(dtls_transport: *DtlsTransport, data_event: DtlsTransport.DataEven
     switch (data_event) {
         .rtp => |data| pc.handleRtpData(data) catch {},
         .rtcp => |data| pc.handleRtcpData(data) catch {},
-        .app_data => |data| pc.sctp_transport.handleIncomingData(data),
-    }
-}
+        .app_data => |data| {
+            const now = Io.Timestamp.now(dtls_transport.io, .awake).toMilliseconds();
 
-fn onSctpTransportEvent(sctp_transport: *SctpTransport, event: SctpTransport.Event) void {
-    const pc: *PeerConnection = @alignCast(@fieldParentPtr("sctp_transport", sctp_transport));
-    switch (event) {
-        .data_channel => |channel| if (pc.handler) |handler| {
-            handler.vtable.onDataChannel(handler.userdata, channel);
+            pc.sctp_mutex.lockUncancelable(dtls_transport.io);
+            defer pc.sctp_mutex.unlock(dtls_transport.io);
+
+            pc.sctp_transport.handleRead(data, now) catch |err| {
+                Logger.err("Failed to handle incoming SCTP data: {}", .{err});
+            };
+
+            pc.drainSctpTransport(now) catch |err| {
+                Logger.err("Failed to drain SCTP transport: {}", .{err});
+            };
         },
-        .connection_state => |state| Logger.debug("SCTP connection state changed: {}", .{state}),
     }
 }
 
@@ -1067,7 +1088,13 @@ fn maybeConnectSctpTransport(pc: *PeerConnection) !void {
     if (local_sess.getApplicationMedia()) |local| if (remote_sess.getApplicationMedia()) |remote| {
         if (local.isRejected() or remote.isRejected()) return;
         if (local.sctp_port.? == 0 or remote.sctp_port.? == 0) return;
-        try pc.sctp_transport.connect(&pc.dtls_transport);
+        try pc.sctp_transport.connect(pc.dtls_transport.getRole() == .server);
+
+        const buffer = try pc.dtls_transport.createPacket();
+        defer pc.dtls_transport.destroyPacket(buffer);
+
+        const now = Io.Timestamp.now(pc.dtls_transport.getIo(), .awake).toMilliseconds();
+        try pc.drainSctpTransport(now);
     };
 }
 
@@ -1138,6 +1165,51 @@ fn doSendReports(pc: *PeerConnection) !void {
             try pc.dtls_transport.sendRtcp(buffer, data.len);
         }
     }
+}
+
+fn drainSctpTransport(pc: *PeerConnection, now: i64) !void {
+    var buffer: [1500]u8 = undefined;
+
+    while (pc.sctp_transport.pollEvent()) |event| switch (event) {
+        .connection_state => |state| Logger.info("SCTP connection state changed: {}", .{state}),
+        .data_channel => |dc_event| if (pc.handler) |handler| {
+            handler.vtable.onDataChannel(handler.userdata, dc_event);
+        },
+    };
+
+    while (pc.sctp_transport.pollTransmits(&buffer, now)) |d| {
+        pc.dtls_transport.sendData(d) catch |err| {
+            Logger.err("Failed to send SCTP data: {}", .{err});
+        };
+    }
+
+    const deadline = pc.sctp_transport.pollTimeout() orelse return;
+    if (deadline < pc.sctp_deadline) {
+        pc.sctp_deadline = deadline;
+        _ = try pc.timer_manager.schedule(
+            pc.allocator,
+            pc.dtls_transport.getIo(),
+            deadline,
+            pc,
+            onSctpTimeout,
+        );
+    }
+}
+
+fn onSctpTimeout(userdata: ?*anyopaque, id: u64) void {
+    _ = id;
+    const pc: *PeerConnection = @ptrCast(@alignCast(userdata.?));
+    const io = pc.dtls_transport.getIo();
+    pc.sctp_mutex.lockUncancelable(io);
+    defer pc.sctp_mutex.unlock(io);
+
+    pc.sctp_deadline = std.math.maxInt(i64);
+    const now = Io.Timestamp.now(io, .awake).toMilliseconds();
+    pc.sctp_transport.handleTimeout(now) catch return;
+
+    drainSctpTransport(pc, now) catch |err| {
+        Logger.err("Failed to drain SCTP transport: {}", .{err});
+    };
 }
 
 test {
