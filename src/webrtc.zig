@@ -357,5 +357,5 @@ test {
     _ = @import("utils.zig");
     _ = @import("dtls/dtls.zig");
     _ = @import("dtls_transport.zig");
-    _ = @import("sctp_transport2.zig");
+    _ = @import("sctp_transport.zig");
 }

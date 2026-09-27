@@ -1,5 +1,4 @@
 const std = @import("std");
-const SctpTransport = @import("sctp_transport2.zig");
 
 const DataChannel = @This();
 

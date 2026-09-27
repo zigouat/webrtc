@@ -7,324 +7,290 @@ const SctpTranport = @This();
 
 const Logger = std.log.scoped(.sctp_transport);
 
-pub const DCEP_PPID: u32 = 50;
-pub const TEXT_MESSAGE_PPID: u32 = 51;
-pub const BINARY_MESSAGE_PPID: u32 = 53;
-pub const EMPTY_TEXT_MESSAGE_PPID: u32 = 56;
-pub const EMPTY_BINRAY_MESSAGE_PPID: u32 = 57;
+const DCEP_PPID: u32 = 50;
+const TEXT_MESSAGE_PPID: u32 = 51;
+const BINARY_MESSAGE_PPID: u32 = 53;
+const EMPTY_TEXT_MESSAGE_PPID: u32 = 56;
+const EMPTY_BINRAY_MESSAGE_PPID: u32 = 57;
+
+pub const ChannelId = DataChannel.ChannelId;
 
 pub const ConnectionState = enum(u8) { new, connecting, connected, closed };
 
 pub const InitConfig = struct {
     local_port: u16,
     remote_port: u16,
-    on_event: ?*const fn (sctp_transport: *SctpTranport, event: Event) void = null,
 };
 
 pub const Event = union(enum) {
     connection_state: ConnectionState,
-    data_channel: *DataChannel,
+    data_channel: DataChannel.Event,
 };
 
-io: std.Io,
-socket: *sctp.Socket,
+assoc: sctp.Association,
 local_port: u16,
 remote_port: u16,
-connection_state: std.atomic.Value(ConnectionState),
-dtls_transport: *DtlsTransport,
+connection_state: ConnectionState,
+dtls_server: bool,
 max_message_size: u32,
-max_channels: u16,
-data_channels: std.ArrayList(*DataChannel),
-sid_to_data_channel: std.AutoHashMap(u16, *DataChannel),
-mutex: std.Io.Mutex,
-on_event: ?*const fn (sctp_transport: *SctpTranport, event: Event) void,
+data_channels: std.ArrayList(DataChannel),
+sid_to_data_channel: std.AutoHashMapUnmanaged(u16, u32),
+events: std.Deque(Event) = .empty,
 
-pub fn init(io: std.Io, allocator: std.mem.Allocator, init_config: InitConfig) SctpTranport {
+pub fn init(allocator: std.mem.Allocator, init_config: InitConfig) SctpTranport {
     return .{
-        .io = io,
-        .connection_state = .init(.new),
+        .connection_state = .new,
         .local_port = init_config.local_port,
         .remote_port = init_config.remote_port,
-        .dtls_transport = undefined,
-        .socket = undefined,
+        .dtls_server = true,
+        .assoc = .init(allocator, .{
+            .source_port = init_config.local_port,
+            .dest_port = init_config.remote_port,
+        }),
         .max_message_size = 0,
-        .max_channels = std.math.maxInt(u16),
         .data_channels = .empty,
-        .sid_to_data_channel = .init(allocator),
-        .on_event = init_config.on_event,
-        .mutex = .init,
+        .sid_to_data_channel = .empty,
     };
 }
 
-pub fn connect(sctp_transport: *SctpTranport, dtls_transport: *DtlsTransport) !void {
-    if (@cmpxchgWeak(
-        ConnectionState,
-        &sctp_transport.connection_state.raw,
-        .new,
-        .connecting,
-        .seq_cst,
-        .seq_cst,
-    )) |_| return;
+pub fn connect(sctp_transport: *SctpTranport, dtls_client: bool) !void {
+    if (sctp_transport.connection_state != .new) return;
 
-    sctp_transport.dtls_transport = dtls_transport;
-    sctp_transport.socket = try sctp.Socket.create(.{
-        .receive_cb = receive_cb,
-        .ctx = sctp_transport,
-        .non_blocking = true,
-        .no_delay = true,
-        .enable_stream_reset = true,
-    });
+    sctp_transport.connection_state = .connecting;
+    sctp_transport.assoc.source_port = sctp_transport.local_port;
+    sctp_transport.assoc.dest_port = sctp_transport.remote_port;
+    sctp_transport.dtls_server = dtls_client;
 
-    var init_msg = sctp.InitMsg{ .max_instreams = sctp_transport.max_channels, .num_ostreams = sctp_transport.max_channels };
-    try sctp_transport.socket.setInitMessage(&init_msg);
-    try sctp_transport.socket.subscribe(&[_]sctp.EventType{ .assoc_change, .send_failed, .shutdown, .stream_reset });
-
-    const socket = sctp_transport.socket;
-    sctp.registerAddress(sctp_transport);
-    errdefer sctp.deregisterAddress(sctp_transport);
-
-    var sock_addr = sctp.SockaddrConn.init(std.mem.nativeToBig(u16, sctp_transport.local_port), sctp_transport);
-    try socket.bind(&sock_addr);
-
-    var remote_addr = sctp.SockaddrConn.init(std.mem.nativeToBig(u16, sctp_transport.remote_port), sctp_transport);
-    try socket.connect(&remote_addr);
+    try sctp_transport.assoc.connect();
 }
 
 pub fn close(sctp_transport: *SctpTranport) void {
-    switch (sctp_transport.connection_state.load(.seq_cst)) {
+    switch (sctp_transport.connection_state) {
         .connecting, .connected => {
-            sctp_transport.connection_state.store(.closed, .seq_cst);
-            sctp.deregisterAddress(sctp_transport);
-            sctp_transport.socket.close();
+            sctp_transport.connection_state = .closed;
+            sctp_transport.assoc.shutdown() catch return;
         },
         else => {},
     }
 }
 
-pub fn deinit(sctp_transport: *SctpTranport, allocator: std.mem.Allocator) void {
+pub fn deinit(sctp_transport: *SctpTranport) void {
+    const allocator = sctp_transport.assoc.allocator;
     sctp_transport.close();
-    sctp_transport.mutex.lockUncancelable(sctp_transport.io);
-    defer sctp_transport.mutex.unlock(sctp_transport.io);
-    sctp_transport.sid_to_data_channel.deinit();
-    for (sctp_transport.data_channels.items) |data_channel| {
-        data_channel.deinit(allocator);
-        allocator.destroy(data_channel);
-    }
+    sctp_transport.sid_to_data_channel.deinit(allocator);
+    for (sctp_transport.data_channels.items) |*data_channel| data_channel.deinit(allocator);
     sctp_transport.data_channels.deinit(allocator);
+    sctp_transport.assoc.deinit();
+    sctp_transport.events.deinit(allocator);
 }
 
-pub fn sendData(sctp_transport: *SctpTranport, data: []const u8) !void {
-    try sctp_transport.dtls_transport.sendData(data);
-}
-
-pub fn handleIncomingData(sctp_transport: *SctpTranport, data: []const u8) void {
-    switch (sctp_transport.connection_state.load(.seq_cst)) {
-        .new, .closed => return,
-        else => {},
+pub fn addDataChannel(sctp_transport: *SctpTranport, label: []const u8, params: DataChannel.Parameters) !ChannelId {
+    const channel_id = try sctp_transport.newDataChannel(label, params);
+    errdefer {
+        sctp_transport.markeDataChannelDeleted(channel_id);
+        // it's safe to delete the channel here because we didn't yet provide the id to the user.
+        _ = sctp_transport.data_channels.swapRemove(channel_id);
     }
 
-    Logger.debug("received sctp data of length: {}", .{data.len});
-    sctp.connInput(sctp_transport, data);
-}
-
-pub fn addDataChannel(
-    sctp_transport: *SctpTranport,
-    allocator: std.mem.Allocator,
-    label: []const u8,
-    params: DataChannel.Parameters,
-) !*DataChannel {
-    const data_channel = try sctp_transport.newDataChannel(allocator, label, params);
-    errdefer sctp_transport.deleteDataChannel(data_channel);
-
-    if (sctp_transport.connection_state.load(.seq_cst) == .connected) {
-        {
-            sctp_transport.mutex.lockUncancelable(sctp_transport.io);
-            defer sctp_transport.mutex.unlock(sctp_transport.io);
-            try sctp_transport.generateStreamIdForChannel(data_channel);
-        }
+    const data_channel = sctp_transport.getDataChannel(channel_id);
+    if (sctp_transport.connection_state == .connected) {
+        try sctp_transport.generateStreamIdForChannel(channel_id);
         try sctp_transport.sendOpenChannelMessage(data_channel);
     }
 
-    return data_channel;
+    return channel_id;
 }
 
-pub fn hasDataChannels(sctp_transport: *SctpTranport) bool {
-    return sctp_transport.data_channels.items.len > 0;
+pub fn sendDataChannelMessage(sctp_transport: *SctpTranport, channel_id: ChannelId, data: []const u8, binary: bool) !void {
+    const data_channel = sctp_transport.getDataChannel(channel_id);
+    if (data_channel.ready_state != .open) return error.DataChannelNotOpen;
+
+    const ppid = if (binary and data.len == 0)
+        EMPTY_BINRAY_MESSAGE_PPID
+    else if (binary)
+        BINARY_MESSAGE_PPID
+    else if (data.len == 0)
+        EMPTY_TEXT_MESSAGE_PPID
+    else
+        TEXT_MESSAGE_PPID;
+
+    const copy = try sctp_transport.assoc.allocator.dupe(u8, data);
+    errdefer sctp_transport.assoc.allocator.free(copy);
+
+    try sctp_transport.handleWrite(copy, .{
+        .ppid = ppid,
+        .stream_id = data_channel.id.?,
+    });
 }
 
-pub fn resetStreams(sctp_transport: *SctpTranport, stream_ids: []const u16, flags: sctp.StreamResetRequestFlags) !void {
-    try sctp_transport.socket.resetStreams(stream_ids, flags);
-}
+pub fn closeDataChannel(sctp_transport: *SctpTranport, data_channel: *DataChannel) !void {
+    if (data_channel.ready_state == .closing or data_channel.ready_state == .closed) return;
 
-fn receive_cb(
-    sock: ?*sctp.Socket,
-    addr: sctp.SockstoreConn,
-    maybe_data: ?*anyopaque,
-    len: usize,
-    rcvinfo: sctp.RcvInfo,
-    flags: sctp.Flags,
-    ulp_info: ?*anyopaque,
-) callconv(.c) c_int {
-    _ = sock;
-    _ = addr;
-
-    const sctp_transport: *SctpTranport = @ptrCast(@alignCast(ulp_info.?));
-    const data = @as([*]u8, @ptrCast(@alignCast(maybe_data orelse return 1)))[0..len];
-
-    if (flags.notification) {
-        sctp_transport.handleNotification(data) catch |err| {
-            Logger.err("Error handling notification: {}\n", .{err});
-        };
-        return 1;
-    }
-
-    const ppid = std.mem.bigToNative(u32, rcvinfo.ppid);
-    const stream_id = rcvinfo.sid;
-
-    sctp_transport.handleAppData(ppid, stream_id, data) catch |err| {
-        Logger.err("Error handling app data: {}\n", .{err});
+    const sid = data_channel.id orelse {
+        sctp_transport.markeDataChannelDeleted(data_channel);
+        return;
     };
-    return 1;
+    try sctp_transport.resetStreams(&.{sid}, .{ .outgoing = true });
+    data_channel.ready_state = .closing;
 }
 
-fn newDataChannel(sctp_transport: *SctpTranport, allocator: std.mem.Allocator, label: []const u8, params: DataChannel.Parameters) !*DataChannel {
-    const data_channel = try allocator.create(DataChannel);
-    errdefer allocator.destroy(data_channel);
-    data_channel.* = try .init(allocator, label, sctp_transport, params);
-    errdefer data_channel.deinit(allocator);
-
-    sctp_transport.mutex.lockUncancelable(sctp_transport.io);
-    defer sctp_transport.mutex.unlock(sctp_transport.io);
-    try sctp_transport.data_channels.append(allocator, data_channel);
-    return data_channel;
+pub fn getDataChannel(self: *SctpTranport, id: ChannelId) *DataChannel {
+    std.debug.assert(id < self.data_channels.items.len);
+    return &self.data_channels.items[id];
 }
 
-fn sendOpenChannelMessage(sctp_transport: *SctpTranport, data_channel: *DataChannel) !void {
-    const buffer = try sctp_transport.dtls_transport.createPacket();
-    defer sctp_transport.dtls_transport.destroyPacket(buffer);
-
-    const message = try data_channel.writeOpenMessage(buffer);
-    try sctp_transport.socket.send(message, .{
-        .ppid = DCEP_PPID,
-        .sid = data_channel.id.?,
-        .ordered = true,
-    });
+pub fn handleWrite(sctp_transport: *SctpTranport, data: []const u8, config: sctp.message.UserMessageConfig) !void {
+    const buffer = try sctp_transport.assoc.allocator.dupe(u8, data);
+    errdefer sctp_transport.assoc.allocator.free(buffer);
+    try sctp_transport.assoc.handleWrite(buffer, config);
 }
 
-fn sendAckChannelMessage(sctp_transport: *SctpTranport, data_channel: *DataChannel) !void {
-    try sctp_transport.socket.send(&[_]u8{@intFromEnum(DataChannel.MessageType.ack)}, .{
-        .ppid = DCEP_PPID,
-        .sid = data_channel.id.?,
-        .ordered = true,
-    });
+pub fn handleTimeout(sctp_transport: *SctpTranport, now: i64) !void {
+    try sctp_transport.assoc.handleTimeout(now);
 }
 
-fn handleNotification(sctp_transport: *SctpTranport, data: []u8) !void {
-    const notif: *sctp.Notification = @ptrCast(@alignCast(data.ptr));
-    Logger.debug("handle notification: {s}", .{@tagName(notif.header.type)});
-
-    switch (notif.header.type) {
-        .assoc_change => try sctp_transport.handleAssocChange(&notif.assoc_change),
-        .shutdown => sctp_transport.close(),
-        .stream_reset => try sctp_transport.handleStreamReset(&notif.stream_reset, data),
+pub fn handleRead(sctp_transport: *SctpTranport, data: []const u8, now: i64) !void {
+    switch (sctp_transport.connection_state) {
+        .new, .closed => return,
         else => {},
     }
-}
+    try sctp_transport.assoc.handleRead(data, now);
 
-fn handleStreamReset(sctp_transport: *SctpTranport, notif: *const sctp.Notification.StreamResetEvent, data: []const u8) !void {
-    if (notif.flags.denied or notif.flags.failed) {
-        Logger.warn("stream reset denied or failed", .{});
-        return;
-    }
-
-    var r = std.Io.Reader.fixed(data[@sizeOf(sctp.Notification.StreamResetEvent)..]);
-    while (r.takeInt(u16, .native)) |sid| {
-        const data_channel = sctp_transport.getDataChannelBySid(sid) orelse continue;
-
-        if (notif.flags.incoming_ssn and data_channel.ready_state != .closing) {
-            sctp_transport.resetStreams(&.{sid}, .{ .outgoing = true }) catch |err| {
-                Logger.warn("Failed to mirror stream reset for sid {}: {}\n", .{ sid, err });
-            };
-        }
-
-        data_channel.setReadyState(.closed);
-        sctp_transport.deleteDataChannel(data_channel);
-    } else |_| {}
-}
-
-fn handleAssocChange(sctp_transport: *SctpTranport, assoc_change: *sctp.Notification.AssocChange) !void {
-    switch (assoc_change.state) {
-        .COMM_UP => {
+    while (sctp_transport.assoc.pollEvent()) |event| switch (event) {
+        .comm_up => {
             Logger.debug("sctp association up", .{});
-            sctp_transport.connection_state.store(.connected, .seq_cst);
+            sctp_transport.connection_state = .connected;
 
-            {
-                sctp_transport.mutex.lockUncancelable(sctp_transport.io);
-                defer sctp_transport.mutex.unlock(sctp_transport.io);
-                sctp_transport.max_channels = @min(assoc_change.outbound_streams, assoc_change.inbound_streams);
-
-                var i: usize = 0;
-                while (i < sctp_transport.data_channels.items.len) {
-                    const data_channel = sctp_transport.data_channels.items[i];
-                    const failed = blk: {
-                        sctp_transport.generateStreamIdForChannel(data_channel) catch |err| {
-                            Logger.warn("Failed to generate stream ID for data channel: {}\n", .{err});
-                            break :blk true;
-                        };
-                        sctp_transport.sendOpenChannelMessage(data_channel) catch |err| {
-                            Logger.warn("Failed to send open message for data channel: {}\n", .{err});
-                            break :blk true;
-                        };
-                        break :blk false;
+            var channel_id: u32 = 0;
+            while (channel_id < sctp_transport.data_channels.items.len) {
+                const data_channel = sctp_transport.getDataChannel(channel_id);
+                const failed = blk: {
+                    sctp_transport.generateStreamIdForChannel(channel_id) catch |err| {
+                        Logger.warn("Failed to generate stream ID for data channel: {}\n", .{err});
+                        break :blk true;
                     };
-                    if (failed) {
-                        data_channel.setReadyState(.closed);
-                        sctp_transport.deleteChannelLocked(data_channel);
-                    } else {
-                        i += 1;
-                    }
+                    sctp_transport.sendOpenChannelMessage(data_channel) catch |err| {
+                        Logger.warn("Failed to send open message for data channel: {}\n", .{err});
+                        break :blk true;
+                    };
+                    break :blk false;
+                };
+                if (failed) {
+                    sctp_transport.markeDataChannelDeleted(@intCast(channel_id));
+                    try sctp_transport.events.pushBack(sctp_transport.assoc.allocator, .{ .data_channel = .{ .close = channel_id } });
+                } else {
+                    channel_id += 1;
                 }
             }
 
-            if (sctp_transport.on_event) |on_event| {
-                on_event(sctp_transport, .{ .connection_state = .connected });
-            }
+            try sctp_transport.events.pushBack(sctp_transport.assoc.allocator, .{ .connection_state = .connected });
         },
-        .COMM_LOST, .SHUTDOWN_COMP, .CANT_STR_ASSOC => {
+        .comm_down => {
             Logger.debug("sctp association down", .{});
-            sctp_transport.connection_state.store(.closed, .seq_cst);
-            if (sctp_transport.on_event) |on_event| {
-                on_event(sctp_transport, .{ .connection_state = .closed });
-            }
+            sctp_transport.connection_state = .closed;
+            try sctp_transport.events.pushBack(sctp_transport.assoc.allocator, .{ .connection_state = .closed });
         },
-        .RESTART => Logger.warn("sctp association restarted", .{}),
+        .message => |message| {
+            try sctp_transport.handleAppData(message.ppid, message.stream_id, message.data);
+        },
+        .release => |msg| sctp_transport.assoc.allocator.free(msg),
+    };
+}
+
+pub fn pollTransmits(sctp_transport: *SctpTranport, buffer: []u8, now: i64) ?[]const u8 {
+    return sctp_transport.assoc.pollTransmits(buffer, now);
+}
+
+pub fn pollTimeout(sctp_transport: *SctpTranport) ?i64 {
+    return sctp_transport.assoc.pollTimeout();
+}
+
+pub fn pollEvent(sctp_transport: *SctpTranport) ?Event {
+    return sctp_transport.events.popFront();
+}
+
+pub fn hasDataChannels(sctp_transport: *SctpTranport) bool {
+    for (sctp_transport.data_channels.items) |data_channel| {
+        if (data_channel.ready_state != .closed) return true;
     }
+    return false;
+}
+
+pub fn resetStreams(sctp_transport: *SctpTranport, stream_ids: []const u16, flags: DataChannel.StreamResetFlag) !void {
+    _ = sctp_transport;
+    _ = stream_ids;
+    _ = flags;
+    // try sctp_transport.socket.resetStreams(stream_ids, flags);
+}
+
+pub fn markeDataChannelDeleted(sctp_transport: *SctpTranport, channel_id: ChannelId) void {
+    const data_channel = sctp_transport.getDataChannel(channel_id);
+
+    if (data_channel.id) |sid| {
+        _ = sctp_transport.sid_to_data_channel.remove(sid);
+    }
+
+    data_channel.ready_state = .closed;
+    data_channel.id = null;
+    data_channel.deinit(sctp_transport.assoc.allocator);
+}
+
+fn newDataChannel(self: *SctpTranport, label: []const u8, params: DataChannel.Parameters) !ChannelId {
+    const allocator = self.assoc.allocator;
+    try self.data_channels.ensureUnusedCapacity(allocator, 1);
+
+    var data_channel = try DataChannel.init(allocator, label, params);
+    errdefer data_channel.deinit(allocator);
+
+    self.data_channels.appendAssumeCapacity(data_channel);
+    return @intCast(self.data_channels.items.len - 1);
+}
+
+fn sendOpenChannelMessage(self: *SctpTranport, data_channel: *DataChannel) !void {
+    var buffer: [1024]u8 = undefined;
+    const message = try data_channel.writeOpenMessage(&buffer);
+    try self.handleWrite(message, .{
+        .ppid = DCEP_PPID,
+        .stream_id = data_channel.id.?,
+    });
+}
+
+fn sendAckChannelMessage(self: *SctpTranport, data_channel: *DataChannel) !void {
+    try self.handleWrite(&[_]u8{@intFromEnum(DataChannel.MessageType.ack)}, .{
+        .ppid = DCEP_PPID,
+        .stream_id = data_channel.id.?,
+    });
 }
 
 fn handleAppData(sctp_transport: *SctpTranport, ppid: u32, stream_id: u16, data: []u8) !void {
-    const allocator = sctp_transport.dtls_transport.allocator;
+    const allocator = sctp_transport.assoc.allocator;
 
     switch (ppid) {
         DCEP_PPID => {
+            defer allocator.free(data);
             const message = try DataChannel.Message.parse(data);
             switch (message) {
                 .open => {
-                    const data_channel = try sctp_transport.newDataChannel(
-                        allocator,
+                    try sctp_transport.events.ensureUnusedCapacity(allocator, 2);
+
+                    const channel_id = try sctp_transport.newDataChannel(
                         message.open.label,
                         message.toParameters(stream_id),
                     );
-                    errdefer sctp_transport.deleteDataChannel(data_channel);
+                    errdefer sctp_transport.markeDataChannelDeleted(channel_id);
 
-                    try sctp_transport.putDataChannel(stream_id, data_channel);
+                    const data_channel = sctp_transport.getDataChannel(channel_id);
+                    try sctp_transport.putDataChannel(stream_id, channel_id);
                     try sctp_transport.sendAckChannelMessage(data_channel);
-                    if (sctp_transport.on_event) |on_event| {
-                        on_event(sctp_transport, .{ .data_channel = data_channel });
-                    }
-                    data_channel.setReadyState(.open);
+
+                    data_channel.ready_state = .open;
+                    sctp_transport.events.pushBackAssumeCapacity(.{ .data_channel = .{ .new = channel_id } });
+                    sctp_transport.events.pushBackAssumeCapacity(.{ .data_channel = .{ .open = channel_id } });
                 },
-                .ack => if (sctp_transport.getDataChannelBySid(stream_id)) |data_channel| {
-                    data_channel.setReadyState(.open);
+                .ack => if (sctp_transport.getDataChannelBySid(stream_id)) |channel_id| {
+                    const data_channel = sctp_transport.getDataChannel(channel_id);
+                    data_channel.ready_state = .open;
+                    try sctp_transport.events.pushBack(allocator, .{ .data_channel = .{ .open = channel_id } });
                 },
             }
         },
@@ -332,365 +298,42 @@ fn handleAppData(sctp_transport: *SctpTranport, ppid: u32, stream_id: u16, data:
         EMPTY_TEXT_MESSAGE_PPID,
         BINARY_MESSAGE_PPID,
         EMPTY_BINRAY_MESSAGE_PPID,
-        => if (sctp_transport.getDataChannelBySid(stream_id)) |data_channel| {
-            if (data_channel.on_event) |on_event| {
-                const event: DataChannel.Event =
-                    if (ppid == TEXT_MESSAGE_PPID)
-                        .{ .text_message = data }
-                    else if (ppid == EMPTY_TEXT_MESSAGE_PPID)
-                        .{ .text_message = "" }
-                    else if (ppid == EMPTY_BINRAY_MESSAGE_PPID)
-                        .{ .binary_message = &.{} }
-                    else
-                        .{ .binary_message = data };
-                on_event(data_channel.userdata, data_channel, event);
-            }
+        => if (sctp_transport.getDataChannelBySid(stream_id)) |id| {
+            const empty_data = ppid == EMPTY_TEXT_MESSAGE_PPID or ppid == EMPTY_BINRAY_MESSAGE_PPID;
+            defer if (empty_data) allocator.free(data);
+            try sctp_transport.events.pushBack(allocator, .{
+                .data_channel = .{
+                    .message = .{
+                        .channel_id = id,
+                        .binary = ppid == BINARY_MESSAGE_PPID or ppid == EMPTY_BINRAY_MESSAGE_PPID,
+                        .data = if (empty_data) &.{} else data,
+                    },
+                },
+            });
         },
         else => Logger.debug("Received data with unknown ppid: {}", .{ppid}),
     }
 }
 
-fn generateStreamIdForChannel(sctp_transport: *SctpTranport, data_channel: *DataChannel) !void {
-    const sid = try nextStreamId(sctp_transport);
-    try sctp_transport.sid_to_data_channel.put(sid, data_channel);
-    data_channel.id = sid;
+fn generateStreamIdForChannel(self: *SctpTranport, channel_id: ChannelId) !void {
+    const sid = try nextStreamId(self);
+    try self.sid_to_data_channel.put(self.assoc.allocator, sid, channel_id);
+    self.getDataChannel(channel_id).id = sid;
 }
 
 fn nextStreamId(sctp_transport: *SctpTranport) !u16 {
-    var sid: u16 = if (sctp_transport.dtls_transport.getRole() == .client) 0 else 1;
+    var sid: u16 = @intFromBool(sctp_transport.dtls_server);
     while (true) {
-        if (sid >= sctp_transport.max_channels) return error.NoAvailableStreamId;
+        if (sid >= sctp_transport.assoc.outbound_streams) return error.NoAvailableStreamId;
         if (!sctp_transport.sid_to_data_channel.contains(sid)) return sid;
         sid += 2;
     }
 }
 
-pub fn deleteDataChannel(sctp_transport: *SctpTranport, data_channel: *DataChannel) void {
-    sctp_transport.mutex.lockUncancelable(sctp_transport.io);
-    defer sctp_transport.mutex.unlock(sctp_transport.io);
-    sctp_transport.deleteChannelLocked(data_channel);
+fn getDataChannelBySid(self: *SctpTranport, sid: u16) ?ChannelId {
+    return self.sid_to_data_channel.get(sid);
 }
 
-fn deleteChannelLocked(sctp_transport: *SctpTranport, data_channel: *DataChannel) void {
-    if (data_channel.id) |sid| {
-        _ = sctp_transport.sid_to_data_channel.remove(sid);
-    }
-
-    for (sctp_transport.data_channels.items, 0..) |item, index| {
-        if (item == data_channel) {
-            _ = sctp_transport.data_channels.swapRemove(index);
-            break;
-        }
-    }
-
-    const allocator = sctp_transport.dtls_transport.allocator;
-    data_channel.deinit(allocator);
-    allocator.destroy(data_channel);
-}
-
-fn getDataChannelBySid(sctp_transport: *SctpTranport, sid: u16) ?*DataChannel {
-    sctp_transport.mutex.lockUncancelable(sctp_transport.io);
-    defer sctp_transport.mutex.unlock(sctp_transport.io);
-    return sctp_transport.sid_to_data_channel.get(sid);
-}
-
-fn putDataChannel(sctp_transport: *SctpTranport, sid: u16, data_channel: *DataChannel) !void {
-    sctp_transport.mutex.lockUncancelable(sctp_transport.io);
-    defer sctp_transport.mutex.unlock(sctp_transport.io);
-    return sctp_transport.sid_to_data_channel.put(sid, data_channel);
-}
-
-const testing = std.testing;
-
-fn testAssocChange(state: sctp.Notification.AssocChange.State) sctp.Notification.AssocChange {
-    return .{
-        .type = .assoc_change,
-        .flags = 0,
-        .length = 0,
-        .state = state,
-        .err = 0,
-        .outbound_streams = 0,
-        .inbound_streams = 0,
-        .assoc_id = 0,
-        ._sac_info = .{},
-    };
-}
-
-fn newTestSctpTransport() SctpTranport {
-    return SctpTranport.init(testing.io, testing.allocator, .{
-        .local_port = 5000,
-        .remote_port = 5000,
-    });
-}
-
-test "SctpTransport.deleteDataChannel: removes the data channel from the list and sid map" {
-    var dtls_transport = try DtlsTransport.init(testing.io, testing.allocator, .{
-        .on_data = undefined,
-        .on_event = undefined,
-    });
-    defer dtls_transport.deinit();
-
-    var transport = newTestSctpTransport();
-    transport.dtls_transport = &dtls_transport;
-    defer transport.deinit(testing.allocator);
-
-    const label = "test_channel";
-    const params = DataChannel.Parameters{ .ordered = true };
-
-    const data_channel = try transport.newDataChannel(testing.allocator, label, params);
-    try testing.expectEqual(1, transport.data_channels.items.len);
-    try testing.expectEqual(data_channel, transport.data_channels.items[0]);
-
-    transport.deleteDataChannel(data_channel);
-    try testing.expectEqual(0, transport.data_channels.items.len);
-}
-
-test "SctpTransport.nextStreamId: dtls client generate even stream ids" {
-    var dtls_transport = try DtlsTransport.init(testing.io, testing.allocator, .{
-        .on_data = undefined,
-        .on_event = undefined,
-    });
-    defer dtls_transport.deinit();
-    try dtls_transport.session.setRole(false);
-
-    var transport = newTestSctpTransport();
-    defer transport.deinit(testing.allocator);
-    transport.max_channels = 5;
-    transport.dtls_transport = &dtls_transport;
-
-    for (&[_]u16{ 0, 2, 4 }) |expected| {
-        const sid = try transport.nextStreamId();
-        try testing.expectEqual(expected, sid);
-        try transport.sid_to_data_channel.put(sid, undefined);
-    }
-
-    const err = transport.nextStreamId();
-    try testing.expectEqual(error.NoAvailableStreamId, err);
-
-    _ = transport.sid_to_data_channel.remove(2);
-    const sid = try transport.nextStreamId();
-    try testing.expectEqual(2, sid);
-}
-
-test "SctpTransport.nextStreamId: dtls server generate odd stream ids" {
-    var dtls_transport = try DtlsTransport.init(testing.io, testing.allocator, .{
-        .on_data = undefined,
-        .on_event = undefined,
-    });
-    defer dtls_transport.deinit();
-    try dtls_transport.session.setRole(true);
-
-    var transport = newTestSctpTransport();
-    defer transport.deinit(testing.allocator);
-    transport.max_channels = 7;
-    transport.dtls_transport = &dtls_transport;
-
-    for (&[_]u16{ 1, 3, 5 }) |expected| {
-        const sid = try transport.nextStreamId();
-        try testing.expectEqual(expected, sid);
-        try transport.sid_to_data_channel.put(sid, undefined);
-    }
-
-    const err = transport.nextStreamId();
-    try testing.expectEqual(error.NoAvailableStreamId, err);
-
-    _ = transport.sid_to_data_channel.remove(1);
-    const sid = try transport.nextStreamId();
-    try testing.expectEqual(1, sid);
-}
-
-test "SctpTransport.handleAssocChange: COMM_UP transitions to connected" {
-    var transport = newTestSctpTransport();
-
-    var assoc_change = testAssocChange(.COMM_UP);
-    try transport.handleAssocChange(&assoc_change);
-
-    try testing.expectEqual(.connected, transport.connection_state.load(.seq_cst));
-}
-
-test "SctpTransport.handleAssocChange: COMM_LOST/SHUTDOWN_COMP/CANT_STR_ASSOC transition to closed" {
-    const states = [_]sctp.Notification.AssocChange.State{ .COMM_LOST, .SHUTDOWN_COMP, .CANT_STR_ASSOC };
-    for (states) |state| {
-        var transport = newTestSctpTransport();
-        transport.connection_state.store(.connected, .seq_cst);
-
-        var assoc_change = testAssocChange(state);
-        try transport.handleAssocChange(&assoc_change);
-
-        try testing.expectEqual(.closed, transport.connection_state.load(.seq_cst));
-    }
-}
-
-test "SctpTransport.handleAssocChange: RESTART leaves connection state unchanged" {
-    var transport = newTestSctpTransport();
-    transport.connection_state.store(.connected, .seq_cst);
-
-    var assoc_change = testAssocChange(.RESTART);
-    try transport.handleAssocChange(&assoc_change);
-
-    try testing.expectEqual(.connected, transport.connection_state.load(.seq_cst));
-}
-
-test "SctpTransport.newDataChannel: creates a new data channel and adds it to the list" {
-    const allocator = testing.allocator;
-
-    var transport = newTestSctpTransport();
-    defer transport.deinit(allocator);
-
-    const label = "test_channel";
-    const params = DataChannel.Parameters{ .ordered = true };
-
-    const data_channel = try transport.newDataChannel(allocator, label, params);
-
-    try testing.expectEqualStrings(label, data_channel.label);
-    try testing.expectEqual(true, data_channel.ordered);
-    try testing.expectEqual(1, transport.data_channels.items.len);
-    try testing.expectEqual(data_channel, transport.data_channels.items[0]);
-}
-
-test "SctpTransport.newDataChannel: failed allocatation" {
-    try testing.checkAllAllocationFailures(testing.allocator, struct {
-        fn newDataChannel(alloc: std.mem.Allocator) !void {
-            var transport = init(testing.io, alloc, .{ .local_port = 5000, .remote_port = 5000 });
-            defer transport.deinit(alloc);
-            const label = "test_channel";
-            _ = try transport.newDataChannel(alloc, label, .{ .ordered = true });
-        }
-    }.newDataChannel, .{});
-}
-
-var comm_up_connected_fired: bool = false;
-fn commUpTestOnEvent(_: *SctpTranport, event: Event) void {
-    if (event == .connection_state and event.connection_state == .connected) {
-        comm_up_connected_fired = true;
-    }
-}
-
-test "SctpTransport.handleAssocChange: COMM_UP deletes channels that fail to get a stream id and still fires connected" {
-    var dtls_transport = try DtlsTransport.init(testing.io, testing.allocator, .{
-        .on_data = undefined,
-        .on_event = undefined,
-    });
-    defer dtls_transport.deinit();
-
-    var transport = newTestSctpTransport();
-    transport.dtls_transport = &dtls_transport;
-    transport.on_event = commUpTestOnEvent;
-    defer transport.deinit(testing.allocator);
-    comm_up_connected_fired = false;
-
-    _ = try transport.newDataChannel(testing.allocator, "chan1", .{});
-    _ = try transport.newDataChannel(testing.allocator, "chan2", .{});
-    try testing.expectEqual(2, transport.data_channels.items.len);
-
-    var assoc_change = testAssocChange(.COMM_UP);
-    assoc_change.outbound_streams = 0;
-    assoc_change.inbound_streams = 0;
-    try transport.handleAssocChange(&assoc_change);
-
-    try testing.expectEqual(0, transport.data_channels.items.len);
-    try testing.expect(comm_up_connected_fired);
-    transport.connection_state.store(.new, .seq_cst);
-}
-
-test "SctpTransport.handleStreamReset: OUTGOING_SSN finalizes the channel" {
-    var dtls_transport = try DtlsTransport.init(testing.io, testing.allocator, .{
-        .on_data = undefined,
-        .on_event = undefined,
-    });
-    defer dtls_transport.deinit();
-
-    var transport = newTestSctpTransport();
-    transport.dtls_transport = &dtls_transport;
-    defer transport.deinit(testing.allocator);
-
-    const data_channel = try transport.newDataChannel(testing.allocator, "chan", .{ .id = 7 });
-    try transport.putDataChannel(data_channel.id.?, data_channel);
-    data_channel.setReadyState(.closing);
-
-    var closed = false;
-    const Ctx = struct {
-        fn onEvent(userdata: ?*anyopaque, _: *DataChannel, event: DataChannel.Event) void {
-            const flag: *bool = @ptrCast(@alignCast(userdata.?));
-            if (event == .close) flag.* = true;
-        }
-    };
-    data_channel.registerCallback(&closed, Ctx.onEvent);
-
-    const stream_reset = sctp.Notification.StreamResetEvent{
-        .type = .stream_reset,
-        .assoc_id = 0,
-        .length = @sizeOf(sctp.Notification.StreamResetEvent) + @sizeOf(u16),
-        .flags = .{ .outgoing_ssn = true },
-    };
-    var buffer: [1024]u8 = undefined;
-    var w = std.Io.Writer.fixed(&buffer);
-    try w.writeStruct(stream_reset, .native);
-    try w.writeInt(u16, data_channel.id.?, .native);
-
-    try transport.handleStreamReset(&stream_reset, w.buffered());
-
-    try testing.expect(closed);
-    try testing.expectEqual(0, transport.data_channels.items.len);
-    try testing.expectEqual(null, transport.sid_to_data_channel.get(7));
-}
-
-test "SctpTransport.handleStreamReset: DENIED/FAILED leaves the channel untouched" {
-    var dtls_transport = try DtlsTransport.init(testing.io, testing.allocator, .{
-        .on_data = undefined,
-        .on_event = undefined,
-    });
-    defer dtls_transport.deinit();
-
-    var transport = newTestSctpTransport();
-    transport.dtls_transport = &dtls_transport;
-    defer transport.deinit(testing.allocator);
-
-    const data_channel = try transport.newDataChannel(testing.allocator, "chan", .{ .id = 7 });
-    try transport.putDataChannel(data_channel.id.?, data_channel);
-
-    const stream_reset = sctp.Notification.StreamResetEvent{
-        .type = .stream_reset,
-        .assoc_id = 0,
-        .length = @sizeOf(sctp.Notification.StreamResetEvent) + @sizeOf(u16),
-        .flags = .{ .denied = true },
-    };
-    var buffer: [1024]u8 = undefined;
-    var w = std.Io.Writer.fixed(&buffer);
-    try w.writeStruct(stream_reset, .native);
-    try w.writeInt(u16, data_channel.id.?, .native);
-
-    try transport.handleStreamReset(&stream_reset, w.buffered());
-
-    try testing.expectEqual(1, transport.data_channels.items.len);
-    try testing.expectEqual(.connecting, data_channel.ready_state);
-}
-
-test "DataChannel.close: without a stream id finalizes locally" {
-    var dtls_transport = try DtlsTransport.init(testing.io, testing.allocator, .{
-        .on_data = undefined,
-        .on_event = undefined,
-    });
-    defer dtls_transport.deinit();
-
-    var transport = newTestSctpTransport();
-    transport.dtls_transport = &dtls_transport;
-    defer transport.deinit(testing.allocator);
-
-    const data_channel = try transport.newDataChannel(testing.allocator, "chan", .{ .ordered = true });
-    try testing.expectEqual(null, data_channel.id);
-
-    var closed = false;
-    const Ctx = struct {
-        fn onEvent(userdata: ?*anyopaque, _: *DataChannel, event: DataChannel.Event) void {
-            const flag: *bool = @ptrCast(@alignCast(userdata.?));
-            if (event == .close) flag.* = true;
-        }
-    };
-    data_channel.registerCallback(&closed, Ctx.onEvent);
-
-    try data_channel.close();
-
-    try testing.expect(closed);
-    try testing.expectEqual(0, transport.data_channels.items.len);
+fn putDataChannel(self: *SctpTranport, sid: u16, channel_id: ChannelId) !void {
+    return self.sid_to_data_channel.put(self.assoc.allocator, sid, channel_id);
 }

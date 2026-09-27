@@ -10,7 +10,7 @@ const constants = @import("constants.zig");
 
 const SDPAttribute = @import("sdp").Attribute.ParsedAttribute;
 const DtlsTransport = @import("dtls_transport.zig");
-const SctpTransport = @import("sctp_transport2.zig");
+const SctpTransport = @import("sctp_transport.zig");
 const SDPSession = @import("sdp_session.zig");
 const Demuxer = @import("pc/demuxer.zig");
 const RtpTransceiver = @import("rtp_transceiver.zig");
@@ -222,6 +222,7 @@ pub fn deinit(pc: *PeerConnection) void {
     pc.last_answer.deinit(pc.allocator);
 
     if (pc.nack_generator) |*ng| ng.deinit(io);
+    pc.timer_manager.deinit(pc.allocator);
     pc.sctp_transport.deinit();
     pc.dtls_transport.deinit();
     pc.demuxer.deinit();

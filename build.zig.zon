@@ -16,9 +16,9 @@
             .url = "git+https://github.com/allyourcodebase/mbedtls.git#55f2af148634945e9508a3a50de2ccfe65eb971f",
             .hash = "mbedtls-3.6.6-E4NUR4cWAACCHFSwZ5urTBPK4A6EZlm3pSUjfg4c3QAw",
         },
-        .usrsctp = .{
-            .url = "git+https://github.com/zigouat/usrsctp.git#6ec8e8c5f7785007d2aa25e4d11610c34cbcce70",
-            .hash = "usrsctp-0.0.0-1JVzCGlAAACPwiKmbo3EFY4JvuYMbbxFqS9Lkk-3jQP-",
+        .sctp = .{
+            .url = "git+https://github.com/zigouat/sctp.git#d8841e03ff61bd3ddc842ff378c5f0c209199191",
+            .hash = "sctp-0.0.0-jRqUYI5bAQDjqZbB8IC4cyRA2zWCs6i-J0-rbkWxe4P3",
         },
     },
     .paths = .{
