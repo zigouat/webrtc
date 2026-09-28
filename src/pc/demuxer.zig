@@ -182,7 +182,7 @@ fn testTransceiver(mid: Mid.Int) RtpTransceiver {
         .kind = .video,
         .direction = .sendrecv,
         .mid = mid,
-        .transport = undefined,
+        .pc = undefined,
     };
 }
 
