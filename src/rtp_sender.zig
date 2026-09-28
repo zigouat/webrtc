@@ -210,10 +210,9 @@ pub fn setHeaderExtensions(sender: *RtpSender, extensions: []const webrtc.RtpHea
 /// Sends a media sample to the remote peer.
 pub fn sendSample(sender: *RtpSender, sample: *const MediaPacket) SendError!void {
     const tr = try checkAndGetTransceiver(sender);
-    const timestamp = Io.Timestamp.now(tr.transport.getIo(), .real).toMicroseconds();
+    const timestamp = Io.Timestamp.now(tr.pc.io, .real).toMicroseconds();
 
-    var buffer = try tr.transport.createPacket();
-    defer tr.transport.destroyPacket(buffer);
+    var buffer: [1500]u8 = undefined;
 
     const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[constants.rtp_default_header_size..]);
     const rtp_buffer = buffer[0 .. header_size + constants.max_rtp_payload_size];
@@ -223,17 +222,17 @@ pub fn sendSample(sender: *RtpSender, sample: *const MediaPacket) SendError!void
         .vp8 => |*p| {
             var it = p.packetize(sample);
             while (it.next(rtp_buffer[header_size..])) |*packet|
-                try sendAndRecord(tr, packet, header_size, buffer, timestamp);
+                try sendAndRecord(tr, packet, header_size, &buffer, timestamp);
         },
         .h264 => |*p| {
             var it = p.packetize(sample);
             while (try it.next(rtp_buffer[header_size..])) |*packet|
-                try sendAndRecord(tr, packet, header_size, buffer, timestamp);
+                try sendAndRecord(tr, packet, header_size, &buffer, timestamp);
         },
         .opus => |*p| {
             var it = p.packetize(sample);
             while (it.next(rtp_buffer[header_size..])) |*packet|
-                try sendAndRecord(tr, packet, header_size, buffer, timestamp);
+                try sendAndRecord(tr, packet, header_size, &buffer, timestamp);
         },
         else => return,
     }
@@ -245,8 +244,7 @@ pub fn sendSample(sender: *RtpSender, sample: *const MediaPacket) SendError!void
 pub fn sendRtp(sender: *RtpSender, packet: *const rtp.Packet) SendError!void {
     const tr = try checkAndGetTransceiver(sender);
 
-    var buffer = try tr.transport.createPacket();
-    defer tr.transport.destroyPacket(buffer);
+    var buffer: [1500]u8 = undefined;
 
     const timestamp = Io.Timestamp.now(tr.transport.getIo(), .real).toMicroseconds();
     const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[constants.rtp_default_header_size..]);
@@ -307,15 +305,14 @@ pub fn handleNack(sender: *RtpSender, nack: rtcp.Nack) !void {
     const tr = try checkAndGetTransceiver(sender);
 
     var it = nack.iterateSequenceNumbers();
-    var buffer = try tr.transport.createPacket();
-    defer tr.transport.destroyPacket(buffer);
+    var buffer: [1500]u8 = undefined;
 
     const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[constants.rtp_default_header_size..]);
     // RFC 4588: RTX payload is the original sequence number followed by the original payload.
     const payload_offset = header_size + @as(usize, if (is_rtx) 2 else 0);
 
     while (it.next()) |seq| {
-        const io = tr.transport.getIo();
+        const io = tr.pc.io;
         sender.mutex.lockUncancelable(io);
         const packet = send_buffer.get(seq, buffer[payload_offset..]) orelse {
             sender.mutex.unlock(io);
@@ -338,7 +335,7 @@ pub fn handleNack(sender: *RtpSender, nack: rtcp.Nack) !void {
         sender.mutex.unlock(io);
 
         const payload_len = if (is_rtx) 2 + packet.payload.len else packet.payload.len;
-        try writeHeaderAndSend(tr, header, header_size, payload_len, buffer);
+        try writeHeaderAndSend(tr, header, header_size, payload_len, &buffer);
     }
 }
 
@@ -348,7 +345,7 @@ pub fn generateSsrc(sender: *RtpSender, io: Io, demuxer: *Demuxer) !void {
 }
 
 fn recordSent(tr: *RtpTransceiver, packet: *const rtp.Packet, timestamp: i64) void {
-    const io = tr.transport.getIo();
+    const io = tr.pc.io;
     tr.sender.mutex.lockUncancelable(io);
     defer tr.sender.mutex.unlock(io);
 
@@ -383,7 +380,8 @@ fn writeHeaderExtensions(sender: *RtpSender, mid: Mid.Int, buffer: []u8) !usize 
 
 fn writeHeaderAndSend(tr: *RtpTransceiver, header: rtp.Packet.Header, header_size: usize, payload_len: usize, buffer: []u8) SendError!void {
     std.mem.writeInt(u96, buffer[0..constants.rtp_default_header_size], @bitCast(header), .big);
-    try tr.transport.sendRtp(buffer, header_size + payload_len);
+    const data = try tr.pc.dtls_transport.handleMediaWrite(buffer, header_size + payload_len, true);
+    try tr.pc.sendData(data);
 }
 
 fn sendAndRecord(tr: *RtpTransceiver, rtp_packet: *const rtp.Packet, header_size: usize, buffer: []u8, timestamp: i64) !void {
@@ -423,7 +421,7 @@ fn testTransceiver(current_direction: ?RtpTransceiver.Direction) RtpTransceiver 
         .kind = .video,
         .direction = .sendrecv,
         .current_direction = current_direction,
-        .transport = undefined,
+        .pc = undefined,
     };
 }
 

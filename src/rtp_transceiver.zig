@@ -3,6 +3,7 @@ const constants = @import("constants.zig");
 const webrtc = @import("webrtc.zig");
 const utils = @import("utils.zig");
 const DtlsTransport = @import("dtls_transport.zig");
+const PeerConnection = @import("peer_connection.zig");
 const SDPSession = @import("sdp_session.zig");
 const RtpSender = @import("rtp_sender.zig");
 const RtpReceiver = @import("rtp_receiver.zig");
@@ -82,7 +83,7 @@ sdp_mline_index: ?u8 = null,
 stopping: bool = false,
 stopped: bool = false,
 added_by_add_track: bool = false,
-transport: *DtlsTransport,
+pc: *PeerConnection,
 
 pub fn initFromSdpMedia(allocator: std.mem.Allocator, io: Io, sdp_media: *const SDPSession.Media, index: u8) !*RtpTransceiver {
     const tr = try allocator.create(RtpTransceiver);
@@ -100,7 +101,7 @@ pub fn initFromSdpMedia(allocator: std.mem.Allocator, io: Io, sdp_media: *const 
         .sender = RtpSender.init(null),
         .mid = sdp_media.mid,
         .sdp_mline_index = index,
-        .transport = undefined,
+        .pc = undefined,
     };
 
     return tr;
@@ -128,7 +129,7 @@ pub fn toSdpMedia(tr: *RtpTransceiver, allocator: std.mem.Allocator, media_engin
     );
     media.rtcp_mux = true;
     media.rtcp_rsize = false;
-    media.setIceCredentials(tr.transport.ice_agent.getLocalCredentials());
+    media.setIceCredentials(tr.pc.dtls_transport.ice_agent.getLocalCredentials());
 
     try tr.addSenderFields(allocator, &media);
     if (tr.mid) |mid| media.mid = mid;
@@ -178,7 +179,7 @@ pub fn toSdpMediaAnswer(
     ) else &.{};
 
     if (!rejected) {
-        answer.setIceCredentials(tr.transport.ice_agent.getLocalCredentials());
+        answer.setIceCredentials(tr.pc.dtls_transport.ice_agent.getLocalCredentials());
     }
 
     if (!rejected) try tr.addSenderFields(allocator, &answer);
@@ -314,7 +315,7 @@ fn newTestRtpTransceiver(io: Io, allocator: std.mem.Allocator) !*RtpTransceiver 
         .receiver = RtpReceiver.init(.init(io, .video)),
         .direction = .sendrecv,
         .kind = .video,
-        .transport = undefined,
+        .pc = undefined,
     };
 
     return tr;
@@ -323,11 +324,9 @@ fn newTestRtpTransceiver(io: Io, allocator: std.mem.Allocator) !*RtpTransceiver 
 const testing = std.testing;
 const rtcp = @import("rtcp");
 
-fn dummyDtlsTransport() !DtlsTransport {
-    return try DtlsTransport.init(testing.io, testing.allocator, .{
-        .on_data = undefined,
-        .on_event = undefined,
-        .ice_servers = &.{},
+fn dummyPeerConnection() !PeerConnection {
+    return try PeerConnection.init(testing.io, testing.allocator, .{
+        .media_engine = undefined,
     });
 }
 
@@ -359,12 +358,12 @@ test "initFromSdpMedia" {
 }
 
 test "toSdpMedia" {
-    var transport = try dummyDtlsTransport();
-    defer transport.deinit();
+    var pc = try dummyPeerConnection();
+    defer pc.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
     defer tr.deinit(testing.io, testing.allocator);
-    tr.transport = &transport;
+    tr.pc = &pc;
 
     var media_engine_rtx = try testMediaEngine(true);
     defer media_engine_rtx.deinit(testing.allocator);
@@ -379,7 +378,7 @@ test "toSdpMedia" {
     try testing.expect(media.track_id != null);
     try testing.expectEqualStrings(media.track_id.?, tr.sender.track.?.getId());
 
-    const ice_credentials = transport.ice_agent.getLocalCredentials();
+    const ice_credentials = pc.dtls_transport.ice_agent.getLocalCredentials();
     try testing.expectEqualStrings(ice_credentials.username, media.ice_ufrag);
     try testing.expectEqualStrings(ice_credentials.password, media.ice_pwd);
 
@@ -399,13 +398,13 @@ test "toSdpMedia" {
 }
 
 test "toSdpMediaAnswer: answer to offer" {
-    var transport = try dummyDtlsTransport();
-    defer transport.deinit();
+    var pc = try dummyPeerConnection();
+    defer pc.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
     defer tr.deinit(testing.io, testing.allocator);
     tr.mid = 0x30;
-    tr.transport = &transport;
+    tr.pc = &pc;
 
     var media_engine = try testMediaEngine(false);
     defer media_engine.deinit(testing.allocator);
@@ -430,19 +429,19 @@ test "toSdpMediaAnswer: answer to offer" {
         try testing.expect(codec.rtp_codec.rtcp_feedbacks == webrtc.RtcpFeedbacks{ .nack = true, .nack_pli = true });
     }
 
-    const ice_credentials = transport.ice_agent.getLocalCredentials();
+    const ice_credentials = pc.dtls_transport.ice_agent.getLocalCredentials();
     try testing.expectEqualStrings(ice_credentials.username, answer_media.ice_ufrag);
     try testing.expectEqualStrings(ice_credentials.password, answer_media.ice_pwd);
 }
 
 test "toSdpMediaAnswer: includes rtx_ssrc when the negotiated codecs include rtx" {
-    var transport = try dummyDtlsTransport();
-    defer transport.deinit();
+    var pc = try dummyPeerConnection();
+    defer pc.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
     defer tr.deinit(testing.io, testing.allocator);
     tr.mid = 0x30;
-    tr.transport = &transport;
+    tr.pc = &pc;
     tr.sender.rtx_ssrc = 424242;
 
     var remote_engine = try testMediaEngine(true);
@@ -465,13 +464,13 @@ test "toSdpMediaAnswer: includes rtx_ssrc when the negotiated codecs include rtx
 }
 
 test "toSdpMediaAnswer: enable_rtx=false ignores an rtx-capable offer" {
-    var transport = try dummyDtlsTransport();
-    defer transport.deinit();
+    var pc = try dummyPeerConnection();
+    defer pc.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
     defer tr.deinit(testing.io, testing.allocator);
     tr.mid = 0x30;
-    tr.transport = &transport;
+    tr.pc = &pc;
     tr.sender.rtx_ssrc = 424242;
 
     var remote_engine = try testMediaEngine(true);
@@ -495,12 +494,12 @@ test "toSdpMediaAnswer: enable_rtx=false ignores an rtx-capable offer" {
 }
 
 test "toSdpMedia: includes rtx_ssrc when enable_rtx synthesizes an rtx codec" {
-    var transport = try dummyDtlsTransport();
-    defer transport.deinit();
+    var pc = try dummyPeerConnection();
+    defer pc.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
     defer tr.deinit(testing.io, testing.allocator);
-    tr.transport = &transport;
+    tr.pc = &pc;
     tr.sender.rtx_ssrc = 424242;
 
     var media_engine = try testMediaEngine(true);
@@ -519,14 +518,14 @@ test "toSdpMedia: includes rtx_ssrc when enable_rtx synthesizes an rtx codec" {
 }
 
 test "toSdpMedia: leaves rtx_ssrc unset for audio, which has no rtx codec, even with enable_rtx" {
-    var transport = try dummyDtlsTransport();
+    var transport = try dummyPeerConnection();
     defer transport.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
     defer tr.deinit(testing.io, testing.allocator);
     tr.kind = .audio;
     tr.sender.track = .init(testing.io, .audio);
-    tr.transport = &transport;
+    tr.pc = &transport;
     tr.sender.rtx_ssrc = 424242;
 
     var media_engine = try testMediaEngine(true);
@@ -539,13 +538,13 @@ test "toSdpMedia: leaves rtx_ssrc unset for audio, which has no rtx codec, even 
 }
 
 test "toSdpMediaAnswer: negotiates header extensions, keeping the offerer's id" {
-    var transport = try dummyDtlsTransport();
-    defer transport.deinit();
+    var pc = try dummyPeerConnection();
+    defer pc.deinit();
 
     var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
     defer tr.deinit(testing.io, testing.allocator);
     tr.mid = 0x30;
-    tr.transport = &transport;
+    tr.pc = &pc;
 
     var media_engine = try testMediaEngine(false);
     defer media_engine.deinit(testing.allocator);

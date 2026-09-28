@@ -20,6 +20,7 @@ pub const ConnectionState = enum(u8) { new, connecting, connected, closed };
 pub const InitConfig = struct {
     local_port: u16,
     remote_port: u16,
+    random: std.Random,
 };
 
 pub const Event = union(enum) {
@@ -46,6 +47,7 @@ pub fn init(allocator: std.mem.Allocator, init_config: InitConfig) SctpTranport 
         .assoc = .init(allocator, .{
             .source_port = init_config.local_port,
             .dest_port = init_config.remote_port,
+            .random = init_config.random,
         }),
         .max_message_size = 0,
         .data_channels = .empty,

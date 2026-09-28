@@ -1,7 +1,7 @@
 const std = @import("std");
 const rtp = @import("rtp");
 const rtcp = @import("rtcp");
-const DtlsTransport = @import("../dtls_transport.zig");
+const PeerConnection = @import("../peer_connection.zig");
 
 const NackGenerator = @This();
 const Io = std.Io;
@@ -49,9 +49,9 @@ pub fn deinit(self: *NackGenerator, io: Io) void {
     self.receive_logs.deinit();
 }
 
-pub fn start(self: *NackGenerator, dtls_transport: *DtlsTransport) !void {
+pub fn start(self: *NackGenerator, pc: *PeerConnection) !void {
     Logger.debug("Start sending nack reports", .{});
-    try self.group.concurrent(dtls_transport.getIo(), buildAndSendNack, .{ self, dtls_transport });
+    try self.group.concurrent(pc.io, buildAndSendNack, .{ self, pc });
 }
 
 pub fn handleRtpPacket(self: *NackGenerator, io: Io, packet: *const rtp.Packet) !void {
@@ -76,19 +76,18 @@ pub fn deleteSource(self: *NackGenerator, io: Io, ssrc: u32) void {
     _ = self.receive_logs.remove(ssrc);
 }
 
-fn buildAndSendNack(self: *NackGenerator, dtls_transport: *DtlsTransport) !void {
+fn buildAndSendNack(self: *NackGenerator, pc: *PeerConnection) !void {
     var buffer: [1240]u8 = @splat(0);
-    const io = dtls_transport.getIo();
 
     const duration = Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(self.interval) };
-    var timestamp = Io.Clock.Timestamp.now(io, .awake);
+    var timestamp = Io.Clock.Timestamp.now(pc.io, .awake);
 
     while (true) {
         timestamp = timestamp.addDuration(duration);
-        try timestamp.wait(io);
+        try timestamp.wait(pc.io);
 
-        try self.mutex.lock(io);
-        defer self.mutex.unlock(io);
+        try self.mutex.lock(pc.io);
+        defer self.mutex.unlock(pc.io);
 
         var it = NackGeneratorIterator.init(self);
         var slice: []u8 = buffer[0..1200];
@@ -99,7 +98,11 @@ fn buildAndSendNack(self: *NackGenerator, dtls_transport: *DtlsTransport) !void 
                     break;
                 }
 
-                dtls_transport.sendRtcp(&buffer, buffer.len - slice.len) catch |err| {
+                const data = pc.dtls_transport.handleMediaWrite(&buffer, buffer.len - slice.len, false) catch {
+                    slice = buffer[0..];
+                    continue;
+                };
+                pc.sendData(data) catch |err| {
                     Logger.err("Failed to send rtcp nack: {}", .{err});
                 };
                 slice = buffer[0..];
@@ -112,7 +115,8 @@ fn buildAndSendNack(self: *NackGenerator, dtls_transport: *DtlsTransport) !void 
             }
 
             if (slice.len != buffer.len) {
-                dtls_transport.sendRtcp(&buffer, buffer.len - slice.len) catch |err| {
+                const data = pc.dtls_transport.handleMediaWrite(&buffer, buffer.len - slice.len, false) catch return;
+                pc.sendData(data) catch |err| {
                     Logger.err("Failed to send rtcp nack: {}", .{err});
                 };
             }
