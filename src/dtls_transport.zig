@@ -135,7 +135,7 @@ pub fn handleMediaWrite(transport: *DtlsTransport, buffer: []u8, payload_len: us
 }
 
 pub fn handleWrite(transport: *DtlsTransport, data: []const u8, buffer: []u8) ![]const u8 {
-    const size = try transport.session.writeData(data, buffer);
+    const size = try transport.session.handleWrite(data, buffer);
     return buffer[0..size];
 }
 
@@ -151,7 +151,7 @@ pub fn handleRead(
         .data = data,
         .from = from,
         .to = to,
-    }, now, buffer);
+    }, now);
 
     switch (result) {
         .app_data => |app_data| if (try transport.handleIceData(
@@ -182,9 +182,9 @@ pub const Message = union(enum) {
     none,
 };
 
-pub fn pollTransmit(transport: *DtlsTransport) Message {
-    const ice_msg = transport.ice_agent.pollTransmit() orelse {
-        const dtls_msg = transport.session.pollTransmit() orelse return .none;
+pub fn pollTransmit(transport: *DtlsTransport, buffer: []u8) Message {
+    const ice_msg = (transport.ice_agent.pollTransmit(buffer) catch return .none) orelse {
+        const dtls_msg = transport.session.pollTransmit(buffer) orelse return .none;
         return .{ .dtls = dtls_msg };
     };
 
@@ -272,15 +272,3 @@ fn getPacketType(data: []const u8) PacketType {
         else => .unknown,
     };
 }
-
-// pub fn createPacket(transport: *DtlsTransport) ![]u8 {
-//     transport.pool_mutex.lockUncancelable(transport.io);
-//     defer transport.pool_mutex.unlock(transport.io);
-//     return try transport.memory_pool.create(transport.allocator);
-// }
-
-// pub fn destroyPacket(transport: *DtlsTransport, buffer: []const u8) void {
-//     transport.pool_mutex.lockUncancelable(transport.io);
-//     defer transport.pool_mutex.unlock(transport.io);
-//     transport.memory_pool.destroy(@ptrCast(@alignCast(@constCast(buffer))));
-// }

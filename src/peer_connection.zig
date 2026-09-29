@@ -138,15 +138,15 @@ timer_manager: TimerManager,
 group: Io.Group = .init,
 mutex: Io.Mutex = .init,
 
-sctp_mutex: Io.Mutex,
 dtls_mutex: Io.Mutex = .init,
 dtls_deadline: i64 = std.math.maxInt(i64),
-sctp_deadline: i64 = std.math.maxInt(i64),
 
 socket: *Io.net.Socket = undefined,
 dest: Io.net.IpAddress = undefined,
 
-buffer: [1500]u8 = @splat(0),
+buffer: *[3 * packet_size]u8,
+
+const packet_size = constants.max_packet_size;
 
 const ParsedSessionDescription = struct {
     desc_type: webrtc.SessionDescriptionType,
@@ -196,6 +196,10 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
     prng.* = .init(seed);
     errdefer allocator.destroy(prng);
 
+    const buffer = try allocator.create([3 * packet_size]u8);
+    buffer.* = @splat(0);
+    errdefer allocator.destroy(buffer);
+
     var dtls_transport: DtlsTransport = try .init(io, allocator, .{ .random = prng.random() });
     errdefer dtls_transport.deinit();
 
@@ -215,7 +219,7 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
             .random = prng.random(),
         }),
         .prng = prng,
-        .sctp_mutex = .init,
+        .buffer = buffer,
         .timer_manager = .empty,
         .socket_handler = .init(),
         .ice_servers = config.rtc_configuration.ice_servers,
@@ -225,9 +229,10 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
 pub fn deinit(pc: *PeerConnection) void {
     const io = pc.io;
     pc.group.cancel(io);
-    pc.handler = null;
-
+    pc.timer_manager.deinit(pc.allocator);
     pc.socket_handler.deinit(io, pc.allocator);
+
+    pc.handler = null;
 
     for (pc.transceivers.items) |tr| tr.deinit(io, pc.allocator);
     pc.transceivers.deinit(pc.allocator);
@@ -246,11 +251,11 @@ pub fn deinit(pc: *PeerConnection) void {
     pc.last_answer.deinit(pc.allocator);
 
     if (pc.nack_generator) |*ng| ng.deinit(io);
-    pc.timer_manager.deinit(pc.allocator);
     pc.sctp_transport.deinit();
     pc.dtls_transport.deinit();
     pc.demuxer.deinit();
     pc.allocator.destroy(pc.prng);
+    pc.allocator.destroy(pc.buffer);
 }
 
 /// Adds a new track to the PeerConnection and optionally associates it with a stream.
@@ -497,16 +502,15 @@ pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataCha
     if (params.protocol.len > constants.max_data_channel_label_length) return error.ProtocolTooLong;
     if (params.max_packet_lifetime != 0 and params.max_retransmits != 0) return error.InvalidParameters;
 
-    pc.sctp_mutex.lockUncancelable(pc.io);
-    defer pc.sctp_mutex.unlock(pc.io);
+    pc.dtls_mutex.lockUncancelable(pc.io);
+    defer pc.dtls_mutex.unlock(pc.io);
     return try pc.sctp_transport.addDataChannel(label, params);
 }
 
 pub fn sendDataChannelMessage(pc: *PeerConnection, channel_id: DataChannel.ChannelId, message: []const u8) !void {
     try pc.checkNotClosed();
     try pc.sctp_transport.sendDataChannelMessage(channel_id, message, false);
-    const now = Io.Timestamp.now(pc.dtls_transport.io, .awake).toMilliseconds();
-    try pc.drainSctpTransport(now);
+    try pc.drainDtlsTransport();
 }
 
 pub fn sendData(pc: *PeerConnection, data: []const u8) Io.net.Socket.SendError!void {
@@ -516,6 +520,98 @@ pub fn sendData(pc: *PeerConnection, data: []const u8) Io.net.Socket.SendError!v
 pub fn close(pc: *PeerConnection) void {
     pc.dtls_transport.close();
     pc.sctp_transport.close();
+}
+
+const Message = struct {
+    data: []const u8,
+    from: *const Io.net.IpAddress,
+    to: *const Io.net.IpAddress,
+};
+
+const Event = union(enum) {
+    candidate: ?ice.Candidate,
+    connection_state: ConnectionState,
+    gathering_state: GatheringState,
+    nominated: struct { Io.net.IpAddress, Io.net.IpAddress },
+    channel: DataChannel.Event,
+};
+
+// True means data is consumed and may generate app event
+// False means data provided to the user
+fn handleRead(pc: *PeerConnection, message: Message, now: i64) !bool {
+    const data_event = (try pc.dtls_transport.handleRead(
+        message.data,
+        message.from,
+        message.to,
+        now,
+        pc.buffer[0..packet_size],
+    )) orelse {
+        @branchHint(.unlikely);
+        return true;
+    };
+
+    switch (data_event) {
+        .rtp => |data| try pc.handleRtpData(data),
+        .rtcp => |data| try pc.handleRtcpData(data),
+        .app_data => |data| try pc.sctp_transport.handleRead(data, now),
+    }
+
+    return data_event == .app_data;
+}
+
+fn handleTimeout(pc: *PeerConnection, now: i64) !void {
+    try pc.dtls_transport.handleTimeout(now);
+    try pc.sctp_transport.handleTimeout(now);
+}
+
+fn pollEvent(pc: *PeerConnection) ?Event {
+    while (true) {
+        const dtls_event = pc.dtls_transport.pollEvent() orelse {
+            const sctp_event = pc.sctp_transport.pollEvent() orelse return null;
+            switch (sctp_event) {
+                .connection_state => |state| Logger.info("SCTP connection state changed: {}", .{state}),
+                .data_channel => |dc_event| return .{ .channel = dc_event },
+            }
+            continue;
+        };
+
+        switch (dtls_event) {
+            .ice_candidate => |id| return .{ .candidate = pc.dtls_transport.ice_agent.candidates[id] },
+            .end_of_candidates => return .{ .candidate = null },
+            .ice_connection_state, .dtls_connection_state => {
+                const ice_state, const dtls_state = pc.dtls_transport.getConnectionState();
+                const new_state = nextPeerConnectionState(ice_state, dtls_state);
+                if (new_state != pc.connection_state) {
+                    pc.connection_state = new_state;
+                    if (pc.connection_state == .connected) pc.maybeConnectSctpTransport() catch |err| {
+                        Logger.err("Failed to connect SCTP transport: {}", .{err});
+                    };
+
+                    if (pc.connection_state == .closed) {
+                        pc.group.cancel(pc.io);
+                        pc.setSignalingState(.closed);
+                    }
+                    return .{ .connection_state = new_state };
+                }
+
+                // if (ice_state == .completed) {
+                //     pc.socket_handler.unregisterAllExcept(pc.io, pc.allocator, pc.socket);
+                // }
+            },
+            .ice_gathering_state => |state| return .{ .gathering_state = state },
+            .nominated => |pair| {
+                const local_candidate = &pc.dtls_transport.ice_agent.candidates[pair.local];
+                const dest = pc.dtls_transport.ice_agent.remote_candidates[pair.remote].address;
+                return .{ .nominated = .{ local_candidate.base, dest } };
+            },
+        }
+    }
+}
+
+fn pollTimeout(pc: *PeerConnection) ?i64 {
+    const dtls_timeout = pc.dtls_transport.pollTimeout() orelse return pc.sctp_transport.pollTimeout();
+    const sctp_timeout = pc.sctp_transport.pollTimeout() orelse return dtls_timeout;
+    return @min(dtls_timeout, sctp_timeout);
 }
 
 fn deinitDescriptions(pc: *PeerConnection, descriptions: []const *?ParsedSessionDescription) void {
@@ -1011,14 +1107,6 @@ fn handleRtpData(pc: *PeerConnection, data: []const u8) !void {
     }
 }
 
-fn handleAppData(pc: *PeerConnection, data: []const u8) !void {
-    pc.sctp_mutex.lockUncancelable(pc.io);
-    defer pc.sctp_mutex.unlock(pc.io);
-    const now = Io.Timestamp.now(pc.io, .awake).toMilliseconds();
-    try pc.sctp_transport.handleRead(data, now);
-    try pc.drainSctpTransport(now);
-}
-
 fn findSenderBySsrc(pc: *PeerConnection, ssrc: u32) ?*RtpSender {
     pc.mutex.lockUncancelable(pc.io);
     defer pc.mutex.unlock(pc.io);
@@ -1076,8 +1164,6 @@ fn maybeConnectSctpTransport(pc: *PeerConnection) !void {
         if (local.isRejected() or remote.isRejected()) return;
         if (local.sctp_port.? == 0 or remote.sctp_port.? == 0) return;
         try pc.sctp_transport.connect(pc.dtls_transport.getRole() == .server);
-        const now = Io.Timestamp.now(pc.io, .awake).toMilliseconds();
-        try pc.drainSctpTransport(now);
     };
 }
 
@@ -1246,49 +1332,27 @@ fn resolveIceServer(pc: *PeerConnection, ice_server: ice.IceServer, has_ipv6: bo
 
 fn handleSocketData(userdata: ?*anyopaque, socket: *Io.net.Socket, inc: Io.net.IncomingMessage) !SocketHandler.ReturnAction {
     const pc: *PeerConnection = @ptrCast(@alignCast(userdata.?));
-    const io = pc.io;
 
-    try pc.dtls_mutex.lock(io);
-    defer pc.dtls_mutex.unlock(io);
+    try pc.dtls_mutex.lock(pc.io);
+    defer pc.dtls_mutex.unlock(pc.io);
 
-    const now = Io.Timestamp.now(io, .awake).toMilliseconds();
-    const data_event = (pc.dtls_transport.handleRead(
-        inc.data,
-        &inc.from,
-        &socket.address,
-        now,
-        &pc.buffer,
-    ) catch return .none) orelse {
-        @branchHint(.unlikely);
-        pc.drainDtlsTransport() catch |err| {
-            Logger.err("Failed to drain DTLS transport: {}", .{err});
-        };
-        return .none;
-    };
-
-    switch (data_event) {
-        .rtp => |data| pc.handleRtpData(data) catch {},
-        .rtcp => |data| pc.handleRtcpData(data) catch {},
-        .app_data => |data| pc.handleAppData(data) catch |err| {
-            Logger.err("Failed to handle SCTP data: {}", .{err});
-        },
-    }
-
+    const now = Io.Timestamp.now(pc.io, .awake).toMilliseconds();
+    const mesage = Message{ .data = inc.data, .from = &inc.from, .to = &socket.address };
+    if (pc.handleRead(mesage, now) catch return .none) try pc.drainDtlsTransport();
     return .none;
 }
 
-fn onDtlsTimeout(userdata: ?*anyopaque, id: u64) void {
+fn onTimeout(userdata: ?*anyopaque, id: u64) void {
     _ = id;
     const pc: *PeerConnection = @ptrCast(@alignCast(userdata.?));
+    const now = Io.Timestamp.now(pc.io, .awake).toMilliseconds();
+
     pc.dtls_deadline = std.math.maxInt(i64);
-    const io = pc.io;
-    const now = Io.Timestamp.now(io, .awake).toMilliseconds();
+    pc.dtls_mutex.lockUncancelable(pc.io);
+    defer pc.dtls_mutex.unlock(pc.io);
 
-    pc.dtls_mutex.lockUncancelable(io);
-    defer pc.dtls_mutex.unlock(io);
-
-    pc.dtls_transport.handleTimeout(now) catch |err| {
-        Logger.err("Failed to handle DTLS timeout: {}", .{err});
+    pc.handleTimeout(now) catch |err| {
+        Logger.err("Failed to handle timeout: {}", .{err});
     };
 
     pc.drainDtlsTransport() catch |err| {
@@ -1296,116 +1360,60 @@ fn onDtlsTimeout(userdata: ?*anyopaque, id: u64) void {
     };
 }
 
-fn drainDtlsTransport(pc: *PeerConnection) !void {
-    while (pc.dtls_transport.pollEvent()) |event| switch (event) {
-        .ice_candidate => |id| if (pc.handler) |handler| {
-            const candidate = pc.dtls_transport.ice_agent.candidates[id];
+fn drainDtlsTransport(pc: *PeerConnection) error{Canceled}!void {
+    while (pc.pollEvent()) |event| switch (event) {
+        .candidate => |candidate| if (pc.handler) |handler| {
             handler.vtable.onIceCandidate(handler.userdata, candidate);
         },
-        .end_of_candidates => if (pc.handler) |handler| {
-            handler.vtable.onIceCandidate(handler.userdata, null);
+        .connection_state => |state| if (pc.handler) |handler| {
+            handler.vtable.onConnectionStateChange(handler.userdata, state);
         },
-        .ice_connection_state, .dtls_connection_state => {
-            const ice_state, const dtls_state = pc.dtls_transport.getConnectionState();
-            const new_state = nextPeerConnectionState(ice_state, dtls_state);
-            if (new_state != pc.connection_state) {
-                pc.connection_state = new_state;
-                if (pc.connection_state == .connected) pc.maybeConnectSctpTransport() catch |err| {
-                    Logger.err("Failed to connect SCTP transport: {}", .{err});
-                };
-
-                if (pc.connection_state == .closed) {
-                    pc.group.cancel(pc.io);
-                    pc.setSignalingState(.closed);
-                }
-                if (pc.handler) |handler| handler.vtable.onConnectionStateChange(handler.userdata, new_state);
-            }
-
-            if (ice_state == .completed) {
-                pc.socket_handler.unregisterAllExcept(pc.io, pc.allocator, pc.socket);
-            }
-        },
-        .ice_gathering_state => |state| {
-            if (pc.handler) |handler| handler.vtable.onGatheringStateChange(handler.userdata, state);
+        .gathering_state => |state| if (pc.handler) |handler| {
+            handler.vtable.onGatheringStateChange(handler.userdata, state);
         },
         .nominated => |pair| {
-            const local_candidate = &pc.dtls_transport.ice_agent.candidates[pair.local];
-            pc.dest = pc.dtls_transport.ice_agent.remote_candidates[pair.remote].address;
-            pc.socket = pc.socket_handler.findSocket(&local_candidate.base).?;
+            pc.socket = pc.socket_handler.findSocket(&pair.@"0").?;
+            pc.dest = pair.@"1";
+        },
+        .channel => |channel| if (pc.handler) |handler| {
+            handler.vtable.onDataChannel(handler.userdata, channel);
         },
     };
 
     const io = pc.io;
-    while (true) switch (pc.dtls_transport.pollTransmit()) {
+    while (true) switch (pc.dtls_transport.pollTransmit(pc.buffer[packet_size .. 2 * packet_size])) {
         .ice => |message| {
             const socket = pc.socket_handler.findSocket(message.from) orelse continue;
-            socket.send(io, message.to, message.data) catch |err| {
-                Logger.debug("Failed to send data to {f}: {}", .{ message.to, err });
+            socket.send(io, message.to, message.data) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => Logger.debug("Failed to send data to {f}: {}", .{ message.to, err }),
             };
         },
-        .dtls => |data| pc.sendData(data) catch |err| {
-            Logger.debug("Failed to send DTLS data to {f}: {}", .{ pc.dest, err });
+        .dtls => |data| pc.sendData(data) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => Logger.debug("Failed to send DTLS data to {f}: {}", .{ pc.dest, err }),
         },
         .none => break,
     };
 
-    const deadline = pc.dtls_transport.pollTimeout() orelse return;
-    if (deadline >= pc.dtls_deadline) return;
-
-    pc.dtls_deadline = deadline;
-    _ = try pc.timer_manager.schedule(
-        pc.allocator,
-        pc.io,
-        deadline,
-        pc,
-        onDtlsTimeout,
-    );
-}
-
-fn drainSctpTransport(pc: *PeerConnection, now: i64) !void {
-    var sctp_buffer: [1500]u8 = undefined;
-    var dtls_buffer: [1500]u8 = undefined;
-
-    while (pc.sctp_transport.pollEvent()) |event| switch (event) {
-        .connection_state => |state| Logger.info("SCTP connection state changed: {}", .{state}),
-        .data_channel => |dc_event| if (pc.handler) |handler| {
-            handler.vtable.onDataChannel(handler.userdata, dc_event);
-        },
-    };
-
-    while (pc.sctp_transport.pollTransmits(&sctp_buffer, now)) |d| {
-        const to_send = pc.dtls_transport.handleWrite(d, &dtls_buffer) catch return;
-        pc.sendData(to_send) catch |err| {
-            Logger.err("Failed to send SCTP data: {}", .{err});
+    const now = Io.Timestamp.now(io, .awake).toMilliseconds();
+    while (pc.sctp_transport.pollTransmit(pc.buffer[2 * packet_size ..], now)) |d| {
+        const to_send = pc.dtls_transport.handleWrite(d, pc.buffer[packet_size .. 2 * packet_size]) catch return;
+        pc.sendData(to_send) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => Logger.err("Failed to send SCTP data: {}", .{err}),
         };
     }
 
-    const deadline = pc.sctp_transport.pollTimeout() orelse return;
-    if (deadline < pc.sctp_deadline) {
-        pc.sctp_deadline = deadline;
-        _ = try pc.timer_manager.schedule(
+    if (pc.pollTimeout()) |deadline| if (deadline < pc.dtls_deadline) {
+        pc.dtls_deadline = deadline;
+        _ = pc.timer_manager.schedule(
             pc.allocator,
             pc.io,
             deadline,
             pc,
-            onSctpTimeout,
-        );
-    }
-}
-
-fn onSctpTimeout(userdata: ?*anyopaque, id: u64) void {
-    _ = id;
-    const pc: *PeerConnection = @ptrCast(@alignCast(userdata.?));
-    const io = pc.io;
-    pc.sctp_mutex.lockUncancelable(io);
-    defer pc.sctp_mutex.unlock(io);
-
-    pc.sctp_deadline = std.math.maxInt(i64);
-    const now = Io.Timestamp.now(io, .awake).toMilliseconds();
-    pc.sctp_transport.handleTimeout(now) catch return;
-
-    drainSctpTransport(pc, now) catch |err| {
-        Logger.err("Failed to drain SCTP transport: {}", .{err});
+            onTimeout,
+        ) catch return;
     };
 }
 

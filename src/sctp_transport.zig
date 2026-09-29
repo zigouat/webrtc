@@ -199,7 +199,7 @@ pub fn handleRead(sctp_transport: *SctpTranport, data: []const u8, now: i64) !vo
     };
 }
 
-pub fn pollTransmits(sctp_transport: *SctpTranport, buffer: []u8, now: i64) ?[]const u8 {
+pub fn pollTransmit(sctp_transport: *SctpTranport, buffer: []u8, now: i64) ?[]const u8 {
     return sctp_transport.assoc.pollTransmits(buffer, now);
 }
 
