@@ -25,10 +25,8 @@ pub fn init() SocketHandler {
 }
 
 pub fn deinit(h: *SocketHandler, io: Io, allocator: std.mem.Allocator) void {
-    for (h.sockets.items) |slot| {
-        slot.grp.cancel(io);
-        allocator.destroy(slot);
-    }
+    for (h.sockets.items) |slot| slot.grp.cancel(io);
+    for (h.sockets.items) |slot| allocator.destroy(slot);
     h.sockets.deinit(allocator);
 }
 
@@ -98,7 +96,10 @@ fn handleSocket(io: Io, slot: *Slot, addr: *const Io.net.IpAddress, created: *Io
         created.set(io);
         return;
     };
-    defer socket.close(io);
+    defer {
+        socket.close(io);
+        slot.socket = null;
+    }
 
     slot.socket = &socket;
     created.set(io);

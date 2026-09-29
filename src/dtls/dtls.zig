@@ -33,8 +33,6 @@ const SessionKeys = struct {
     rand_bytes: [64]u8,
 };
 
-const max_datagram_size = 1500;
-
 pub const Session = struct {
     const Self = @This();
     const max_events = 6;
@@ -87,9 +85,8 @@ pub const Session = struct {
     direct_out: ?[]u8,
     direct_out_len: usize,
 
-    handshake_out: [max_datagram_size]u8,
-    handshake_out_len: usize,
     handshake_needed: bool,
+    close_pending: bool,
     setup: bool = false,
 
     pub fn init(random: std.Random, session_config: Config) !Self {
@@ -108,9 +105,8 @@ pub const Session = struct {
         session.events_out = .empty;
         session.direct_out = null;
         session.direct_out_len = 0;
-        session.handshake_out = undefined;
-        session.handshake_out_len = 0;
         session.handshake_needed = false;
+        session.close_pending = false;
 
         m.mbedtls_pk_init(&session.key);
         m.mbedtls_ssl_init(&session.ssl);
@@ -208,7 +204,8 @@ pub const Session = struct {
                         Logger.warn("Peer closed connection", .{});
                         session.setConnectionState(.closed);
                     },
-                    m.MBEDTLS_ERR_SSL_WANT_READ, m.MBEDTLS_ERR_SSL_WANT_WRITE => {},
+                    m.MBEDTLS_ERR_SSL_WANT_READ => {},
+                    m.MBEDTLS_ERR_SSL_WANT_WRITE => session.handshake_needed = true,
                     else => |err_code| {
                         m.mbedtls_strerror(err_code, out_buffer.ptr, out_buffer.len);
                         Logger.err("Error: {s}", .{out_buffer});
@@ -243,7 +240,7 @@ pub const Session = struct {
         }
     }
 
-    pub fn writeData(session: *Self, data: []const u8, out_buffer: []u8) !usize {
+    pub fn handleWrite(session: *Self, data: []const u8, out_buffer: []u8) !usize {
         session.direct_out = out_buffer;
         session.direct_out_len = 0;
         defer session.direct_out = null;
@@ -264,7 +261,7 @@ pub const Session = struct {
     }
 
     pub fn close(session: *Self) void {
-        _ = m.mbedtls_ssl_close_notify(&session.ssl);
+        session.close_pending = true;
         session.setConnectionState(.closed);
     }
 
@@ -272,14 +269,28 @@ pub const Session = struct {
         return session.events_out.popFront();
     }
 
-    pub fn pollTransmit(session: *Self) ?[]const u8 {
-        if (session.handshake_out_len == 0 and session.handshake_needed and session.connection_state == .connecting) {
-            session.handshakeStep() catch {};
-        }
+    pub fn pollTransmit(session: *Self, out_buffer: []u8) ?[]const u8 {
+        session.direct_out = out_buffer;
+        session.direct_out_len = 0;
+        defer session.direct_out = null;
 
-        if (session.handshake_out_len == 0) return null;
-        defer session.handshake_out_len = 0;
-        return session.handshake_out[0..session.handshake_out_len];
+        if (session.close_pending) {
+            if (m.mbedtls_ssl_close_notify(&session.ssl) != m.MBEDTLS_ERR_SSL_WANT_WRITE) session.close_pending = false;
+        } else if (session.handshake_needed) switch (session.connection_state) {
+            .connecting => session.handshakeStep() catch {},
+            .connected => {
+                session.handshake_needed = false;
+                session.received_data = null;
+                var scratch: [64]u8 = undefined;
+                if (m.mbedtls_ssl_read(&session.ssl, &scratch, scratch.len) == m.MBEDTLS_ERR_SSL_WANT_WRITE) {
+                    session.handshake_needed = true;
+                }
+            },
+            else => session.handshake_needed = false,
+        };
+
+        if (session.direct_out_len == 0) return null;
+        return out_buffer[0..session.direct_out_len];
     }
 
     pub fn pollTimeout(session: *Self) ?i64 {
@@ -367,18 +378,11 @@ pub const Session = struct {
     fn sendData(ctx: ?*anyopaque, buf: [*c]const u8, len: usize) callconv(.c) i32 {
         const session: *Self = @ptrCast(@alignCast(ctx.?));
 
-        if (session.direct_out) |dest| {
-            if (len > dest.len) return m.MBEDTLS_ERR_SSL_WANT_WRITE;
-            @memcpy(dest[0..len], buf[0..len]);
-            session.direct_out_len = len;
-            return @intCast(len);
-        }
+        const dest = session.direct_out orelse return m.MBEDTLS_ERR_SSL_WANT_WRITE;
+        if (session.direct_out_len != 0 or len > dest.len) return m.MBEDTLS_ERR_SSL_WANT_WRITE;
 
-        if (session.handshake_out_len != 0 or len > session.handshake_out.len) return m.MBEDTLS_ERR_SSL_WANT_WRITE;
-
-        @memcpy(session.handshake_out[0..len], buf[0..len]);
-        session.handshake_out_len = len;
-
+        @memcpy(dest[0..len], buf[0..len]);
+        session.direct_out_len = len;
         return @intCast(len);
     }
 
@@ -559,14 +563,15 @@ fn driveHandshake(peer1: *Session, peer2: *Session) !void {
     peer2.handleTimeout(now); // client kicks off the first flight
 
     var buf: [1500]u8 = undefined;
+    var out: [1500]u8 = undefined;
     while (peer1.connection_state != .connected or peer2.connection_state != .connected) {
         var progressed = false;
 
-        while (peer2.pollTransmit()) |dgram| {
+        while (peer2.pollTransmit(&out)) |dgram| {
             _ = try peer1.handleRead(dgram, now, &buf);
             progressed = true;
         }
-        while (peer1.pollTransmit()) |dgram| {
+        while (peer1.pollTransmit(&out)) |dgram| {
             _ = try peer2.handleRead(dgram, now, &buf);
             progressed = true;
         }
@@ -586,7 +591,7 @@ fn expectSrtpKeyingMaterial(session: *Session) !SrtpProfile {
     return error.NoSrtpKeyingMaterialEvent;
 }
 
-test "Dtls2 session: handshake" {
+test "Dtls session: handshake" {
     var peer1: Session = undefined;
     var peer2: Session = undefined;
     var prng = std.Random.DefaultPrng.init(testing.random_seed);
@@ -600,7 +605,54 @@ test "Dtls2 session: handshake" {
     try testing.expect(peer2.connection_state == .connected);
 }
 
-test "Dtls2 session: pollEvent reports connected transition" {
+test "Dtls session: server resends final flight after it got lost" {
+    var server: Session = undefined;
+    var client: Session = undefined;
+    var prng = std.Random.DefaultPrng.init(testing.random_seed);
+    try createPeers(&server, &client, prng.random());
+    defer server.deinit();
+    defer client.deinit();
+
+    var now: i64 = 0;
+    client.handleTimeout(now);
+
+    var buf: [1500]u8 = undefined;
+    var out: [1500]u8 = undefined;
+    var dropped: usize = 0;
+    var client_retransmitted = false;
+
+    while (server.connection_state != .connected or client.connection_state != .connected) {
+        if (now > 60_000) return error.HandshakeNotCompleted;
+        var progressed = false;
+
+        while (client.pollTransmit(&out)) |dgram| {
+            _ = try server.handleRead(dgram, now, &buf);
+            progressed = true;
+        }
+        while (server.pollTransmit(&out)) |dgram| {
+            progressed = true;
+            if (server.connection_state == .connected and !client_retransmitted) {
+                dropped += 1;
+                continue;
+            }
+            _ = try client.handleRead(dgram, now, &buf);
+        }
+
+        if (!progressed) {
+            now += 1;
+            if (server.pollTimeout()) |deadline| if (now >= deadline) server.handleTimeout(now);
+            if (client.pollTimeout()) |deadline| if (now >= deadline) {
+                if (dropped > 0) client_retransmitted = true;
+                client.handleTimeout(now);
+            };
+        }
+    }
+
+    try testing.expect(dropped > 0);
+    try testing.expect(client_retransmitted);
+}
+
+test "Dtls session: pollEvent reports connected transition" {
     var peer1: Session = undefined;
     var peer2: Session = undefined;
     var prng = std.Random.DefaultPrng.init(testing.random_seed);
@@ -617,7 +669,7 @@ test "Dtls2 session: pollEvent reports connected transition" {
     try testing.expect(saw_connected);
 }
 
-test "Dtls2 session: handshake failed (wrong fingerprint)" {
+test "Dtls session: handshake failed (wrong fingerprint)" {
     var peer1: Session = undefined;
     var peer2: Session = undefined;
     var prng = std.Random.DefaultPrng.init(testing.random_seed);
@@ -633,8 +685,9 @@ test "Dtls2 session: handshake failed (wrong fingerprint)" {
     peer2.handleTimeout(now);
 
     var buf: [1500]u8 = undefined;
+    var out: [1500]u8 = undefined;
     while (true) {
-        if (peer2.pollTransmit()) |dgram| {
+        if (peer2.pollTransmit(&out)) |dgram| {
             if (peer1.handleRead(dgram, now, &buf)) |_| {} else |err| {
                 try testing.expectEqual(error.X509Error, err);
                 try testing.expect(peer1.connection_state == .failed);
@@ -642,7 +695,7 @@ test "Dtls2 session: handshake failed (wrong fingerprint)" {
             }
             continue;
         }
-        if (peer1.pollTransmit()) |dgram| {
+        if (peer1.pollTransmit(&out)) |dgram| {
             if (peer2.handleRead(dgram, now, &buf)) |_| {} else |err| {
                 try testing.expectEqual(error.X509Error, err);
                 try testing.expect(peer2.connection_state == .failed);
@@ -657,7 +710,7 @@ test "Dtls2 session: handshake failed (wrong fingerprint)" {
     }
 }
 
-test "Dtls2 session: export srtp keying material" {
+test "Dtls session: export srtp keying material" {
     var peer1: Session = undefined;
     var peer2: Session = undefined;
     var prng = std.Random.DefaultPrng.init(testing.random_seed);
@@ -683,7 +736,7 @@ test "Dtls2 session: export srtp keying material" {
     );
 }
 
-test "Dtls2 session: close connection" {
+test "Dtls session: close connection" {
     var peer1: Session = undefined;
     var peer2: Session = undefined;
     var prng = std.Random.DefaultPrng.init(testing.random_seed);
@@ -696,7 +749,8 @@ test "Dtls2 session: close connection" {
     peer1.close();
     try testing.expect(peer1.connection_state == .closed);
 
-    const dgram = peer1.pollTransmit() orelse return error.ExpectedTransmit;
+    var out: [1500]u8 = undefined;
+    const dgram = peer1.pollTransmit(&out) orelse return error.ExpectedTransmit;
     var buf: [1500]u8 = undefined;
     _ = try peer2.handleRead(dgram, 0, &buf);
     try testing.expect(peer2.connection_state == .closed);
