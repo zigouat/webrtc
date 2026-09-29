@@ -10,6 +10,9 @@ const HashMap = std.AutoHashMap(u32, ReceiveLog);
 
 const Logger = std.log.scoped(.nack_generator);
 
+const max_payload_size = 1200;
+const srtcp_overhead = 40;
+
 /// Nack generation config
 pub const Config = struct {
     /// How many packets to keep in the receive log for each SSRC.
@@ -77,7 +80,8 @@ pub fn deleteSource(self: *NackGenerator, io: Io, ssrc: u32) void {
 }
 
 fn buildAndSendNack(self: *NackGenerator, pc: *PeerConnection) !void {
-    var buffer: [1240]u8 = @splat(0);
+    var buffer: [max_payload_size + srtcp_overhead]u8 = @splat(0);
+    const payload = buffer[0..max_payload_size];
 
     const duration = Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(self.interval) };
     var timestamp = Io.Clock.Timestamp.now(pc.io, .awake);
@@ -90,22 +94,22 @@ fn buildAndSendNack(self: *NackGenerator, pc: *PeerConnection) !void {
         defer self.mutex.unlock(pc.io);
 
         var it = NackGeneratorIterator.init(self);
-        var slice: []u8 = buffer[0..1200];
+        var slice: []u8 = payload;
         while (true) {
             const msg = it.next(slice) catch {
-                if (slice.len == buffer.len) {
+                if (slice.len == payload.len) {
                     Logger.err("Failed to generate rtcp nack: Buffer too small", .{});
                     break;
                 }
 
-                const data = pc.dtls_transport.handleMediaWrite(&buffer, buffer.len - slice.len, false) catch {
-                    slice = buffer[0..];
+                const data = pc.dtls_transport.handleMediaWrite(&buffer, payload.len - slice.len, false) catch {
+                    slice = payload;
                     continue;
                 };
                 pc.sendData(data) catch |err| {
                     Logger.err("Failed to send rtcp nack: {}", .{err});
                 };
-                slice = buffer[0..];
+                slice = payload;
                 continue;
             };
 
@@ -114,8 +118,8 @@ fn buildAndSendNack(self: *NackGenerator, pc: *PeerConnection) !void {
                 continue;
             }
 
-            if (slice.len != buffer.len) {
-                const data = pc.dtls_transport.handleMediaWrite(&buffer, buffer.len - slice.len, false) catch return;
+            if (slice.len != payload.len) {
+                const data = pc.dtls_transport.handleMediaWrite(&buffer, payload.len - slice.len, false) catch return;
                 pc.sendData(data) catch |err| {
                     Logger.err("Failed to send rtcp nack: {}", .{err});
                 };
