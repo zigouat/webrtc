@@ -1,17 +1,12 @@
 const std = @import("std");
 const rtp = @import("rtp");
 const rtcp = @import("rtcp");
-const PeerConnection = @import("../peer_connection.zig");
 
 const NackGenerator = @This();
-const Io = std.Io;
 const ReceiveLog = @import("receive_log.zig");
 const HashMap = std.AutoHashMap(u32, ReceiveLog);
 
 const Logger = std.log.scoped(.nack_generator);
-
-const max_payload_size = 1200;
-const srtcp_overhead = 40;
 
 /// Nack generation config
 pub const Config = struct {
@@ -24,8 +19,8 @@ pub const Config = struct {
 size: u16,
 interval: u16,
 receive_logs: HashMap,
-group: Io.Group,
-mutex: Io.Mutex,
+deadline: i64,
+it: ?NackGeneratorIterator,
 
 pub fn init(allocator: std.mem.Allocator, config: Config) NackGenerator {
     Logger.debug("Init nack generator", .{});
@@ -34,16 +29,15 @@ pub fn init(allocator: std.mem.Allocator, config: Config) NackGenerator {
         .receive_logs = .init(allocator),
         .size = config.size,
         .interval = config.interval,
-        .group = .init,
-        .mutex = .init,
+        .deadline = std.math.maxInt(i64),
+        .it = null,
     };
 }
 
-pub fn deinit(self: *NackGenerator, io: Io) void {
+pub fn deinit(self: *NackGenerator) void {
     Logger.debug("Deinit nack generator", .{});
 
     const allocator = self.receive_logs.allocator;
-    self.group.cancel(io);
 
     var it = self.receive_logs.iterator();
     while (it.next()) |entry| {
@@ -52,15 +46,7 @@ pub fn deinit(self: *NackGenerator, io: Io) void {
     self.receive_logs.deinit();
 }
 
-pub fn start(self: *NackGenerator, pc: *PeerConnection) !void {
-    Logger.debug("Start sending nack reports", .{});
-    try self.group.concurrent(pc.io, buildAndSendNack, .{ self, pc });
-}
-
-pub fn handleRtpPacket(self: *NackGenerator, io: Io, packet: *const rtp.Packet) !void {
-    self.mutex.lockUncancelable(io);
-    defer self.mutex.unlock(io);
-
+pub fn handleRead(self: *NackGenerator, packet: *const rtp.Packet) !void {
     const entry = try self.receive_logs.getOrPut(packet.header.ssrc);
     errdefer if (!entry.found_existing) self.receive_logs.removeByPtr(entry.key_ptr);
 
@@ -71,62 +57,47 @@ pub fn handleRtpPacket(self: *NackGenerator, io: Io, packet: *const rtp.Packet) 
     entry.value_ptr.add(packet.header.sequence_number);
 }
 
-pub fn deleteSource(self: *NackGenerator, io: Io, ssrc: u32) void {
-    self.mutex.lockUncancelable(io);
-    defer self.mutex.unlock(io);
+pub fn handleTimeout(self: *NackGenerator, now: i64) void {
+    if (self.deadline == std.math.maxInt(i64)) {
+        @branchHint(.cold);
+        self.deadline = now + self.interval;
+        return;
+    }
 
-    if (self.receive_logs.getPtr(ssrc)) |receive_log| receive_log.deinit(self.receive_logs.allocator);
-    _ = self.receive_logs.remove(ssrc);
+    if (now >= self.deadline) {
+        self.deadline = now + self.interval;
+        self.it = NackGeneratorIterator.init(self);
+    }
 }
 
-fn buildAndSendNack(self: *NackGenerator, pc: *PeerConnection) !void {
-    var buffer: [max_payload_size + srtcp_overhead]u8 = @splat(0);
-    const payload = buffer[0..max_payload_size];
+pub fn pollTimeout(self: *NackGenerator) i64 {
+    return self.deadline;
+}
 
-    const duration = Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(self.interval) };
-    var timestamp = Io.Clock.Timestamp.now(pc.io, .awake);
+pub fn pollTransmit(self: *NackGenerator, buffer: []u8) !?[]const u8 {
+    if (self.it == null) return null;
 
+    var slice: []u8 = buffer;
     while (true) {
-        timestamp = timestamp.addDuration(duration);
-        try timestamp.wait(pc.io);
+        const msg = self.it.?.next(slice) catch {
+            if (slice.len == buffer.len) return error.WriteFailed;
+            return buffer[0 .. buffer.len - slice.len];
+        };
 
-        try self.mutex.lock(pc.io);
-        defer self.mutex.unlock(pc.io);
-
-        var it = NackGeneratorIterator.init(self);
-        var slice: []u8 = payload;
-        while (true) {
-            const msg = it.next(slice) catch {
-                if (slice.len == payload.len) {
-                    Logger.err("Failed to generate rtcp nack: Buffer too small", .{});
-                    break;
-                }
-
-                const data = pc.dtls_transport.handleMediaWrite(&buffer, payload.len - slice.len, false) catch {
-                    slice = payload;
-                    continue;
-                };
-                pc.sendData(data) catch |err| {
-                    Logger.err("Failed to send rtcp nack: {}", .{err});
-                };
-                slice = payload;
-                continue;
-            };
-
-            if (msg) |m| {
-                slice = slice[m.len..];
-                continue;
-            }
-
-            if (slice.len != payload.len) {
-                const data = pc.dtls_transport.handleMediaWrite(&buffer, payload.len - slice.len, false) catch return;
-                pc.sendData(data) catch |err| {
-                    Logger.err("Failed to send rtcp nack: {}", .{err});
-                };
-            }
-            break;
+        if (msg) |m| {
+            slice = slice[m.len..];
+            continue;
         }
+
+        if (slice.len != buffer.len) return buffer[0 .. buffer.len - slice.len];
+        self.it = null;
+        return null;
     }
+}
+
+pub fn deleteSource(self: *NackGenerator, ssrc: u32) void {
+    if (self.receive_logs.getPtr(ssrc)) |receive_log| receive_log.deinit(self.receive_logs.allocator);
+    _ = self.receive_logs.remove(ssrc);
 }
 
 const NackGeneratorIterator = struct {
@@ -142,7 +113,7 @@ const NackGeneratorIterator = struct {
         return result;
     }
 
-    fn next(self: *NackGeneratorIterator, buffer: []u8) Io.Writer.Error!?[]const u8 {
+    fn next(self: *NackGeneratorIterator, buffer: []u8) error{WriteFailed}!?[]const u8 {
         if (self.entry == null) return null;
 
         var rtcp_header = rtcp.Header{
@@ -190,52 +161,74 @@ fn testPacket(ssrc: u32, seq: u16) rtp.Packet {
     };
 }
 
+fn triggerNack(gen: *NackGenerator) void {
+    gen.handleTimeout(0);
+    gen.handleTimeout(gen.interval);
+}
+
 test "NackGenerator.handleRtpPacket: failed init" {
     var gen = NackGenerator.init(testing.allocator, .{ .size = 127 });
-    defer gen.deinit(testing.io);
+    defer gen.deinit();
 }
 
-test "NackGenerator.handleRtpPacket: creates one receive log per ssrc" {
-    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
-    defer gen.deinit(testing.io);
+test "NackGenerator.deleteSource" {
+    var gen = NackGenerator.init(testing.allocator, .{});
+    defer gen.deinit();
 
-    try gen.handleRtpPacket(testing.io, &testPacket(1, 1));
+    try gen.handleRead(&testPacket(1, 1));
+    try gen.handleRead(&testPacket(2, 10));
+
+    gen.deleteSource(1);
     try testing.expectEqual(1, gen.receive_logs.count());
-
-    try gen.handleRtpPacket(testing.io, &testPacket(1, 2));
-    try testing.expectEqual(1, gen.receive_logs.count());
-
-    try gen.handleRtpPacket(testing.io, &testPacket(2, 1));
-    try testing.expectEqual(2, gen.receive_logs.count());
 }
 
-test "NackGenerator.generateRtcpNacks: no packet is emitted when nothing is missing" {
-    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
-    defer gen.deinit(testing.io);
+test "NackGenerator.handleTimeout: first call arms the deadline" {
+    var gen = NackGenerator.init(testing.allocator, .{ .interval = 100 });
+    defer gen.deinit();
 
-    try gen.handleRtpPacket(testing.io, &testPacket(1, 1));
-    try gen.handleRtpPacket(testing.io, &testPacket(1, 2));
+    try testing.expectEqual(std.math.maxInt(i64), gen.pollTimeout());
 
-    var buffer: [64]u8 = undefined;
-    var it = NackGeneratorIterator.init(&gen);
-    try testing.expectEqual(null, try it.next(&buffer));
+    try gen.handleRead(&testPacket(1, 1));
+    try gen.handleRead(&testPacket(1, 3));
+
+    gen.handleTimeout(1000);
+    try testing.expectEqual(1100, gen.pollTimeout());
+
+    var buffer: [128]u8 = undefined;
+    try testing.expectEqual(null, try gen.pollTransmit(&buffer));
 }
 
-test "NackGenerator.generateRtcpNacks: emits a NACK listing the missing sequence numbers" {
-    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
-    defer gen.deinit(testing.io);
+test "NackGenerator.handleTimeout: no nack before the deadline" {
+    var gen = NackGenerator.init(testing.allocator, .{ .interval = 100 });
+    defer gen.deinit();
 
-    try gen.handleRtpPacket(testing.io, &testPacket(42, 1));
-    try gen.handleRtpPacket(testing.io, &testPacket(42, 2));
-    try gen.handleRtpPacket(testing.io, &testPacket(42, 5));
+    try gen.handleRead(&testPacket(1, 1));
+    try gen.handleRead(&testPacket(1, 3));
 
-    var buffer: [64]u8 = undefined;
-    var it = NackGeneratorIterator.init(&gen);
-    const data = (try it.next(&buffer)) orelse return error.TestExpectedNack;
+    gen.handleTimeout(1000);
+    gen.handleTimeout(1099);
+    try testing.expectEqual(1100, gen.pollTimeout());
+
+    var buffer: [128]u8 = undefined;
+    try testing.expectEqual(null, try gen.pollTransmit(&buffer));
+}
+
+test "NackGenerator.pollTransmit: emits nack after deadline then returns null" {
+    var gen = NackGenerator.init(testing.allocator, .{ .interval = 100 });
+    defer gen.deinit();
+
+    try gen.handleRead(&testPacket(42, 1));
+    try gen.handleRead(&testPacket(42, 2));
+    try gen.handleRead(&testPacket(42, 5));
+
+    gen.handleTimeout(1000);
+    gen.handleTimeout(1150);
+    try testing.expectEqual(1250, gen.pollTimeout());
+
+    var buffer: [128]u8 = undefined;
+    const data = (try gen.pollTransmit(&buffer)) orelse return error.TestExpectedNack;
 
     const packet = try rtcp.Packet.decode(data);
-    try testing.expectEqual(.rtp_fb, packet.header.payload_type);
-    try testing.expectEqual(.nack, std.meta.activeTag(packet.payload));
     try testing.expectEqual(42, packet.payload.nack.media_ssrc);
 
     var seq_it = packet.payload.nack.iterateSequenceNumbers();
@@ -243,70 +236,218 @@ test "NackGenerator.generateRtcpNacks: emits a NACK listing the missing sequence
     try testing.expectEqual(4, seq_it.next());
     try testing.expectEqual(null, seq_it.next());
 
-    try testing.expectEqual(null, try it.next(&buffer));
+    try testing.expectEqual(null, try gen.pollTransmit(&buffer));
+    try testing.expectEqual(null, gen.it);
+    try testing.expectEqual(null, try gen.pollTransmit(&buffer));
 }
 
-test "NackGenerator.generateRtcpNacks: only ssrcs with missing packets produce a NACK" {
-    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
-    defer gen.deinit(testing.io);
+test "NackGenerator.pollTransmit: nothing missing returns null" {
+    var gen = NackGenerator.init(testing.allocator, .{ .interval = 100 });
+    defer gen.deinit();
 
-    try gen.handleRtpPacket(testing.io, &testPacket(1, 1));
-    try gen.handleRtpPacket(testing.io, &testPacket(1, 2));
+    try gen.handleRead(&testPacket(1, 1));
+    try gen.handleRead(&testPacket(1, 2));
 
-    try gen.handleRtpPacket(testing.io, &testPacket(2, 10));
-    try gen.handleRtpPacket(testing.io, &testPacket(2, 12));
-
-    var buffer: [64]u8 = undefined;
-    var it = NackGeneratorIterator.init(&gen);
-    const data = (try it.next(&buffer)) orelse return error.TestExpectedNack;
-    const packet = try rtcp.Packet.decode(data);
-    try testing.expectEqual(2, packet.payload.nack.media_ssrc);
-
-    try testing.expectEqual(null, try it.next(&buffer));
-}
-
-test "NackGenerator.generateRtcpNacks: build rtcp compound packet" {
-    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
-    defer gen.deinit(testing.io);
-
-    try gen.handleRtpPacket(testing.io, &testPacket(1, 1));
-    try gen.handleRtpPacket(testing.io, &testPacket(1, 4));
-
-    try gen.handleRtpPacket(testing.io, &testPacket(2, 10));
-    try gen.handleRtpPacket(testing.io, &testPacket(2, 12));
+    gen.handleTimeout(1000);
+    gen.handleTimeout(1100);
 
     var buffer: [128]u8 = undefined;
-    var written: usize = 0;
-    var it = NackGeneratorIterator.init(&gen);
-    var data = (try it.next(&buffer)) orelse return error.TestExpectedNack;
-    written += data.len;
-
-    data = (try it.next(buffer[written..])) orelse return error.TestExpectedNack;
-    written += data.len;
-
-    try testing.expectEqual(null, try it.next(buffer[written..]));
-
-    var compound_packet = rtcp.CompoundPacketIterator.init(buffer[0..written]);
-    const packet1 = (try compound_packet.next()) orelse return error.TestExpectedRtcpPacket;
-    try testing.expectEqual(.rtp_fb, packet1.header.payload_type);
-    try testing.expectEqual(.nack, std.meta.activeTag(packet1.payload));
-    try testing.expectEqual(1, packet1.payload.nack.media_ssrc);
-
-    const packet2 = (try compound_packet.next()) orelse return error.TestExpectedRtcpPacket;
-    try testing.expectEqual(.rtp_fb, packet2.header.payload_type);
-    try testing.expectEqual(.nack, std.meta.activeTag(packet2.payload));
-    try testing.expectEqual(2, packet2.payload.nack.media_ssrc);
-
-    try testing.expectEqual(null, try compound_packet.next());
+    try testing.expectEqual(null, try gen.pollTransmit(&buffer));
+    try testing.expectEqual(null, gen.it);
 }
 
-test "NackGenerator.deleteSource" {
-    var gen = NackGenerator.init(testing.allocator, .{});
-    defer gen.deinit(testing.io);
+test "NackGenerator.pollTransmit: buffer too small keeps the iteration" {
+    var gen = NackGenerator.init(testing.allocator, .{ .interval = 100 });
+    defer gen.deinit();
 
-    try gen.handleRtpPacket(testing.io, &testPacket(1, 1));
-    try gen.handleRtpPacket(testing.io, &testPacket(2, 10));
+    try gen.handleRead(&testPacket(42, 1));
+    try gen.handleRead(&testPacket(42, 3));
 
-    gen.deleteSource(testing.io, 1);
+    gen.handleTimeout(1000);
+    gen.handleTimeout(1100);
+
+    var small: [8]u8 = undefined;
+    try testing.expectError(error.WriteFailed, gen.pollTransmit(&small));
+
+    var buffer: [128]u8 = undefined;
+    const data = (try gen.pollTransmit(&buffer)) orelse return error.TestExpectedNack;
+    const packet = try rtcp.Packet.decode(data);
+    try testing.expectEqual(42, packet.payload.nack.media_ssrc);
+
+    try testing.expectEqual(null, try gen.pollTransmit(&buffer));
+}
+
+test "NackGenerator.pollTransmit: resumes when buffer fills up" {
+    var gen = NackGenerator.init(testing.allocator, .{ .interval = 100 });
+    defer gen.deinit();
+
+    try gen.handleRead(&testPacket(1, 1));
+    try gen.handleRead(&testPacket(1, 3));
+    try gen.handleRead(&testPacket(2, 10));
+    try gen.handleRead(&testPacket(2, 12));
+
+    gen.handleTimeout(1000);
+    gen.handleTimeout(1100);
+
+    var buffer: [24]u8 = undefined;
+    var ssrcs: [2]u32 = undefined;
+    for (&ssrcs) |*ssrc| {
+        const data = (try gen.pollTransmit(&buffer)) orelse return error.TestExpectedNack;
+        var compound = rtcp.CompoundPacketIterator.init(data);
+        const packet = (try compound.next()) orelse return error.TestExpectedRtcpPacket;
+        ssrc.* = packet.payload.nack.media_ssrc;
+        try testing.expectEqual(null, try compound.next());
+    }
+
+    try testing.expect(ssrcs[0] != ssrcs[1]);
+    for (ssrcs) |ssrc| try testing.expect(ssrc == 1 or ssrc == 2);
+    try testing.expectEqual(null, try gen.pollTransmit(&buffer));
+}
+
+test "NackGenerator.pollTransmit: new round after next deadline" {
+    var gen = NackGenerator.init(testing.allocator, .{ .interval = 100 });
+    defer gen.deinit();
+
+    try gen.handleRead(&testPacket(1, 1));
+    try gen.handleRead(&testPacket(1, 3));
+
+    gen.handleTimeout(1000);
+    gen.handleTimeout(1100);
+
+    var buffer: [128]u8 = undefined;
+    try testing.expect((try gen.pollTransmit(&buffer)) != null);
+    try testing.expectEqual(null, try gen.pollTransmit(&buffer));
+
+    gen.handleTimeout(1150);
+    try testing.expectEqual(null, try gen.pollTransmit(&buffer));
+
+    gen.handleTimeout(1200);
+    try testing.expect((try gen.pollTransmit(&buffer)) != null);
+    try testing.expectEqual(null, try gen.pollTransmit(&buffer));
+}
+
+test "NackGenerator.handleRead: creates one receive log per ssrc" {
+    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
+    defer gen.deinit();
+
+    try gen.handleRead(&testPacket(1, 1));
     try testing.expectEqual(1, gen.receive_logs.count());
+
+    try gen.handleRead(&testPacket(1, 2));
+    try testing.expectEqual(1, gen.receive_logs.count());
+
+    try gen.handleRead(&testPacket(2, 1));
+    try testing.expectEqual(2, gen.receive_logs.count());
+}
+
+test "NackGenerator.handleRead: invalid log size does not keep the entry" {
+    var gen = NackGenerator.init(testing.allocator, .{ .size = 127 });
+    defer gen.deinit();
+
+    try testing.expectError(error.InvalidSize, gen.handleRead(&testPacket(1, 1)));
+    try testing.expectEqual(0, gen.receive_logs.count());
+}
+
+test "NackGenerator.pollTransmit: only ssrcs with missing packets produce a nack" {
+    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
+    defer gen.deinit();
+
+    try gen.handleRead(&testPacket(1, 1));
+    try gen.handleRead(&testPacket(1, 2));
+    try gen.handleRead(&testPacket(2, 10));
+    try gen.handleRead(&testPacket(2, 12));
+
+    triggerNack(&gen);
+
+    var buffer: [128]u8 = undefined;
+    const data = (try gen.pollTransmit(&buffer)) orelse return error.TestExpectedNack;
+
+    var compound = rtcp.CompoundPacketIterator.init(data);
+    const packet = (try compound.next()) orelse return error.TestExpectedRtcpPacket;
+    try testing.expectEqual(2, packet.payload.nack.media_ssrc);
+
+    var seq_it = packet.payload.nack.iterateSequenceNumbers();
+    try testing.expectEqual(11, seq_it.next());
+    try testing.expectEqual(null, seq_it.next());
+
+    try testing.expectEqual(null, try compound.next());
+    try testing.expectEqual(null, try gen.pollTransmit(&buffer));
+}
+
+test "NackGenerator.pollTransmit: builds rtcp compound packet" {
+    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
+    defer gen.deinit();
+
+    try gen.handleRead(&testPacket(1, 1));
+    try gen.handleRead(&testPacket(1, 4));
+    try gen.handleRead(&testPacket(2, 10));
+    try gen.handleRead(&testPacket(2, 12));
+
+    triggerNack(&gen);
+
+    var buffer: [128]u8 = undefined;
+    const data = (try gen.pollTransmit(&buffer)) orelse return error.TestExpectedNack;
+
+    var compound = rtcp.CompoundPacketIterator.init(data);
+    var seen: [2]bool = @splat(false);
+    for (0..2) |_| {
+        const packet = (try compound.next()) orelse return error.TestExpectedRtcpPacket;
+        try testing.expectEqual(.rtp_fb, packet.header.payload_type);
+        try testing.expectEqual(.nack, std.meta.activeTag(packet.payload));
+
+        const ssrc = packet.payload.nack.media_ssrc;
+        try testing.expect(ssrc == 1 or ssrc == 2);
+        seen[ssrc - 1] = true;
+    }
+
+    try testing.expect(seen[0] and seen[1]);
+    try testing.expectEqual(null, try compound.next());
+    try testing.expectEqual(null, try gen.pollTransmit(&buffer));
+}
+
+test "NackGenerator.pollTransmit: handles sequence number wraparound" {
+    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
+    defer gen.deinit();
+
+    try gen.handleRead(&testPacket(1, 65534));
+    try gen.handleRead(&testPacket(1, 1));
+
+    triggerNack(&gen);
+
+    var buffer: [128]u8 = undefined;
+    const data = (try gen.pollTransmit(&buffer)) orelse return error.TestExpectedNack;
+    const packet = try rtcp.Packet.decode(data);
+
+    var seq_it = packet.payload.nack.iterateSequenceNumbers();
+    try testing.expectEqual(65535, seq_it.next());
+    try testing.expectEqual(0, seq_it.next());
+    try testing.expectEqual(null, seq_it.next());
+}
+
+test "NackGenerator.pollTransmit: missing packet received before deadline is not nacked" {
+    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
+    defer gen.deinit();
+
+    try gen.handleRead(&testPacket(1, 1));
+    try gen.handleRead(&testPacket(1, 3));
+    try gen.handleRead(&testPacket(1, 2));
+
+    triggerNack(&gen);
+
+    var buffer: [128]u8 = undefined;
+    try testing.expectEqual(null, try gen.pollTransmit(&buffer));
+}
+
+test "NackGenerator.pollTransmit: deleted source is not nacked" {
+    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
+    defer gen.deinit();
+
+    try gen.handleRead(&testPacket(1, 1));
+    try gen.handleRead(&testPacket(1, 3));
+    gen.deleteSource(1);
+
+    triggerNack(&gen);
+
+    var buffer: [128]u8 = undefined;
+    try testing.expectEqual(null, try gen.pollTransmit(&buffer));
 }

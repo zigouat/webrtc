@@ -17,6 +17,7 @@ const srtp_profiles = [_]u16{
 const max_srtp_keying_material_size = 30;
 
 const dtls_mtu: u16 = 1400;
+pub const max_write_size = 1200;
 
 pub const ConnectionState = enum { new, connecting, connected, failed, closed };
 pub const Role = enum { client, server };
@@ -240,22 +241,17 @@ pub const Session = struct {
         }
     }
 
-    pub fn handleWrite(session: *Self, data: []const u8, out_buffer: []u8) !usize {
+    pub fn handleWrite(session: *Self, data: []const u8, out_buffer: []u8) usize {
+        std.debug.assert(session.connection_state == .connected);
+        std.debug.assert(data.len <= max_write_size);
+        std.debug.assert(out_buffer.len >= dtls_mtu);
+
         session.direct_out = out_buffer;
         session.direct_out_len = 0;
         defer session.direct_out = null;
 
-        var len = data.len;
-        var offset: usize = 0;
-
-        while (true) {
-            const ret = m.mbedtls_ssl_write(&session.ssl, data.ptr, data.len);
-            if (ret < 0) return error.WriteDataFailed;
-            if (ret < len) {
-                offset += @intCast(ret);
-                len -= @intCast(ret);
-            } else break;
-        }
+        const ret = m.mbedtls_ssl_write(&session.ssl, data.ptr, data.len);
+        std.debug.assert(ret == data.len);
 
         return session.direct_out_len;
     }

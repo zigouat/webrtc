@@ -134,8 +134,8 @@ pub fn handleMediaWrite(transport: *DtlsTransport, buffer: []u8, payload_len: us
         try transport.out_srtp_session.?.encryptRtcp(buffer[0..payload_len], buffer);
 }
 
-pub fn handleWrite(transport: *DtlsTransport, data: []const u8, buffer: []u8) ![]const u8 {
-    const size = try transport.session.handleWrite(data, buffer);
+pub fn handleWrite(transport: *DtlsTransport, data: []const u8, buffer: []u8) []const u8 {
+    const size = transport.session.handleWrite(data, buffer);
     return buffer[0..size];
 }
 
@@ -178,14 +178,14 @@ pub fn pollEvent(transport: *DtlsTransport) ?Event {
 
 pub const Message = union(enum) {
     ice: stun.TransportMessage,
-    dtls: []const u8,
+    bin: []const u8,
     none,
 };
 
 pub fn pollTransmit(transport: *DtlsTransport, buffer: []u8) Message {
     const ice_msg = (transport.ice_agent.pollTransmit(buffer) catch return .none) orelse {
         const dtls_msg = transport.session.pollTransmit(buffer) orelse return .none;
-        return .{ .dtls = dtls_msg };
+        return .{ .bin = dtls_msg };
     };
 
     return .{ .ice = ice_msg };
