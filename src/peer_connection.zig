@@ -264,7 +264,7 @@ pub fn deinit(pc: *PeerConnection) void {
 
     pc.handler = null;
 
-    for (pc.transceivers.items) |tr| tr.deinit(io, pc.allocator);
+    for (pc.transceivers.items) |tr| tr.deinit(pc.allocator);
     pc.transceivers.deinit(pc.allocator);
 
     for (pc.streams.items) |*stream| stream.deinit(pc.allocator);
@@ -677,7 +677,7 @@ fn initTransceiverFromTrack(
     added_by_add_track: bool,
 ) !*RtpTransceiver {
     const tr = try pc.allocator.create(RtpTransceiver);
-    errdefer tr.deinit(pc.io, pc.allocator);
+    errdefer tr.deinit(pc.allocator);
 
     tr.* = .{
         .kind = track.kind,
@@ -1008,7 +1008,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
                         media,
                         @intCast(idx),
                     );
-                    errdefer tr.deinit(io, pc.allocator);
+                    errdefer tr.deinit(pc.allocator);
                     tr.pc = pc;
                     try pc.appendTransceiver(tr);
                     break :blk tr;

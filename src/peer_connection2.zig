@@ -134,7 +134,7 @@ media_engine: *webrtc.MediaEngine,
 random: std.Random,
 
 streams: std.ArrayList(webrtc.MediaStream) = .empty,
-transceivers: std.ArrayList(*webrtc.RtpTransceiver) = .empty,
+transceivers: std.ArrayList(RtpTransceiver) = .empty,
 events: std.Deque(Event),
 dtls_transport: DtlsTransport,
 sctp_transport: SctpTransport,
@@ -199,7 +199,7 @@ const SenderReportIterator = struct {
     fn next(it: *SenderReportIterator, pc: *PeerConnection, buffer: []u8) ?[]const u8 {
         const transceivers = pc.getTransceivers();
         while (it.index < transceivers.len) {
-            const tr = transceivers[it.index];
+            const tr = &transceivers[it.index];
             it.index += 1;
             if (tr.isStopped() or tr.direction == .inactive) continue;
             const data = tr.getRtcpReport(pc.io, it.timestamp, buffer);
@@ -240,7 +240,7 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
 }
 
 pub fn deinit(pc: *PeerConnection) void {
-    for (pc.transceivers.items) |tr| tr.deinit(pc.io, pc.allocator);
+    for (pc.transceivers.items) |*tr| tr.deinit2(pc.allocator);
     pc.transceivers.deinit(pc.allocator);
 
     for (pc.streams.items) |*stream| stream.deinit(pc.allocator);
@@ -269,7 +269,7 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: 
     const io = pc.io;
 
     const transceived_id: ?u32 = blk: {
-        for (pc.transceivers.items, 0..) |tr, idx| if (tr.canAssociateTrack(track.kind)) {
+        for (pc.transceivers.items, 0..) |*tr, idx| if (tr.canAssociateTrack(track.kind)) {
             // We relaxed the canAssociateTrack check to allow reusing a transceiver even if the sender
             // already used for sending data. For that we need to reset the rtp sender.
             tr.sender.reset(io, pc.allocator);
@@ -302,7 +302,7 @@ pub fn removeTrack(pc: *PeerConnection, sender_id: RtpSenderID) error{InvalidSta
     pc.checkNegotiationNeeded();
 }
 
-pub fn getTransceivers(pc: *const PeerConnection) []*RtpTransceiver {
+pub fn getTransceivers(pc: *const PeerConnection) []RtpTransceiver {
     return pc.transceivers.items;
 }
 
@@ -668,12 +668,9 @@ fn initTransceiverFromTrack(
     stream_id: ?[]const u8,
     added_by_add_track: bool,
 ) !RtpTransceiverID {
-    const tr = try pc.allocator.create(RtpTransceiver);
-    errdefer tr.deinit(pc.io, pc.allocator);
-
     try pc.transceivers.ensureUnusedCapacity(pc.allocator, 1);
 
-    tr.* = .{
+    var tr = RtpTransceiver{
         .kind = track.kind,
         .direction = .sendrecv,
         .sender = .init(track),
@@ -713,7 +710,7 @@ fn createFirstOffer(pc: *PeerConnection) !webrtc.SessionDescription {
     var medias = &sdp_session.medias;
 
     var mid = pc.mid;
-    for (transceivers) |tr| {
+    for (transceivers) |*tr| {
         if (tr.stopping and tr.mid == null) continue;
         const media = medias.addOneAssumeCapacity();
         media.* = .empty;
@@ -751,7 +748,7 @@ fn createSubsequentOffer(pc: *PeerConnection) !webrtc.SessionDescription {
     };
 
     const transceivers = pc.transceivers.items;
-    for (transceivers) |tr| if (tr.sdp_mline_index == null) {
+    for (transceivers) |*tr| if (tr.sdp_mline_index == null) {
         if (tr.isStopped()) continue;
         // Check if we can recycle a media
         const media = blk: {
@@ -764,7 +761,7 @@ fn createSubsequentOffer(pc: *PeerConnection) !webrtc.SessionDescription {
                     media.deinit(pc.allocator);
                     media.* = .empty;
 
-                    for (transceivers) |local_tr| if (local_tr.sdp_mline_index) |tr_idx| if (tr_idx == idx) {
+                    for (transceivers) |*local_tr| if (local_tr.sdp_mline_index) |tr_idx| if (tr_idx == idx) {
                         local_tr.sdp_mline_index = null;
                     };
 
@@ -986,18 +983,13 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
                 },
                 .offer => {
                     if (pc.findTransceiverByMid(media.mid)) |tr| break :blk tr;
-                    for (pc.transceivers.items) |tr| if (tr.canAssociateMedia(media)) break :blk tr;
+                    for (pc.transceivers.items) |*tr| if (tr.canAssociateMedia(media)) break :blk tr;
 
-                    const tr = try RtpTransceiver.initFromSdpMedia(
+                    try pc.transceivers.append(
                         pc.allocator,
-                        io,
-                        media,
-                        @intCast(idx),
+                        RtpTransceiver.initFromSdpMedia2(io, media, @intCast(idx)),
                     );
-                    errdefer tr.deinit(io, pc.allocator);
-                    tr.pc = undefined;
-                    try pc.transceivers.append(pc.allocator, tr);
-                    break :blk tr;
+                    break :blk &pc.transceivers.items[pc.transceivers.items.len - 1];
                 },
                 else => unreachable,
             }
@@ -1066,7 +1058,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     try pc.events.ensureUnusedCapacity(pc.allocator, track_events.items.len);
     for (track_events.items) |event| {
         const receiver_id: RtpTransceiverID = blk: {
-            for (pc.transceivers.items, 0..) |tr, idx| if (tr == event.transceiver) break :blk @intCast(idx);
+            for (pc.transceivers.items, 0..) |*tr, idx| if (tr == event.transceiver) break :blk @intCast(idx);
             unreachable;
         };
 
@@ -1096,12 +1088,12 @@ fn updateSignalingStateToStable(pc: *PeerConnection) void {
 }
 
 fn findTransceiverByMediaIndex(pc: *PeerConnection, index: usize) ?*RtpTransceiver {
-    for (pc.transceivers.items) |tr| if (tr.sdp_mline_index) |tr_index| if (tr_index == index) return tr;
+    for (pc.transceivers.items) |*tr| if (tr.sdp_mline_index) |tr_index| if (tr_index == index) return tr;
     return null;
 }
 
 fn findTransceiverByMid(pc: *PeerConnection, mid: Mid.Int) ?*RtpTransceiver {
-    for (pc.transceivers.items) |tr| {
+    for (pc.transceivers.items) |*tr| {
         if (tr.mid) |tr_mid| if (tr_mid == mid) return tr;
     }
 
@@ -1124,7 +1116,7 @@ fn handleRtpData(pc: *PeerConnection, data: []const u8) !ReadResult {
         .none => return .none,
     };
 
-    const tr = pc.transceivers.items[id];
+    const tr = &pc.transceivers.items[id];
     if (try tr.receiver.handleRtpPacket(&packet)) {
         if (tr.receiver.nack) if (pc.nack_generator) |*nack_generator| try nack_generator.handleRead(&packet);
         return .{ .rtp = .{ id, packet } };

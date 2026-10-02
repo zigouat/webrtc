@@ -34,7 +34,7 @@ pub fn deinit(demuxer: *Demuxer) void {
     demuxer.ssrc_to_transceiver.deinit();
 }
 
-pub fn updateMaps(demuxer: *Demuxer, sdp_session: *const SDPSession, transceivers: []const *RtpTransceiver) !void {
+pub fn updateMaps(demuxer: *Demuxer, sdp_session: *const SDPSession, transceivers: []const RtpTransceiver) !void {
     for (sdp_session.getMedias()) |*media| {
         if (demuxer.mid_id == null) for (media.rtp_header_extensions) |ext| if (std.mem.eql(u8, ext.uri, webrtc.mid_extension_uri)) {
             demuxer.mid_id = ext.id;
@@ -91,8 +91,8 @@ fn getMidFromPacket(packet: *const rtp.Packet, mid_id: u16) !?[]const u8 {
     return null;
 }
 
-fn findTransceiverByMid(transceivers: []const *RtpTransceiver, mid: Mid.Int) ?u32 {
-    for (transceivers, 0..) |tr, idx| if (tr.mid) |tr_mid| if (tr_mid == mid) return @intCast(idx);
+fn findTransceiverByMid(transceivers: []const RtpTransceiver, mid: Mid.Int) ?u32 {
+    for (transceivers, 0..) |*tr, idx| if (tr.mid) |tr_mid| if (tr_mid == mid) return @intCast(idx);
     return null;
 }
 
@@ -183,10 +183,10 @@ test "Demuxer.updateMaps" {
     var session = try testSdpSession(allocator);
     defer session.deinit(allocator);
 
-    var tr1 = testTransceiver(mid_1);
-    var tr2 = testTransceiver(mid_2);
-    var tr3 = testTransceiver(mid_3);
-    const transceivers = [_]*RtpTransceiver{ &tr1, &tr2, &tr3 };
+    const tr1 = testTransceiver(mid_1);
+    const tr2 = testTransceiver(mid_2);
+    const tr3 = testTransceiver(mid_3);
+    const transceivers = [_]RtpTransceiver{ tr1, tr2, tr3 };
 
     try demuxer.updateMaps(&session, &transceivers);
 
@@ -228,10 +228,10 @@ test "Demuxer.getTransceiver" {
     var session = try testSdpSession(allocator);
     defer session.deinit(allocator);
 
-    var tr1 = testTransceiver(mid_1);
-    var tr2 = testTransceiver(mid_2);
-    var tr3 = testTransceiver(mid_3);
-    const transceivers = [_]*RtpTransceiver{ &tr1, &tr2, &tr3 };
+    const tr1 = testTransceiver(mid_1);
+    const tr2 = testTransceiver(mid_2);
+    const tr3 = testTransceiver(mid_3);
+    const transceivers = [_]RtpTransceiver{ tr1, tr2, tr3 };
 
     try demuxer.updateMaps(&session, &transceivers);
 
@@ -252,7 +252,6 @@ test "Demuxer.getTransceiver" {
 }
 
 test "Demuxer.registerRandomSsrc: returns unique ssrcs and tracks them" {
-
     var demuxer = init(std.testing.allocator);
     defer demuxer.deinit();
 
@@ -277,10 +276,10 @@ test "Demuxer.getTransceiver: falls back to the mid header extension when ssrc i
     var session = try testSdpSession(allocator);
     defer session.deinit(allocator);
 
-    var tr1 = testTransceiver(mid_1);
-    var tr2 = testTransceiver(mid_2);
-    var tr3 = testTransceiver(mid_3);
-    const transceivers = [_]*RtpTransceiver{ &tr1, &tr2, &tr3 };
+    const tr1 = testTransceiver(mid_1);
+    const tr2 = testTransceiver(mid_2);
+    const tr3 = testTransceiver(mid_3);
+    const transceivers = [_]RtpTransceiver{ tr1, tr2, tr3 };
 
     try demuxer.updateMaps(&session, &transceivers);
     try std.testing.expectEqual(mid_ext_id, demuxer.mid_id.?);
