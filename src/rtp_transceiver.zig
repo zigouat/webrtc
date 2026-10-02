@@ -303,9 +303,9 @@ pub fn processRemoteTrack(tr: *RtpTransceiver, direction: Direction, msid: ?Medi
 /// Get rtcp report of the transceiver.
 ///
 /// For now it only gets sender report
-pub fn getRtcpReport(tr: *RtpTransceiver, io: Io, timestamp: i64, buffer: []u8) []const u8 {
+pub fn getRtcpReport(tr: *RtpTransceiver, timestamp: i64, buffer: []u8) []const u8 {
     return switch (tr.direction) {
-        .sendrecv, .sendonly => tr.sender.writeRtcpSenderReport(io, timestamp, buffer),
+        .sendrecv, .sendonly => tr.sender.writeRtcpSenderReport(timestamp, buffer),
         else => &.{},
     };
 }
@@ -342,10 +342,12 @@ fn newTestRtpTransceiver(io: Io, allocator: std.mem.Allocator) !*RtpTransceiver 
 
 const testing = std.testing;
 const rtcp = @import("rtcp");
+var prng = std.Random.DefaultPrng.init(0xdeadbeef);
 
-fn dummyPeerConnection() !PeerConnection {
-    return try PeerConnection.init(testing.io, testing.allocator, .{
+fn dummyPeerConnection() !webrtc.PeerConnection2 {
+    return try webrtc.PeerConnection2.init(testing.io, testing.allocator, .{
         .media_engine = undefined,
+        .random = prng.random(),
     });
 }
 
@@ -691,8 +693,8 @@ test "getRtcpReport" {
     defer tr.deinit(testing.allocator);
 
     try tr.sender.setCodecs(
-        testing.io,
         testing.allocator,
+        prng.random(),
         webrtc.MediaEngine.supported_video_codecs,
         16,
     );
@@ -706,7 +708,7 @@ test "getRtcpReport" {
         .packet_count = 100,
     };
 
-    const data = tr.getRtcpReport(testing.io, 1782239530300000, &buffer);
+    const data = tr.getRtcpReport(1782239530300000, &buffer);
     const packet = try rtcp.Packet.decode(data);
     try testing.expectEqual(.sender_report, packet.header.payload_type);
     try testing.expectEqual(tr.sender.ssrc, packet.payload.sr.ssrc);
