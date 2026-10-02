@@ -2,7 +2,6 @@ const std = @import("std");
 const constants = @import("constants.zig");
 const webrtc = @import("webrtc.zig");
 const utils = @import("utils.zig");
-const DtlsTransport = @import("dtls_transport.zig");
 const PeerConnection = @import("peer_connection.zig");
 const SDPSession = @import("sdp_session.zig");
 const RtpSender = @import("rtp_sender.zig");
@@ -83,7 +82,7 @@ sdp_mline_index: ?u8 = null,
 stopping: bool = false,
 stopped: bool = false,
 added_by_add_track: bool = false,
-pc: *PeerConnection,
+pc: *webrtc.PeerConnection2 = undefined,
 
 pub fn initFromSdpMedia(allocator: std.mem.Allocator, io: Io, sdp_media: *const SDPSession.Media, index: u8) !*RtpTransceiver {
     const tr = try allocator.create(RtpTransceiver);

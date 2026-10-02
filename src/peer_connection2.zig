@@ -266,13 +266,12 @@ pub fn deinit(pc: *PeerConnection) void {
 /// Adds a new track to the PeerConnection and optionally associates it with a stream.
 pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: ?[]const u8) Error!RtpSenderID {
     try pc.checkNotClosed();
-    const io = pc.io;
 
     const transceived_id: ?u32 = blk: {
         for (pc.transceivers.items, 0..) |*tr, idx| if (tr.canAssociateTrack(track.kind)) {
             // We relaxed the canAssociateTrack check to allow reusing a transceiver even if the sender
             // already used for sending data. For that we need to reset the rtp sender.
-            tr.sender.reset(io, pc.allocator);
+            tr.sender.reset(pc.allocator);
             tr.setSenderTrack(track);
             try pc.generateSsrc(&tr.sender);
 
@@ -328,7 +327,7 @@ pub fn addTransceiverFromKind(pc: *PeerConnection, kind: webrtc.TrackKind, init_
         .direction = init_config.direction,
         .sender = .init(null),
         .receiver = webrtc.RtpReceiver.init(.init(pc.io, kind)),
-        .pc = undefined,
+        .pc = pc,
     };
 
     if (init_config.stream_id) |stream_id| {
@@ -676,7 +675,7 @@ fn initTransceiverFromTrack(
         .sender = .init(track),
         .receiver = webrtc.RtpReceiver.init(track),
         .added_by_add_track = added_by_add_track,
-        .pc = undefined,
+        .pc = pc,
     };
 
     if (stream_id) |sid| {
@@ -923,7 +922,6 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
         if (media.isDataChannel()) continue;
         const tr = pc.findTransceiverByMid(media.mid).?;
         try tr.sender.setCodecs(
-            pc.io,
             pc.allocator,
             media.rtp_codec_parameters,
             pc.nack_config.send_buffer_size,
@@ -1018,7 +1016,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
             const remote_codecs = media.rtp_codec_parameters;
             const codecs = try utils.intersectCodecs(remote_codecs, local_codecs);
 
-            try transceiver.sender.setCodecs(io, pc.allocator, codecs.@"0", pc.nack_config.send_buffer_size);
+            try transceiver.sender.setCodecs(pc.allocator, codecs.@"0", pc.nack_config.send_buffer_size);
             transceiver.receiver.setCodecs(codecs.@"1");
 
             const local_extensions = local_sdp.getMedias()[idx].rtp_header_extensions;
@@ -1268,7 +1266,7 @@ fn addSenderFields(allocator: std.mem.Allocator, media: *SDPSession.Media, tr: *
     }
 }
 
-pub fn generateSsrc(pc: *PeerConnection, sender: *RtpSender) !void {
+fn generateSsrc(pc: *PeerConnection, sender: *RtpSender) !void {
     sender.ssrc = try pc.demuxer.registerRandomSsrc(pc.random);
     sender.rtx_ssrc = try pc.demuxer.registerRandomSsrc(pc.random);
 }

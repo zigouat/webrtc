@@ -26,8 +26,13 @@ const Packetizer = union(enum) {
     opus: rtp.packetizer.Opus,
     none: void,
 
-    fn init(io: Io, ssrc: u32, codec: webrtc.RtpCodecParameters) @This() {
-        var rtp_config = rtp.packetizer.RtpConfig.init(io);
+    fn init(r: std.Random, ssrc: u32, codec: webrtc.RtpCodecParameters) @This() {
+        var rtp_config = rtp.packetizer.RtpConfig{
+            .payload_type = 0,
+            .seq_number = r.uintAtMost(u16, std.math.maxInt(u16)),
+            .ssrc = r.uintAtMost(u32, std.math.maxInt(u32)),
+        };
+
         rtp_config.payload_type = @intCast(codec.payload_type);
         rtp_config.ssrc = ssrc;
 
@@ -94,6 +99,64 @@ rtx_config: ?RtxConfig,
 send_buffer: ?SendBuffer,
 mutex: Io.Mutex,
 
+pub const WriterIterator = struct {
+    tr: *RtpTransceiver,
+    packet_it: PacketIterator,
+
+    const PacketIterator = union(enum) {
+        vp8: rtp.packetizer.VP8.Iterator,
+        h264: rtp.packetizer.H264.Iterator,
+        opus: rtp.packetizer.Opus.Iterator,
+    };
+
+    pub fn init(sender: *RtpSender, media_packet: *const MediaPacket) !WriterIterator {
+        const tr = try checkAndGetTransceiver(sender);
+        const packet_it = switch (tr.sender.packetizer) {
+            .vp8 => |*p| PacketIterator{ .vp8 = p.packetize(media_packet) },
+            .h264 => |*p| PacketIterator{ .h264 = p.packetize(media_packet) },
+            .opus => |*p| PacketIterator{ .opus = p.packetize(media_packet) },
+            else => unreachable,
+        };
+
+        return .{
+            .tr = tr,
+            .packet_it = packet_it,
+        };
+    }
+
+    pub fn next(it: *WriterIterator, buffer: []u8, now_us: i64) !?webrtc.TransportMessage {
+        const sender = &it.tr.sender;
+
+        const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(
+            it.tr.mid.?,
+            buffer[constants.rtp_default_header_size..],
+        );
+        const rtp_buffer = buffer[0 .. header_size + constants.max_rtp_payload_size];
+        var rtp_packet = switch (it.packet_it) {
+            .vp8 => |*packet_it| packet_it.next(rtp_buffer[header_size..]),
+            .h264 => |*packet_it| try packet_it.next(rtp_buffer[header_size..]),
+            .opus => |*packet_it| packet_it.next(rtp_buffer[header_size..]),
+        } orelse return null;
+
+        rtp_packet.header.extension = header_size != constants.rtp_default_header_size;
+        std.mem.writeInt(u96, buffer[0..constants.rtp_default_header_size], @bitCast(rtp_packet.header), .big);
+        const to_send = try it.tr.pc.dtls_transport.handleMediaWrite(
+            buffer,
+            header_size + rtp_packet.payload.len,
+            true,
+        );
+
+        sender.report.recordPacket(&rtp_packet, now_us);
+        if (sender.send_buffer) |*send_buffer| send_buffer.add(&rtp_packet);
+
+        return .{
+            .data = to_send,
+            .from = it.tr.pc.nominated_pair.?.@"0",
+            .to = it.tr.pc.nominated_pair.?.@"1",
+        };
+    }
+};
+
 pub fn init(track: ?MediaStreamTrack) RtpSender {
     return .{
         .track = track,
@@ -118,10 +181,7 @@ pub fn deinit(sender: *RtpSender, allocator: std.mem.Allocator) void {
 }
 
 /// Resets the sender to its initial state, preparing it for reuse.
-pub fn reset(sender: *RtpSender, io: Io, allocator: std.mem.Allocator) void {
-    sender.mutex.lockUncancelable(io);
-    defer sender.mutex.unlock(io);
-
+pub fn reset(sender: *RtpSender, allocator: std.mem.Allocator) void {
     sender.codecs = &.{};
     sender.header_extensions = .{};
     sender.report = .empty;
@@ -146,14 +206,10 @@ pub fn setStream(sender: *RtpSender, stream: webrtc.MediaStream) void {
 
 pub fn setCodecs(
     sender: *RtpSender,
-    io: std.Io,
     allocator: std.mem.Allocator,
     codecs: []const webrtc.RtpCodecParameters,
     send_buffer_size: u16,
 ) !void {
-    sender.mutex.lockUncancelable(io);
-    defer sender.mutex.unlock(io);
-
     const curr_codecs = sender.codecs;
     sender.codecs = codecs;
 
@@ -184,18 +240,16 @@ pub fn setCodecs(
                 constants.max_packet_size,
             );
         }
-    } else {
-        if (sender.send_buffer) |*send_buffer| {
-            send_buffer.deinit(allocator);
-            sender.send_buffer = null;
-        }
+    } else if (sender.send_buffer) |*send_buffer| {
+        send_buffer.deinit(allocator);
+        sender.send_buffer = null;
     }
 
     sender.rtx_config = if (rtx_codec) |rc| .{
         .sequence_number = 0,
         .payload_type = @intCast(rc.payload_type),
     } else null;
-    sender.packetizer = Packetizer.init(io, sender.ssrc, chosen_codec);
+    sender.packetizer = Packetizer.init(tr.pc.random, sender.ssrc, chosen_codec);
     sender.codec = chosen_codec;
 }
 
@@ -205,6 +259,52 @@ pub fn setHeaderExtensions(sender: *RtpSender, extensions: []const webrtc.RtpHea
             sender.header_extensions.mid = ext.id;
         }
     }
+}
+
+pub fn handleMediaPacketWrite(sender: *RtpSender, sample: *const MediaPacket) !WriterIterator {
+    return try WriterIterator.init(sender, sample);
+}
+
+pub fn handleWrite(sender: *RtpSender, packet: *const rtp.Packet, buffer: []u8, now_us: i64) !webrtc.TransportMessage {
+    const tr = try checkAndGetTransceiver(sender);
+
+    const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(
+        tr.mid.?,
+        buffer[constants.rtp_default_header_size..],
+    );
+
+    const header: rtp.Packet.Header = .{
+        .extension = header_size != constants.rtp_default_header_size,
+        .marker = packet.header.marker,
+        .padding = false,
+        .payload_type = @intCast(tr.sender.codec.?.payload_type),
+        .sequence_number = packet.header.sequence_number,
+        .ssrc = sender.ssrc,
+        .timestamp = packet.header.timestamp,
+    };
+
+    std.mem.writeInt(u96, buffer[0..constants.rtp_default_header_size], @bitCast(header), .big);
+    @memcpy(buffer[header_size .. packet.payload.len + header_size], packet.payload);
+
+    const to_send = try tr.pc.dtls_transport.handleMediaWrite(
+        buffer,
+        header_size + packet.payload.len,
+        true,
+    );
+
+    const new_packet: rtp.Packet = .{
+        .header = header,
+        .payload = packet.payload,
+    };
+
+    sender.report.recordPacket(&new_packet, now_us);
+    if (sender.send_buffer) |*send_buffer| send_buffer.add(&new_packet);
+
+    return .{
+        .data = to_send,
+        .from = tr.pc.nominated_pair.?.@"0",
+        .to = tr.pc.nominated_pair.?.@"1",
+    };
 }
 
 /// Sends a media sample to the remote peer.
@@ -368,7 +468,7 @@ fn checkAndGetTransceiver(sender: *RtpSender) !*RtpTransceiver {
     return tr;
 }
 
-fn writeHeaderExtensions(sender: *RtpSender, mid: Mid.Int, buffer: []u8) !usize {
+fn writeHeaderExtensions(sender: *RtpSender, mid: Mid.Int, buffer: []u8) Io.Writer.Error!usize {
     if (sender.header_extensions.mid == 0) return 0;
 
     var w = Io.Writer.fixed(buffer);
