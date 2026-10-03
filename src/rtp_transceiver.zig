@@ -2,13 +2,11 @@ const std = @import("std");
 const constants = @import("constants.zig");
 const webrtc = @import("webrtc.zig");
 const utils = @import("utils.zig");
-const PeerConnection = @import("peer_connection.zig");
 const SDPSession = @import("sdp_session.zig");
 const RtpSender = @import("rtp_sender.zig");
 const RtpReceiver = @import("rtp_receiver.zig");
 const Mid = @import("mid.zig");
 
-const Io = std.Io;
 const RtpTransceiver = @This();
 const MediaStream = webrtc.MediaStream;
 const MediaStreamTrack = webrtc.MediaStreamTrack;

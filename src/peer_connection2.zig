@@ -12,7 +12,7 @@ const SDPAttribute = @import("sdp").Attribute.ParsedAttribute;
 const DtlsTransport = @import("dtls_transport.zig");
 const SctpTransport = @import("sctp_transport.zig");
 const SDPSession = @import("sdp_session.zig");
-const Demuxer = @import("pc/demuxer2.zig");
+const Demuxer = @import("pc/demuxer.zig");
 const RtpTransceiver = @import("rtp_transceiver.zig");
 const RtpSender = @import("rtp_sender.zig");
 const Mid = @import("mid.zig");
@@ -117,6 +117,10 @@ pub const Event = union(enum) {
     channel: DataChannel.Event,
 };
 
+const Transmit = union(enum) {
+    nack: RtpSenderID,
+};
+
 io: std.Io,
 allocator: std.mem.Allocator,
 signaling_state: SignalingState,
@@ -136,6 +140,8 @@ random: std.Random,
 streams: std.ArrayList(webrtc.MediaStream) = .empty,
 transceivers: std.ArrayList(RtpTransceiver) = .empty,
 events: std.Deque(Event),
+transmits: std.Deque(Transmit),
+
 dtls_transport: DtlsTransport,
 sctp_transport: SctpTransport,
 demuxer: Demuxer,
@@ -236,6 +242,7 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
         .int_buffers = buffers,
         .sender_report_deadline = std.math.maxInt(i64),
         .events = .empty,
+        .transmits = .empty,
     };
 }
 
@@ -326,7 +333,7 @@ pub fn addTransceiverFromKind(pc: *PeerConnection, kind: webrtc.TrackKind, init_
         .kind = kind,
         .direction = init_config.direction,
         .sender = .init(null),
-        .receiver = webrtc.RtpReceiver.init(.init(pc.io, kind)),
+        .receiver = webrtc.RtpReceiver.init(.init(kind, pc.random)),
         .pc = pc,
     };
 
@@ -518,7 +525,8 @@ pub const RtcpIterator = struct {
     pub fn next(self: *RtcpIterator) !?struct { RtpTransceiverID, rtcp.Packet } {
         while (try self.it.next()) |packet| switch (packet.payload) {
             .nack => |nack| if (self.pc.findSenderBySsrc(nack.media_ssrc)) |sender_id| {
-                try self.pc.transceivers.items[sender_id].sender.handleNack(nack);
+                try self.pc.transmits.pushBack(self.pc.allocator, .{ .nack = sender_id });
+                try self.pc.transceivers.items[sender_id].sender.handleRtcpNack(self.pc.allocator, nack);
                 return .{ sender_id, packet };
             },
             else => |payload_type| std.log.info("Rtcp: {s}", .{@tagName(payload_type)}),
@@ -627,6 +635,19 @@ pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) !?webrtc.Transp
             break :blk try pc.dtls_transport.handleMediaWrite(buffer, data.len, false);
         };
 
+        while (true) {
+            if (pc.transmits.front()) |entry| switch (entry) {
+                .nack => |sender_id| {
+                    const sender = &pc.transceivers.items[sender_id].sender;
+                    break :blk try sender.nextNack(buffer) orelse {
+                        _ = pc.transmits.popFront();
+                        continue;
+                    };
+                },
+            };
+            break;
+        }
+
         return null;
     };
 
@@ -693,7 +714,7 @@ fn getOrAddStream(pc: *PeerConnection, stream_id: []const u8) !webrtc.MediaStrea
 }
 
 fn createFirstOffer(pc: *PeerConnection) !webrtc.SessionDescription {
-    var w = std.Io.Writer.Allocating.init(pc.allocator);
+    var w = Io.Writer.Allocating.init(pc.allocator);
     errdefer w.deinit();
 
     var sdp_session: SDPSession = .empty;
@@ -734,7 +755,7 @@ fn createSubsequentOffer(pc: *PeerConnection) !webrtc.SessionDescription {
     var sdp_session = try sess_desc.session.clone(pc.allocator);
     errdefer sdp_session.deinit(pc.allocator);
 
-    var w = std.Io.Writer.Allocating.init(pc.allocator);
+    var w = Io.Writer.Allocating.init(pc.allocator);
     errdefer w.deinit();
 
     const app_media: ?*SDPSession.Media = blk: {
@@ -1268,7 +1289,7 @@ fn generateSsrc(pc: *PeerConnection, sender: *RtpSender) !void {
 
 test {
     // _ = @import("tests/peer_connection.zig");
-    _ = @import("pc/demuxer2.zig");
+    _ = @import("pc/demuxer.zig");
     _ = @import("nack/send_buffer.zig");
     _ = @import("nack/receive_log.zig");
     _ = @import("nack/generator.zig");

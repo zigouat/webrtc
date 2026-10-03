@@ -3,12 +3,7 @@ const webrtc = @import("webrtc.zig");
 const rtp = @import("rtp");
 const rtcp = @import("rtcp");
 
-const Io = std.Io;
 const RtpReceiver = @This();
-const DtlsTransport = @import("dtls_transport.zig");
-const Callback = *const fn (userdata: ?*anyopaque, receiver: *RtpReceiver, event: TrackEvent) void;
-
-const queue_size: usize = 16;
 
 /// TrackEvent represents events related to a remote track.
 pub const TrackEvent = union(enum) {
@@ -27,9 +22,6 @@ header_extensions: []const webrtc.RtpHeaderExtensionParameter = &.{},
 ssrc: ?u32,
 //Whether nack is configured for this receiver.
 nack: bool,
-
-user_data: ?*anyopaque = null,
-on_track_event: ?Callback = null,
 
 pub fn init(track: webrtc.MediaStreamTrack) RtpReceiver {
     return .{
@@ -77,29 +69,24 @@ pub fn handleRtpPacket(receiver: *RtpReceiver, packet: *rtp.Packet) !bool {
         receiver.ssrc = packet.header.ssrc;
     }
 
-    if (receiver.on_track_event) |callback| {
-        @branchHint(.likely);
-        callback(receiver.user_data, receiver, .{ .rtp = packet.* });
-    }
-
     return true;
 }
 
 /// Sends a Picture Loss Indication (PLI) RTCP packet to the remote peer.
-pub fn sendPli(receiver: *RtpReceiver) DtlsTransport.SendError!void {
+pub fn sendPli(receiver: *RtpReceiver, buffer: []u8) !webrtc.TransportMessage {
     // 4 bytes header + PLI size is 8 bytes
-    var buffer: [64]u8 = undefined;
     const header: rtcp.Header = .{ .rc = 1, .payload_type = .ps_fb, .length = 2, .padding = false };
     std.mem.writeInt(u32, buffer[0..4], @bitCast(header), .big);
     (rtcp.PLI{ .sender_ssrc = 0, .media_ssrc = receiver.ssrc orelse 0 }).encode(buffer[4..12]);
 
     const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("receiver", receiver));
-    try tr.transport.sendRtcp(&buffer, 12);
-}
+    const data = try tr.pc.dtls_transport.handleMediaWrite(buffer, 12, false);
 
-pub fn registerCallback(receiver: *RtpReceiver, userdata: ?*anyopaque, callback: Callback) void {
-    receiver.user_data = userdata;
-    receiver.on_track_event = callback;
+    return .{
+        .data = data,
+        .from = tr.pc.nominated_pair.?.@"0",
+        .to = tr.pc.nominated_pair.?.@"1",
+    };
 }
 
 const testing = std.testing;

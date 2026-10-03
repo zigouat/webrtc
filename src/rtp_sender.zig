@@ -12,7 +12,8 @@ const MediaPacket = @import("media").Packet;
 const RtpTransceiver = @import("rtp_transceiver.zig");
 const Mid = @import("mid.zig");
 
-pub const SendError = Io.Reader.Error || error{ NoAssociatedTrack, InvalidDirection };
+pub const Error = error{ NoAssociatedTrack, InvalidDirection };
+pub const AllocError = std.mem.Allocator.Error;
 
 const RtpHeaderExtensions = struct {
     mid: u16 = 0,
@@ -95,6 +96,8 @@ report: Report,
 packetizer: Packetizer,
 rtx_config: ?RtxConfig,
 send_buffer: ?SendBuffer,
+/// Store the nacks after processing NACK rtcp packet.
+nacks: std.Deque(u16),
 
 pub const WriterIterator = struct {
     tr: *RtpTransceiver,
@@ -166,10 +169,12 @@ pub fn init(track: ?MediaStreamTrack) RtpSender {
         .packetizer = .none,
         .rtx_config = null,
         .send_buffer = null,
+        .nacks = .empty,
     };
 }
 
 pub fn deinit(sender: *RtpSender, allocator: std.mem.Allocator) void {
+    sender.nacks.deinit(allocator);
     if (sender.send_buffer) |*send_buffer| {
         send_buffer.deinit(allocator);
         sender.send_buffer = null;
@@ -336,19 +341,27 @@ pub fn writeRtcpSenderReport(sender: *RtpSender, timestamp: i64, buffer: []u8) [
     return buffer[0..length];
 }
 
-pub fn handleNack(sender: *RtpSender, nack: rtcp.Nack) !void {
-    const send_buffer = if (sender.send_buffer) |*sb| sb else return;
-    const is_rtx = sender.rtx_config != null;
-    const tr = try checkAndGetTransceiver(sender);
-
+pub fn handleRtcpNack(sender: *RtpSender, allocator: std.mem.Allocator, nack: rtcp.Nack) error{OutOfMemory}!bool {
+    if (sender.send_buffer == null) return false;
+    _ = checkAndGetTransceiver(sender) catch return false;
     var it = nack.iterateSequenceNumbers();
-    var buffer: [1500]u8 = undefined;
+    while (it.next()) |seq| try sender.nacks.pushBack(allocator, seq);
+    return true;
+}
 
-    const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(tr.mid.?, buffer[constants.rtp_default_header_size..]);
-    // RFC 4588: RTX payload is the original sequence number followed by the original payload.
-    const payload_offset = header_size + @as(usize, if (is_rtx) 2 else 0);
+pub fn nextNack(sender: *RtpSender, buffer: []u8) (AllocError || error{WriteFailed})!?[]const u8 {
+    const send_buffer = if (sender.send_buffer) |*sb| sb else return null;
+    const is_rtx = sender.rtx_config != null;
+    const tr = checkAndGetTransceiver(sender) catch return null;
 
-    while (it.next()) |seq| {
+    while (true) {
+        const seq = sender.nacks.popFront() orelse return null;
+        const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(
+            tr.mid.?,
+            buffer[constants.rtp_default_header_size..],
+        );
+        // RFC 4588: RTX payload is the original sequence number followed by the original payload.
+        const payload_offset = header_size + @as(usize, if (is_rtx) 2 else 0);
         const packet = send_buffer.get(seq, buffer[payload_offset..]) orelse continue;
 
         const header: rtp.Packet.Header = .{
@@ -360,13 +373,18 @@ pub fn handleNack(sender: *RtpSender, nack: rtcp.Nack) !void {
             .ssrc = if (is_rtx) sender.rtx_ssrc else sender.ssrc,
             .timestamp = packet.header.timestamp,
         };
+
         if (is_rtx) {
             std.mem.writeInt(u16, buffer[header_size..][0..2], seq, .big);
             sender.rtx_config.?.sequence_number +%= 1;
         }
-
         const payload_len = if (is_rtx) 2 + packet.payload.len else packet.payload.len;
-        try writeHeaderAndSend(tr, header, header_size, payload_len, &buffer);
+        std.mem.writeInt(u96, buffer[0..constants.rtp_default_header_size], @bitCast(header), .big);
+        return tr.pc.dtls_transport.handleMediaWrite(
+            buffer,
+            header_size + payload_len,
+            true,
+        ) catch return error.OutOfMemory;
     }
 }
 
