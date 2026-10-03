@@ -1,5 +1,5 @@
 const std = @import("std");
-const PeerConnection = @import("../peer_connection2.zig");
+const PeerConnection = @import("../peer_connection.zig");
 const webrtc = @import("../webrtc.zig");
 const SDPSession = @import("../sdp_session.zig");
 
@@ -39,7 +39,7 @@ const Connection = struct {
         allocator.destroy(conn.media_engine);
     }
 
-    fn popEvent(conn: *Connection, event_type: PCEnum) ?webrtc.PeerConnection2.Event {
+    fn popEvent(conn: *Connection, event_type: PCEnum) ?webrtc.PeerConnection.Event {
         return blk: {
             while (conn.pc.pollEvent()) |event| if (std.meta.activeTag(event) == event_type) {
                 break :blk event;

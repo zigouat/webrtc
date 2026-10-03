@@ -1,7 +1,6 @@
 pub const DataChannel = @import("data_channel.zig");
 pub const MediaEngine = @import("configuration/media_engine.zig");
-// pub const PeerConnection = @import("peer_connection.zig");
-pub const PeerConnection2 = @import("peer_connection2.zig");
+pub const PeerConnection = @import("peer_connection.zig");
 pub const PeerConnectionHandler = @import("pc/handler.zig");
 pub const RtpTransceiver = @import("rtp_transceiver.zig");
 pub const RtpSender = @import("rtp_sender.zig");
@@ -356,7 +355,7 @@ pub fn getHeaderExtensionCapabilities(kind: TrackKind) []const RtpHeaderExtensio
 
 test {
     testing.refAllDecls(@This());
-    _ = @import("peer_connection2.zig");
+    _ = @import("peer_connection.zig");
     _ = @import("sdp_session.zig");
     _ = @import("rtp_transceiver.zig");
     _ = @import("rtp_sender.zig");

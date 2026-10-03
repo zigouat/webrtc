@@ -80,7 +80,7 @@ sdp_mline_index: ?u8 = null,
 stopping: bool = false,
 stopped: bool = false,
 added_by_add_track: bool = false,
-pc: *webrtc.PeerConnection2 = undefined,
+pc: *webrtc.PeerConnection = undefined,
 
 pub fn initFromSdpMedia(sdp_media: *const SDPSession.Media, r: std.Random, index: u8) RtpTransceiver {
     const track = if (sdp_media.track_id) |track_id|
@@ -311,8 +311,8 @@ const testing = std.testing;
 const rtcp = @import("rtcp");
 var prng = std.Random.DefaultPrng.init(0xdeadbeef);
 
-fn dummyPeerConnection() !webrtc.PeerConnection2 {
-    return try webrtc.PeerConnection2.init(testing.io, testing.allocator, .{
+fn dummyPeerConnection() !webrtc.PeerConnection {
+    return try webrtc.PeerConnection.init(testing.io, testing.allocator, .{
         .media_engine = undefined,
         .random = prng.random(),
     });
