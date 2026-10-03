@@ -240,7 +240,7 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
 }
 
 pub fn deinit(pc: *PeerConnection) void {
-    for (pc.transceivers.items) |*tr| tr.deinit2(pc.allocator);
+    for (pc.transceivers.items) |*tr| tr.deinit(pc.allocator);
     pc.transceivers.deinit(pc.allocator);
 
     for (pc.streams.items) |*stream| stream.deinit(pc.allocator);
@@ -946,8 +946,6 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
 }
 
 fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.SessionDescription) !void {
-    const io = pc.io;
-
     const sdp_text = try pc.allocator.dupe(u8, session_desc.sdp);
     errdefer pc.allocator.free(sdp_text);
 
@@ -982,7 +980,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
 
                     try pc.transceivers.append(
                         pc.allocator,
-                        RtpTransceiver.initFromSdpMedia2(io, media, @intCast(idx)),
+                        RtpTransceiver.initFromSdpMedia(media, pc.random, @intCast(idx)),
                     );
                     break :blk &pc.transceivers.items[pc.transceivers.items.len - 1];
                 },

@@ -119,8 +119,10 @@ fn testPacket(pt: u7) rtp.Packet {
     };
 }
 
+var prng = std.Random.DefaultPrng.init(0xDEADBEEF);
+
 test "RtpReceiver.setCodecs: fill stream infos" {
-    var receiver = RtpReceiver.init(.init(testing.io, .video));
+    var receiver = RtpReceiver.init(.init(.video, prng.random()));
 
     const codecs = [_]webrtc.RtpCodecParameters{
         .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90000 } },
@@ -160,7 +162,7 @@ test "RtpReceiver.setCodecs: fill stream infos" {
 }
 
 test "RtpReceiver.setCodecs: clear stream infos before filling" {
-    var receiver = RtpReceiver.init(.init(testing.io, .video));
+    var receiver = RtpReceiver.init(.init(.video, prng.random()));
 
     const codecs = [_]webrtc.RtpCodecParameters{
         .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90000 } },
@@ -194,7 +196,7 @@ test "RtpReceiver.setCodecs: clear stream infos before filling" {
 }
 
 test "RtpReceiver.handleRtpPacket: handle rtx packets" {
-    var receiver = RtpReceiver.init(.init(testing.io, .video));
+    var receiver = RtpReceiver.init(.init(.video, prng.random()));
 
     receiver.stream_infos[96] = .{ .packet_type = .media, .apt = 0 };
     receiver.stream_infos[97] = .{ .packet_type = .rtx, .apt = 96 };
@@ -222,7 +224,7 @@ test "RtpReceiver.handleRtpPacket: handle rtx packets" {
 }
 
 test "RtpReceiver.handleRtpPacket: ignore packets with unknown payload type" {
-    var receiver = RtpReceiver.init(.init(testing.io, .video));
+    var receiver = RtpReceiver.init(.init(.video, prng.random()));
     receiver.stream_infos[96] = .{ .packet_type = .media, .apt = 0 };
 
     var packet = testPacket(104);
