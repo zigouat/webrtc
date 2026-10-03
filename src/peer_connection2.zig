@@ -121,7 +121,6 @@ const Transmit = union(enum) {
     nack: RtpSenderID,
 };
 
-io: std.Io,
 allocator: std.mem.Allocator,
 signaling_state: SignalingState,
 connection_state: ConnectionState,
@@ -224,7 +223,6 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnectio
     errdefer dtls_transport.deinit();
 
     return .{
-        .io = io,
         .allocator = allocator,
         .random = config.random,
         .signaling_state = .stable,
@@ -268,6 +266,9 @@ pub fn deinit(pc: *PeerConnection) void {
     pc.dtls_transport.deinit();
     pc.demuxer.deinit();
     pc.allocator.destroy(pc.int_buffers);
+
+    pc.events.deinit(pc.allocator);
+    pc.transmits.deinit(pc.allocator);
 }
 
 /// Adds a new track to the PeerConnection and optionally associates it with a stream.
@@ -326,10 +327,7 @@ pub fn addTransceiverFromTrack(pc: *PeerConnection, track: webrtc.MediaStreamTra
 pub fn addTransceiverFromKind(pc: *PeerConnection, kind: webrtc.TrackKind, init_config: RtpTransceiver.Init) Error!RtpTransceiverID {
     try pc.transceivers.ensureUnusedCapacity(pc.allocator, 1);
 
-    const tr = try pc.allocator.create(RtpTransceiver);
-    errdefer pc.allocator.destroy(tr);
-
-    tr.* = .{
+    var tr = RtpTransceiver{
         .kind = kind,
         .direction = init_config.direction,
         .sender = .init(null),
@@ -558,9 +556,14 @@ pub fn handleRead(pc: *PeerConnection, message: webrtc.TransportMessage, now: i6
 pub fn handleTimeout(pc: *PeerConnection, now: i64, wall_clock_us: i64) !void {
     try pc.dtls_transport.handleTimeout(now);
     try pc.sctp_transport.handleTimeout(now);
+
+    if (pc.connection_state == .connected and pc.sender_report_deadline == std.math.maxInt(i64)) {
+        pc.sender_report_deadline = now + pc.random.intRangeAtMost(u16, 500, 1500);
+    }
+
     if (now >= pc.sender_report_deadline) {
         pc.sender_report_deadline = now + pc.random.intRangeAtMost(u16, 500, 1500);
-        if (pc.connection_state == .connected) pc.sender_report_it = .{ .timestamp = wall_clock_us };
+        pc.sender_report_it = .{ .timestamp = wall_clock_us };
     }
     if (pc.nack_generator) |*ng| ng.handleTimeout(now);
 }
@@ -1174,14 +1177,6 @@ fn maybeConnectSctpTransport(pc: *PeerConnection) !void {
 }
 
 fn startRtpRtcpInterceptors(pc: *PeerConnection) !void {
-    const io = pc.io;
-
-    // Init sender reports
-    if (pc.sender_report_deadline == std.math.maxInt(i64)) {
-        const now = Io.Timestamp.now(io, .awake).toMilliseconds();
-        pc.sender_report_deadline = now + 1000;
-    }
-
     // Nack generators
     var nack = false;
     for (pc.getTransceivers()) |tr| {
@@ -1288,7 +1283,7 @@ fn generateSsrc(pc: *PeerConnection, sender: *RtpSender) !void {
 }
 
 test {
-    // _ = @import("tests/peer_connection.zig");
+    _ = @import("tests/peer_connection.zig");
     _ = @import("pc/demuxer.zig");
     _ = @import("nack/send_buffer.zig");
     _ = @import("nack/receive_log.zig");
