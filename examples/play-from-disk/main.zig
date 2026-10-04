@@ -6,9 +6,8 @@ const webrtc = @import("webrtc");
 const ice = @import("ice");
 const IvfReader = @import("common").IvfReader;
 
-const Io = std.Io;
-
 const html_file = @embedFile("index.html");
+const Io = std.Io;
 
 var grp: Io.Group = .init;
 
