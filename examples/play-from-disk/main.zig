@@ -3,6 +3,7 @@ const media = @import("media");
 const ivf = @import("ivf");
 const rtp = @import("rtp");
 const webrtc = @import("webrtc");
+const ice = @import("ice");
 const IvfReader = @import("common").IvfReader;
 
 const Io = std.Io;
@@ -23,7 +24,11 @@ const ConnectionContext = struct {
     prng: std.Random.DefaultCsprng,
 
     fn init(conn: *ConnectionContext, io: std.Io, allocator: std.mem.Allocator, media_engine: *webrtc.MediaEngine) !void {
-        const socket = try (try Io.net.IpAddress.parse("192.168.8.157", 0)).bind(io, .{ .mode = .dgram });
+        var if_it = try ice.IfIterator.init(allocator, .{});
+        defer if_it.deinit(allocator);
+
+        const addr = if_it.next() orelse return error.NoNetworkInterface;
+        const socket = try addr.bind(io, .{ .mode = .dgram });
         errdefer socket.close(io);
 
         var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = undefined;

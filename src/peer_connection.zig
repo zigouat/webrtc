@@ -524,7 +524,7 @@ pub const RtcpIterator = struct {
         while (try self.it.next()) |packet| switch (packet.payload) {
             .nack => |nack| if (self.pc.findSenderBySsrc(nack.media_ssrc)) |sender_id| {
                 try self.pc.transmits.pushBack(self.pc.allocator, .{ .nack = sender_id });
-                try self.pc.transceivers.items[sender_id].sender.handleRtcpNack(self.pc.allocator, nack);
+                _ = try self.pc.transceivers.items[sender_id].sender.handleRtcpNack(self.pc.allocator, nack);
                 return .{ sender_id, packet };
             },
             else => |payload_type| std.log.info("Rtcp: {s}", .{@tagName(payload_type)}),
@@ -1218,7 +1218,7 @@ fn toSdpMedia(pc: *PeerConnection, tr: *RtpTransceiver) std.mem.Allocator.Error!
     return media;
 }
 
-fn toSdpMediaAnswer(pc: *const PeerConnection, tr: *const RtpTransceiver, media: *SDPSession.Media) std.mem.Allocator.Error!SDPSession.Media {
+fn toSdpMediaAnswer(pc: *const PeerConnection, tr: *const RtpTransceiver, media: *const SDPSession.Media) std.mem.Allocator.Error!SDPSession.Media {
     var answer: SDPSession.Media = .empty;
     errdefer answer.deinit(pc.allocator);
 
@@ -1257,7 +1257,7 @@ fn toSdpMediaAnswer(pc: *const PeerConnection, tr: *const RtpTransceiver, media:
         answer.setIceCredentials(pc.dtls_transport.ice_agent.getLocalCredentials());
     }
 
-    if (!rejected) try addSenderFields(pc.allocator, media, tr);
+    if (!rejected) try addSenderFields(pc.allocator, &answer, tr);
     return answer;
 }
 

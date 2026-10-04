@@ -56,6 +56,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "rtp", .module = protocols.module("rtp") },
                     .{ .name = "webrtc", .module = webrtc.module("webrtc") },
                     .{ .name = "ivf", .module = media_formats.module("ivf") },
+                    .{ .name = "ice", .module = protocols.module("ice") },
                 },
             }),
         });
