@@ -527,7 +527,8 @@ pub const RtcpIterator = struct {
                 _ = try self.pc.transceivers.items[sender_id].sender.handleRtcpNack(self.pc.allocator, nack);
                 return .{ sender_id, packet };
             },
-            else => |payload_type| std.log.info("Rtcp: {s}", .{@tagName(payload_type)}),
+            .pli => |pli| if (self.pc.findSenderBySsrc(pli.media_ssrc)) |sender_id| return .{ sender_id, packet },
+            else => |payload_type| Logger.debug("Received rtcp: {s}", .{@tagName(payload_type)}),
         };
 
         return null;
