@@ -1,6 +1,6 @@
 # WebRTC
 
-Zig implementation of the WebRTC API.
+A sans-io zig implementation of the WebRTC API.
 
 ## Status
 
@@ -16,10 +16,7 @@ Tested platforms:
 * Windows x86_64 (with zio)
 
 ## Architecture
-The architecture follows the WebRTC specification (at least for the API surface). It uses `std.Io` for IO. This decouples the library from the I/O implementation and allows for more flexibility in how the library is used (it can be used with thread pool or async I/O, for example).
-
-## New Archecture
-The new architecture will be sans-io, the library will not do any I/O, it will only provide the WebRTC API and the user will have to implement the I/O themselves. Currently the Ice agent and dtls are moved to sans-io, the next step is to move the SCTP and the whole PeerConnection API to sans-io.
+The implementation is a sans-io, the library will not do any I/O, it will only provide the WebRTC API and the user will have to implement the I/O themselves (e.g. sockets, timers, ...etc.).
 
 ## Features
 The end goal is to implement the whole WebRTC API in pure Zig, the current implementation has the following features:
@@ -32,6 +29,7 @@ The end goal is to implement the whole WebRTC API in pure Zig, the current imple
 * Sending and receiving Opus audio streams.
 * Bundling of the above features into a `PeerConnection` API. (Note: only bundling is supported for now, no unbundling yet)
 * RTCP sender report, PLI feedback and NACK/RTX support.
+* Data channels (support for reliable (un)ordered delivery).
 
 ## Installation
 Add `webrtc` as a dependency in your `build.zig.zon` file:

@@ -114,7 +114,7 @@ pub const Event = union(enum) {
     connection_state: ConnectionState,
     gathering_state: GatheringState,
     track: TrackEventInit,
-    channel: DataChannel.Event,
+    data_channel: DataChannel.Event,
 };
 
 const Transmit = union(enum) {
@@ -535,6 +535,10 @@ pub const RtcpIterator = struct {
     }
 };
 
+/// Process a received datagram packet.
+///
+/// Not that in the case of RTP/RTCP packets, the packet is decrypted in place. Meaning that the data
+/// slice will be modified and the caller should not use it after this call.
 pub fn handleRead(pc: *PeerConnection, message: webrtc.TransportMessage, now: i64) !ReadResult {
     const data_event = (try pc.dtls_transport.handleRead(
         message,
@@ -575,7 +579,7 @@ pub fn pollEvent(pc: *PeerConnection) ?Event {
             const sctp_event = pc.sctp_transport.pollEvent() orelse break;
             switch (sctp_event) {
                 .connection_state => |state| Logger.info("SCTP connection state changed: {}", .{state}),
-                .data_channel => |dc_event| return .{ .channel = dc_event },
+                .data_channel => |dc_event| return .{ .data_channel = dc_event },
             }
             continue;
         };
