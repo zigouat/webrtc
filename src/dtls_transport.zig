@@ -126,6 +126,20 @@ pub fn addIceLocalAddrs(transport: *DtlsTransport, addrs: []const Io.net.IpAddre
     try transport.drainEvents(now);
 }
 
+pub fn addIceStunServer(transport: *DtlsTransport, addr: Io.net.IpAddress, stun_server: Io.net.IpAddress) !void {
+    try transport.ice_agent.addStunServer(addr, stun_server);
+}
+
+pub fn addIceTurnServer(
+    transport: *DtlsTransport,
+    addr: Io.net.IpAddress,
+    turn_server: Io.net.IpAddress,
+    username: []const u8,
+    password: []const u8,
+) !void {
+    try transport.ice_agent.addTurnServer(addr, turn_server, username, password);
+}
+
 pub fn handleMediaWrite(transport: *DtlsTransport, buffer: []u8, payload_len: usize, comptime is_rtp: bool) ![]const u8 {
     return if (is_rtp)
         try transport.out_srtp_session.?.encryptRtp(buffer[0..payload_len], buffer)

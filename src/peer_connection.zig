@@ -678,6 +678,20 @@ pub fn addLocalCandidates(pc: *PeerConnection, addrs: []const Io.net.IpAddress, 
     try pc.dtls_transport.addIceLocalAddrs(addrs, now);
 }
 
+pub fn addStunServer(pc: *PeerConnection, local_addr: Io.net.IpAddress, stun_server: Io.net.IpAddress) !void {
+    try pc.dtls_transport.addIceStunServer(local_addr, stun_server);
+}
+
+pub fn addTurnServer(
+    pc: *PeerConnection,
+    local_addr: Io.net.IpAddress,
+    turn_server: Io.net.IpAddress,
+    username: []const u8,
+    password: []const u8,
+) !void {
+    try pc.dtls_transport.addIceTurnServer(local_addr, turn_server, username, password);
+}
+
 fn deinitDescriptions(pc: *PeerConnection, descriptions: []const *?ParsedSessionDescription) void {
     for (descriptions) |desc| if (desc.*) |*d| d.deinit(pc.allocator);
 }
