@@ -42,7 +42,7 @@ pub fn writeSdpToStdout(io: Io, allocator: std.mem.Allocator, pc: *webrtc.PeerCo
     try stdout.flush();
 }
 
-pub fn rand_string(io: Io, buffer: []u8) void {
+pub fn randString(io: Io, buffer: []u8) void {
     const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
     var rng = std.Random.DefaultPrng.init(@bitCast(Io.Timestamp.now(io, .awake).toMilliseconds()));

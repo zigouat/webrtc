@@ -7,89 +7,10 @@ const testing = std.testing;
 
 const io = testing.io;
 const allocator = testing.allocator;
-const PCEnum = @typeInfo(Event).@"union".tag_type.?;
-
-const Event = union(enum) {
-    negotiation_needed: void,
-    signaling_state: PeerConnection.SignalingState,
-    connection_state: PeerConnection.ConnectionState,
-    gathering_state: PeerConnection.GatheringState,
-    track: webrtc.RtpTransceiver.TrackEventInit,
-};
-
-const PCHandler = struct {
-    events: std.ArrayList(Event),
-    mutex: std.Io.Mutex,
-
-    fn init() PCHandler {
-        return .{ .events = .empty, .mutex = .init };
-    }
-
-    fn deinit(handler: *PCHandler) void {
-        handler.events.deinit(allocator);
-    }
-
-    fn popEvent(handler: *PCHandler, event_type: PCEnum) ?Event {
-        handler.mutex.lockUncancelable(io);
-        defer handler.mutex.unlock(io);
-
-        for (handler.events.items, 0..) |event, idx| {
-            if (std.meta.activeTag(event) == event_type) {
-                return handler.events.orderedRemove(idx);
-            }
-        }
-
-        return null;
-    }
-
-    fn peerConnectionHandler(handler: *PCHandler) webrtc.PeerConnectionHandler {
-        return .{
-            .userdata = handler,
-            .vtable = &.{
-                .onNegotiationNeeded = onNegotiationNeeded,
-                .onSignalingStateChange = onSignalingStateChange,
-                .onConnectionStateChange = onConnectionStateChange,
-                .onGatheringStateChange = onGatheringStateChange,
-                .onTrack = onTrack,
-            },
-        };
-    }
-
-    fn onNegotiationNeeded(userdata: ?*anyopaque) void {
-        const handler: *PCHandler = @ptrCast(@alignCast(userdata.?));
-        handler.appendEntry(.negotiation_needed) catch @panic("OOM");
-    }
-
-    fn onSignalingStateChange(userdata: ?*anyopaque, state: PeerConnection.SignalingState) void {
-        const handler: *PCHandler = @ptrCast(@alignCast(userdata.?));
-        handler.appendEntry(.{ .signaling_state = state }) catch @panic("OOM");
-    }
-
-    fn onConnectionStateChange(userdata: ?*anyopaque, state: PeerConnection.ConnectionState) void {
-        const handler: *PCHandler = @ptrCast(@alignCast(userdata.?));
-        handler.appendEntry(.{ .connection_state = state }) catch @panic("OOM");
-    }
-
-    fn onGatheringStateChange(userdata: ?*anyopaque, state: PeerConnection.GatheringState) void {
-        const handler: *PCHandler = @ptrCast(@alignCast(userdata.?));
-        handler.appendEntry(.{ .gathering_state = state }) catch @panic("OOM");
-    }
-
-    fn onTrack(userdata: ?*anyopaque, event: webrtc.RtpTransceiver.TrackEventInit) void {
-        const handler: *PCHandler = @ptrCast(@alignCast(userdata.?));
-        handler.appendEntry(.{ .track = event }) catch @panic("OOM");
-    }
-
-    fn appendEntry(handler: *PCHandler, event: Event) !void {
-        handler.mutex.lockUncancelable(io);
-        defer handler.mutex.unlock(io);
-        try handler.events.append(allocator, event);
-    }
-};
+const PCEnum = @typeInfo(PeerConnection.Event).@"union".tag_type.?;
 
 const Connection = struct {
     pc: PeerConnection,
-    handler: *PCHandler,
     media_engine: *webrtc.MediaEngine,
 
     const Config = struct {
@@ -104,33 +25,31 @@ const Connection = struct {
         try media_engine.registerDefaultCodecs(allocator);
         errdefer media_engine.deinit(allocator);
 
-        const handler = try allocator.create(PCHandler);
-        errdefer allocator.destroy(handler);
-
-        handler.* = PCHandler.init();
-        errdefer handler.deinit();
-
         const pc = try PeerConnection.init(io, allocator, .{
             .media_engine = media_engine,
-            .handler = handler.peerConnectionHandler(),
+            .random = prng.random(),
         });
 
-        return .{ .pc = pc, .handler = handler, .media_engine = media_engine };
+        return .{ .pc = pc, .media_engine = media_engine };
     }
 
     fn deinit(conn: *Connection) void {
         conn.pc.deinit();
-        conn.handler.deinit();
         conn.media_engine.deinit(allocator);
-        allocator.destroy(conn.handler);
         allocator.destroy(conn.media_engine);
     }
 
-    fn popEvent(conn: *Connection, event_type: PCEnum) ?Event {
-        return conn.handler.popEvent(event_type);
+    fn popEvent(conn: *Connection, event_type: PCEnum) ?webrtc.PeerConnection.Event {
+        return blk: {
+            while (conn.pc.pollEvent()) |event| if (std.meta.activeTag(event) == event_type) {
+                break :blk event;
+            };
+
+            break :blk null;
+        };
     }
 
-    fn expectEvent(conn: *Connection, comptime event_type: PCEnum, expected: @FieldType(Event, @tagName(event_type))) !void {
+    fn expectEvent(conn: *Connection, comptime event_type: PCEnum, expected: @FieldType(PeerConnection.Event, @tagName(event_type))) !void {
         const event = conn.popEvent(event_type);
         try std.testing.expect(event != null);
         try std.testing.expectEqual(event_type, std.meta.activeTag(event.?));
@@ -149,28 +68,36 @@ fn testMediaEngine(enable_rtx: bool) !webrtc.MediaEngine {
     return engine;
 }
 
-test "init" {
+var prng = std.Random.DefaultPrng.init(0xDEADBEEF);
+
+test "PeerConnection.init" {
     var media_engine = try testMediaEngine(false);
     defer media_engine.deinit(testing.allocator);
 
-    var pc = try PeerConnection.init(testing.io, testing.allocator, .{ .media_engine = &media_engine });
+    var pc = try PeerConnection.init(testing.io, testing.allocator, .{
+        .media_engine = &media_engine,
+        .random = prng.random(),
+    });
     defer pc.deinit();
 }
 
-test "addTransceiverFromKind: no leak on allocation failure" {
+test "PeerConnection.addTransceiverFromKind: no leak on allocation failure" {
     try std.testing.checkAllAllocationFailures(testing.allocator, struct {
         fn run(alloc: std.mem.Allocator) !void {
             var media_engine = try testMediaEngine(false);
             defer media_engine.deinit(testing.allocator);
 
-            var pc = try PeerConnection.init(io, alloc, .{ .media_engine = &media_engine });
+            var pc = try PeerConnection.init(io, alloc, .{
+                .media_engine = &media_engine,
+                .random = prng.random(),
+            });
             defer pc.deinit();
             _ = try pc.addTransceiverFromKind(.video, .{ .direction = .sendrecv, .stream_id = "stream" });
         }
     }.run, .{});
 }
 
-test "setLocalDescription: set offer" {
+test "PeerConnection.setLocalDescription: set offer" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();
@@ -181,7 +108,7 @@ test "setLocalDescription: set offer" {
     try conn.expectEvent(.signaling_state, .have_local_offer);
 }
 
-test "setLocalDescription: set offer multiple times" {
+test "PeerConnection.setLocalDescription: set offer multiple times" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();
@@ -196,7 +123,7 @@ test "setLocalDescription: set offer multiple times" {
     try pc.setLocalDescription(offer);
 }
 
-test "setLocalDescription: invalid state" {
+test "PeerConnection.setLocalDescription: invalid state" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();
@@ -214,7 +141,7 @@ test "setLocalDescription: invalid state" {
     try testing.expectError(error.InvalidState, pc.setLocalDescription(.{ .type = .offer, .sdp = sdp }));
 }
 
-test "setRemoteDescription: set offer" {
+test "PeerConnection.setRemoteDescription: set offer" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();
@@ -225,7 +152,7 @@ test "setRemoteDescription: set offer" {
         \\s=-
         \\t=0 0
         \\a=group:BUNDLE 0
-        \\a=ice-options:ice2 
+        \\a=ice-options:ice2
         \\a=fingerprint:sha-256 A4:14:A3:5D:02:35:5B:E0:C6:E0:EF:7D:D9:63:3F:30:D4:FD:43:76:50:A8:25:4A:96:25:F1:8A:0A:DC:F4:26
         \\m=video 9 UDP/TLS/RTP/SAVPF 96
         \\c=IN IP4 0.0.0.0
@@ -247,7 +174,7 @@ test "setRemoteDescription: set offer" {
     try conn.expectNoEvent(.signaling_state);
 }
 
-test "setRemoteDescription: set offer - do not reject bundle only m-lines" {
+test "PeerConnection.setRemoteDescription: set offer - do not reject bundle only m-lines" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();
@@ -258,7 +185,7 @@ test "setRemoteDescription: set offer - do not reject bundle only m-lines" {
         \\s=-
         \\t=0 0
         \\a=group:BUNDLE 0 1
-        \\a=ice-options:ice2 
+        \\a=ice-options:ice2
         \\a=fingerprint:sha-256 A4:14:A3:5D:02:35:5B:E0:C6:E0:EF:7D:D9:63:3F:30:D4:FD:43:76:50:A8:25:4A:96:25:F1:8A:0A:DC:F4:26
         \\m=video 9 UDP/TLS/RTP/SAVPF 96
         \\c=IN IP4 0.0.0.0
@@ -293,7 +220,7 @@ test "setRemoteDescription: set offer - do not reject bundle only m-lines" {
     }
 }
 
-test "setRemoteDescription: set offer - data channel media does not create a transceiver" {
+test "PeerConnection.setRemoteDescription: set offer - data channel media does not create a transceiver" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();
@@ -332,7 +259,7 @@ test "setRemoteDescription: set offer - data channel media does not create a tra
     try std.testing.expectEqual(.video, pc.getTransceivers()[0].kind);
 }
 
-test "setRemoteDescription: invalid state" {
+test "PeerConnection.setRemoteDescription: invalid state" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();
@@ -353,42 +280,41 @@ test "setRemoteDescription: invalid state" {
     try testing.expectError(error.InvalidState, pc.setRemoteDescription(.{ .type = .offer, .sdp = sdp }));
 }
 
-test "addTrack" {
+test "PeerConnection.addTrack" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();
 
-    const track: webrtc.MediaStreamTrack = .init(testing.io, .video);
+    const track: webrtc.MediaStreamTrack = .init(.video, prng.random());
 
     _ = try pc.addTrack(track, null);
     try std.testing.expectEqual(1, pc.transceivers.items.len);
 
-    const tr = try pc.addTransceiverFromKind(.video, .{ .direction = .recvonly });
+    const trasceiver_id = try pc.addTransceiverFromKind(.video, .{ .direction = .recvonly });
+    const tr = &pc.getTransceivers()[trasceiver_id];
     try std.testing.expect(tr.sender.track == null);
 
-    const sender = try pc.addTrack(.initWithId("track2", .video), null);
-    try std.testing.expectEqual(sender, &tr.sender);
+    const sender_id = try pc.addTrack(.initWithId("track2", .video), null);
+    try std.testing.expectEqual(sender_id, trasceiver_id);
     try std.testing.expectEqual(2, pc.transceivers.items.len);
     try std.testing.expect(tr.sender.track != null);
     try std.testing.expectEqualStrings("track2", tr.sender.track.?.getId());
 }
 
-test "removeTrack" {
+test "PeerConnection.removeTrack" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();
 
-    const sender = try pc.addTrack(.initWithId("track1", .video), null);
-    try pc.removeTrack(sender);
+    const sender_id = try pc.addTrack(.initWithId("track1", .video), null);
+    try pc.removeTrack(sender_id);
 
-    const tr = pc.getTransceivers()[0];
-
-    try testing.expect(sender.track == null);
+    const tr = &pc.getTransceivers()[sender_id];
     try testing.expect(tr.sender.track == null);
     try testing.expectEqual(.recvonly, tr.direction);
 }
 
-test "addTransceiver" {
+test "PeerConnection.addTransceiver" {
     {
         var conn = try Connection.init(.{});
         var pc = &conn.pc;
@@ -396,10 +322,11 @@ test "addTransceiver" {
 
         const track: webrtc.MediaStreamTrack = .initWithId("track1", .video);
 
-        const tr = try pc.addTransceiverFromTrack(track, .{
+        const transceiver_id = try pc.addTransceiverFromTrack(track, .{
             .direction = .sendrecv,
             .stream_id = "stream-1",
         });
+        const tr = &pc.getTransceivers()[transceiver_id];
         try std.testing.expectEqual(1, pc.transceivers.items.len);
         try std.testing.expectEqual(.sendrecv, tr.direction);
         try std.testing.expectEqualStrings(&track.id, &tr.sender.track.?.id);
@@ -408,7 +335,8 @@ test "addTransceiver" {
         const sender_track = tr.sender.track.?;
         try std.testing.expectEqualStrings("stream-1", sender_track.stream_id.?);
 
-        const tr2 = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
+        const tr2_id = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
+        const tr2 = &pc.getTransceivers()[tr2_id];
         try std.testing.expectEqual(2, pc.transceivers.items.len);
         try std.testing.expectEqual(.recvonly, tr2.direction);
         try std.testing.expect(tr2.sender.track == null);
@@ -421,27 +349,31 @@ test "addTransceiver" {
         var media_engine = try testMediaEngine(false);
         defer media_engine.deinit(testing.allocator);
 
-        var failing_alloc = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 7 });
-        var pc = try PeerConnection.init(testing.io, failing_alloc.allocator(), .{ .media_engine = &media_engine });
+        var failing_alloc = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 6 });
+        var pc = try PeerConnection.init(testing.io, failing_alloc.allocator(), .{
+            .media_engine = &media_engine,
+            .random = prng.random(),
+        });
         defer pc.deinit();
 
         try std.testing.expectError(error.OutOfMemory, pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly }));
     }
 }
 
-test "stopTransceiver" {
+test "PeerConnection.stopTransceiver" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();
 
-    const tr = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
+    const tr_id = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
+    const tr = &pc.getTransceivers()[tr_id];
     try std.testing.expect(!tr.isStopped());
 
     tr.stop();
     try std.testing.expect(tr.isStopped());
 }
 
-test "createOffer: empty offer" {
+test "PeerConnection.createOffer: empty offer" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();
@@ -453,7 +385,7 @@ test "createOffer: empty offer" {
     try testing.expectEqual(0, sdp_session.getMedias().len);
 }
 
-test "createOffer: m-lines created for each transceiver" {
+test "PeerConnection.createOffer: m-lines created for each transceiver" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();
@@ -478,7 +410,7 @@ test "createOffer: m-lines created for each transceiver" {
     }
 }
 
-test "createOffer: enable_rtx synthesizes rtx codecs for video only" {
+test "PeerConnection.createOffer: enable_rtx synthesizes rtx codecs for video only" {
     var conn = try Connection.init(.{ .enable_rtx = true });
     var pc = &conn.pc;
     defer conn.deinit();
@@ -504,7 +436,7 @@ test "createOffer: enable_rtx synthesizes rtx codecs for video only" {
     }
 }
 
-test "createOffer: enable_rtx defaults to false, never emits rtx codecs" {
+test "PeerConnection.createOffer: enable_rtx defaults to false, never emits rtx codecs" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();
@@ -520,12 +452,13 @@ test "createOffer: enable_rtx defaults to false, never emits rtx codecs" {
     }
 }
 
-test "createOffer: stopped non-associted transceiver is ignored" {
+test "PeerConnection.createOffer: stopped non-associted transceiver is ignored" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();
 
-    const tr = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
+    const tr_id = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
+    const tr = &pc.getTransceivers()[tr_id];
     tr.stop();
 
     _ = try pc.addTrack(.initWithId("video", .video), null);
@@ -539,7 +472,7 @@ test "createOffer: stopped non-associted transceiver is ignored" {
     try testing.expectEqual(1, sdp_session.getMedias().len);
 }
 
-test "createOffer: multiple offers" {
+test "PeerConnection.createOffer: multiple offers" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();
@@ -571,7 +504,7 @@ test "createOffer: multiple offers" {
     try testing.expect(old_mid != sdp_session.getMedias()[1].mid);
 }
 
-test "createAnswer: answer to offer" {
+test "PeerConnection.createAnswer: answer to offer" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();
@@ -598,7 +531,7 @@ test "createAnswer: answer to offer" {
     try testing.expect(sdp_session.getMedias()[1].port != 0);
 }
 
-test "createAnswer: reject media in offer" {
+test "PeerConnection.createAnswer: reject media in offer" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();
@@ -627,7 +560,7 @@ test "createAnswer: reject media in offer" {
     try testing.expect(sdp_session.getMedias()[1].port == 0);
 }
 
-test "negotiation between peers" {
+test "PeerConnection.negotiation between peers" {
     var conn1 = try Connection.init(.{});
     var pc1 = &conn1.pc;
     defer conn1.deinit();
@@ -636,8 +569,11 @@ test "negotiation between peers" {
     var pc2 = &conn2.pc;
     defer conn2.deinit();
 
-    const sender1 = try pc1.addTrack(.initWithId("track-1", .video), "stream-1");
-    const sender2 = try pc1.addTrack(.init(testing.io, .video), "stream-2");
+    const sender1_id = try pc1.addTrack(.initWithId("track-1", .video), "stream-1");
+    const sender2_id = try pc1.addTrack(.init(.video, prng.random()), "stream-2");
+
+    const sender1 = &pc1.getTransceivers()[sender1_id].sender;
+    const sender2 = &pc1.getTransceivers()[sender2_id].sender;
 
     try negotiate(pc1, pc2);
 
@@ -657,7 +593,7 @@ test "negotiation between peers" {
     for (transceivers) |tr| try testing.expect(tr.sender.header_extensions.mid != 0);
 }
 
-test "negotiation between peers: add/remove tracks" {
+test "PeerConnection.negotiation between peers: add/remove tracks" {
     var conn1 = try Connection.init(.{});
     defer conn1.deinit();
 
@@ -667,10 +603,10 @@ test "negotiation between peers: add/remove tracks" {
     const pc1 = &conn1.pc;
     const pc2 = &conn2.pc;
 
-    const track1: webrtc.MediaStreamTrack = .init(testing.io, .video);
+    const track1: webrtc.MediaStreamTrack = .init(.video, prng.random());
 
     _ = try pc1.addTrack(track1, null);
-    _ = try pc1.addTrack(.init(testing.io, .video), null);
+    _ = try pc1.addTrack(.init(.video, prng.random()), null);
 
     try negotiate(pc1, pc2);
 

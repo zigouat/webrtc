@@ -9,12 +9,12 @@
             .hash = "media-0.3.0-qc-dCC4pAQAHSEtFNAIXgeVcf4TAMx5Dgs6skuw5HmRw",
         },
         .media_protocols = .{
-            .url = "git+https://github.com/zigouat/media-protocols.git#31be0e7187211e09dc1567f5603a1a0b6ba1c54a",
-            .hash = "media_protocols-0.2.0-WF_ij0URCQACpqNh9kcgRUjwU5qoVUK0QkXDJxdxecF0",
+            .url = "git+https://github.com/zigouat/media-protocols.git#0af171b3c8348a232ee1a3762717ae7948b75170",
+            .hash = "media_protocols-0.2.0-WF_ijwcqCQB8tLbPiw-uJlTUJh3lmACkZ3gZ84hbCY2y",
         },
         .sctp = .{
-            .url = "git+https://github.com/zigouat/sctp.git#0a60c7a65fd2b1f043880791a0363adaaa1a9419",
-            .hash = "sctp-0.0.0-jRqUYDhfAQCfxVrw4zttt6gG2vikVvFvXpWUn22uM_XT",
+            .url = "git+https://github.com/zigouat/sctp.git#49f1fede9644c8f52128e6b2d0e41702ea549d94",
+            .hash = "sctp-0.0.0-jRqUYF1fAQCqnKylcJUs7jrc6Y71kzKMZ-a4e68lH5d_",
         },
         .mbedtls = .{
             .url = "git+https://github.com/allyourcodebase/mbedtls.git#55f2af148634945e9508a3a50de2ccfe65eb971f",

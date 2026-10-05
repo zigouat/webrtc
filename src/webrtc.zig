@@ -6,9 +6,11 @@ pub const RtpTransceiver = @import("rtp_transceiver.zig");
 pub const RtpSender = @import("rtp_sender.zig");
 pub const RtpReceiver = @import("rtp_receiver.zig");
 pub const SDPSession = @import("sdp_session.zig");
+pub const TimerManager = @import("io/timer_manager.zig");
 
 const std = @import("std");
 const sdp = @import("sdp");
+const utils = @import("utils.zig");
 
 const Io = std.Io;
 const FmtpParams = sdp.Attribute.Fmtp.Params;
@@ -171,10 +173,7 @@ pub const MediaStreamTrack = struct {
     /// Init a new track with generated id.
     ///
     /// Th io instance is needed to generate an id
-    pub fn init(io: Io, kind: TrackKind) MediaStreamTrack {
-        var buf: [16]u8 = undefined;
-        io.random(&buf);
-
+    pub fn init(kind: TrackKind, r: std.Random) MediaStreamTrack {
         var track: MediaStreamTrack = .{
             .id = @splat(0),
             .kind = kind,
@@ -182,7 +181,7 @@ pub const MediaStreamTrack = struct {
             .muted = false,
         };
 
-        @memcpy(track.id[0..32], &std.fmt.bytesToHex(buf, .lower));
+        utils.randString(r, track.id[0..32]);
         return track;
     }
 
@@ -204,7 +203,8 @@ pub const MediaStreamTrack = struct {
     }
 
     test "init" {
-        const track = init(testing.io, .video);
+        var prng = std.Random.DefaultPrng.init(1);
+        const track = init(.video, prng.random());
         try testing.expect(!std.mem.eql(u8, &.{}, track.getId()));
     }
 
@@ -338,6 +338,12 @@ pub const RtcpFeedbacks = packed struct(u8) {
         try RtcpFeedbacks.empty.writeAsSdpAttribute(96, &w);
         try testing.expectEqualStrings("", w.buffered());
     }
+};
+
+pub const TransportMessage = struct {
+    data: []const u8,
+    from: *const Io.net.IpAddress,
+    to: *const Io.net.IpAddress,
 };
 
 pub fn getHeaderExtensionCapabilities(kind: TrackKind) []const RtpHeaderExtensionParameter {

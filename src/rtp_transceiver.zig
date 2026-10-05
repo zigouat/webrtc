@@ -2,14 +2,11 @@ const std = @import("std");
 const constants = @import("constants.zig");
 const webrtc = @import("webrtc.zig");
 const utils = @import("utils.zig");
-const DtlsTransport = @import("dtls_transport.zig");
-const PeerConnection = @import("peer_connection.zig");
 const SDPSession = @import("sdp_session.zig");
 const RtpSender = @import("rtp_sender.zig");
 const RtpReceiver = @import("rtp_receiver.zig");
 const Mid = @import("mid.zig");
 
-const Io = std.Io;
 const RtpTransceiver = @This();
 const MediaStream = webrtc.MediaStream;
 const MediaStreamTrack = webrtc.MediaStreamTrack;
@@ -83,18 +80,15 @@ sdp_mline_index: ?u8 = null,
 stopping: bool = false,
 stopped: bool = false,
 added_by_add_track: bool = false,
-pc: *PeerConnection,
+pc: *webrtc.PeerConnection = undefined,
 
-pub fn initFromSdpMedia(allocator: std.mem.Allocator, io: Io, sdp_media: *const SDPSession.Media, index: u8) !*RtpTransceiver {
-    const tr = try allocator.create(RtpTransceiver);
-    errdefer allocator.destroy(tr);
-
+pub fn initFromSdpMedia(sdp_media: *const SDPSession.Media, r: std.Random, index: u8) RtpTransceiver {
     const track = if (sdp_media.track_id) |track_id|
         MediaStreamTrack.initWithId(track_id, sdp_media.getKind())
     else
-        MediaStreamTrack.init(io, sdp_media.getKind());
+        MediaStreamTrack.init(sdp_media.getKind(), r);
 
-    tr.* = .{
+    return RtpTransceiver{
         .direction = .recvonly,
         .kind = sdp_media.getKind(),
         .receiver = RtpReceiver.init(track),
@@ -103,14 +97,10 @@ pub fn initFromSdpMedia(allocator: std.mem.Allocator, io: Io, sdp_media: *const 
         .sdp_mline_index = index,
         .pc = undefined,
     };
-
-    return tr;
 }
 
-pub fn deinit(tr: *RtpTransceiver, io: Io, allocator: std.mem.Allocator) void {
-    _ = io;
+pub fn deinit(tr: *RtpTransceiver, allocator: std.mem.Allocator) void {
     tr.sender.deinit(allocator);
-    allocator.destroy(tr);
 }
 
 /// Creates an SDP media description from the transceiver.
@@ -284,9 +274,9 @@ pub fn processRemoteTrack(tr: *RtpTransceiver, direction: Direction, msid: ?Medi
 /// Get rtcp report of the transceiver.
 ///
 /// For now it only gets sender report
-pub fn getRtcpReport(tr: *RtpTransceiver, io: Io, timestamp: i64, buffer: []u8) []const u8 {
+pub fn getRtcpReport(tr: *RtpTransceiver, timestamp: i64, buffer: []u8) []const u8 {
     return switch (tr.direction) {
-        .sendrecv, .sendonly => tr.sender.writeRtcpSenderReport(io, timestamp, buffer),
+        .sendrecv, .sendonly => tr.sender.writeRtcpSenderReport(timestamp, buffer),
         else => &.{},
     };
 }
@@ -307,26 +297,24 @@ fn addSenderFields(tr: *const RtpTransceiver, allocator: std.mem.Allocator, medi
     }
 }
 
-fn newTestRtpTransceiver(io: Io, allocator: std.mem.Allocator) !*RtpTransceiver {
-    const tr = try allocator.create(RtpTransceiver);
-
-    tr.* = .{
-        .sender = RtpSender.init(.init(io, .video)),
-        .receiver = RtpReceiver.init(.init(io, .video)),
+fn newTestRtpTransceiver() RtpTransceiver {
+    return .{
+        .sender = RtpSender.init(.init(.video, prng.random())),
+        .receiver = RtpReceiver.init(.init(.video, prng.random())),
         .direction = .sendrecv,
         .kind = .video,
         .pc = undefined,
     };
-
-    return tr;
 }
 
 const testing = std.testing;
 const rtcp = @import("rtcp");
+var prng = std.Random.DefaultPrng.init(0xdeadbeef);
 
-fn dummyPeerConnection() !PeerConnection {
-    return try PeerConnection.init(testing.io, testing.allocator, .{
+fn dummyPeerConnection() !webrtc.PeerConnection {
+    return try webrtc.PeerConnection.init(testing.io, testing.allocator, .{
         .media_engine = undefined,
+        .random = prng.random(),
     });
 }
 
@@ -340,8 +328,8 @@ test "initFromSdpMedia" {
     var sdp_media = SDPSession.Media.empty;
     sdp_media.mid = 1;
 
-    var tr = try RtpTransceiver.initFromSdpMedia(testing.allocator, testing.io, &sdp_media, 0);
-    defer tr.deinit(testing.io, testing.allocator);
+    var tr = RtpTransceiver.initFromSdpMedia(&sdp_media, prng.random(), 0);
+    defer tr.deinit(testing.allocator);
 
     try testing.expectEqual(.video, tr.kind);
     try testing.expectEqual(.recvonly, tr.direction);
@@ -351,8 +339,8 @@ test "initFromSdpMedia" {
     try testing.expect(!std.mem.eql(u8, &.{}, tr.receiver.track.getId()));
 
     sdp_media.track_id = "track1";
-    var tr2 = try RtpTransceiver.initFromSdpMedia(testing.allocator, testing.io, &sdp_media, 1);
-    defer tr2.deinit(testing.io, testing.allocator);
+    var tr2 = RtpTransceiver.initFromSdpMedia(&sdp_media, prng.random(), 1);
+    defer tr2.deinit(testing.allocator);
 
     try testing.expectEqualStrings("track1", tr2.receiver.track.getId());
 }
@@ -361,8 +349,8 @@ test "toSdpMedia" {
     var pc = try dummyPeerConnection();
     defer pc.deinit();
 
-    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
-    defer tr.deinit(testing.io, testing.allocator);
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
     tr.pc = &pc;
 
     var media_engine_rtx = try testMediaEngine(true);
@@ -401,8 +389,8 @@ test "toSdpMediaAnswer: answer to offer" {
     var pc = try dummyPeerConnection();
     defer pc.deinit();
 
-    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
-    defer tr.deinit(testing.io, testing.allocator);
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
     tr.mid = 0x30;
     tr.pc = &pc;
 
@@ -438,8 +426,8 @@ test "toSdpMediaAnswer: includes rtx_ssrc when the negotiated codecs include rtx
     var pc = try dummyPeerConnection();
     defer pc.deinit();
 
-    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
-    defer tr.deinit(testing.io, testing.allocator);
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
     tr.mid = 0x30;
     tr.pc = &pc;
     tr.sender.rtx_ssrc = 424242;
@@ -467,8 +455,8 @@ test "toSdpMediaAnswer: enable_rtx=false ignores an rtx-capable offer" {
     var pc = try dummyPeerConnection();
     defer pc.deinit();
 
-    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
-    defer tr.deinit(testing.io, testing.allocator);
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
     tr.mid = 0x30;
     tr.pc = &pc;
     tr.sender.rtx_ssrc = 424242;
@@ -497,8 +485,8 @@ test "toSdpMedia: includes rtx_ssrc when enable_rtx synthesizes an rtx codec" {
     var pc = try dummyPeerConnection();
     defer pc.deinit();
 
-    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
-    defer tr.deinit(testing.io, testing.allocator);
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
     tr.pc = &pc;
     tr.sender.rtx_ssrc = 424242;
 
@@ -521,10 +509,10 @@ test "toSdpMedia: leaves rtx_ssrc unset for audio, which has no rtx codec, even 
     var transport = try dummyPeerConnection();
     defer transport.deinit();
 
-    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
-    defer tr.deinit(testing.io, testing.allocator);
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
     tr.kind = .audio;
-    tr.sender.track = .init(testing.io, .audio);
+    tr.sender.track = .init(.audio, prng.random());
     tr.pc = &transport;
     tr.sender.rtx_ssrc = 424242;
 
@@ -541,8 +529,8 @@ test "toSdpMediaAnswer: negotiates header extensions, keeping the offerer's id" 
     var pc = try dummyPeerConnection();
     defer pc.deinit();
 
-    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
-    defer tr.deinit(testing.io, testing.allocator);
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
     tr.mid = 0x30;
     tr.pc = &pc;
 
@@ -570,8 +558,8 @@ test "toSdpMediaAnswer: negotiates header extensions, keeping the offerer's id" 
 }
 
 test "toSdpMediaAnswer: reject offer" {
-    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
-    defer tr.deinit(testing.io, testing.allocator);
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
     tr.mid = 0x30;
 
     var media_engine = try testMediaEngine(false);
@@ -607,8 +595,8 @@ test "toSdpMediaAnswer: reject offer" {
 }
 
 test "canAssociateTrack" {
-    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
-    defer tr.deinit(testing.io, testing.allocator);
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
     tr.direction = .recvonly;
     tr.sender.track = null;
 
@@ -618,7 +606,7 @@ test "canAssociateTrack" {
     try testing.expect(!tr.canAssociateTrack(.video));
 
     tr.kind = .video;
-    tr.sender.track = .init(testing.io, .video);
+    tr.sender.track = .init(.video, prng.random());
     try testing.expect(!tr.canAssociateTrack(.video));
 
     tr.sender.track = null;
@@ -627,12 +615,12 @@ test "canAssociateTrack" {
 }
 
 test "setSenderTrack" {
-    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
-    defer tr.deinit(testing.io, testing.allocator);
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
     tr.direction = .recvonly;
     tr.sender.track = null;
 
-    const track = MediaStreamTrack.init(testing.io, .video);
+    const track = MediaStreamTrack.init(.video, prng.random());
     tr.setSenderTrack(track);
 
     try testing.expectEqualStrings(track.getId(), tr.sender.track.?.getId());
@@ -640,10 +628,10 @@ test "setSenderTrack" {
 }
 
 test "stopTransceiver" {
-    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
-    defer tr.deinit(testing.io, testing.allocator);
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
     tr.direction = .sendrecv;
-    tr.sender.track = .init(testing.io, .video);
+    tr.sender.track = .init(.video, prng.random());
 
     tr.stop();
 
@@ -652,8 +640,8 @@ test "stopTransceiver" {
 }
 
 test "removeTrack" {
-    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
-    defer tr.deinit(testing.io, testing.allocator);
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
 
     tr.removeTrack();
 
@@ -668,12 +656,12 @@ test "removeTrack" {
 }
 
 test "getRtcpReport" {
-    var tr = try newTestRtpTransceiver(testing.io, testing.allocator);
-    defer tr.deinit(testing.io, testing.allocator);
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
 
     try tr.sender.setCodecs(
-        testing.io,
         testing.allocator,
+        prng.random(),
         webrtc.MediaEngine.supported_video_codecs,
         16,
     );
@@ -687,7 +675,7 @@ test "getRtcpReport" {
         .packet_count = 100,
     };
 
-    const data = tr.getRtcpReport(testing.io, 1782239530300000, &buffer);
+    const data = tr.getRtcpReport(1782239530300000, &buffer);
     const packet = try rtcp.Packet.decode(data);
     try testing.expectEqual(.sender_report, packet.header.payload_type);
     try testing.expectEqual(tr.sender.ssrc, packet.payload.sr.ssrc);
@@ -699,14 +687,13 @@ test "getRtcpReport" {
 
 test "processRemoteTrack" {
     const allocator = testing.allocator;
-    const io = testing.io;
 
-    var tr = try newTestRtpTransceiver(testing.io, allocator);
-    defer tr.deinit(io, allocator);
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(allocator);
 
     var maybe_event = tr.processRemoteTrack(.sendrecv, null);
     try testing.expect(maybe_event != null);
-    try testing.expect(maybe_event.?.transceiver == tr);
+    try testing.expect(maybe_event.?.transceiver == &tr);
     try testing.expect(tr.fired_direction == .sendrecv);
 
     maybe_event = tr.processRemoteTrack(.recvonly, null);

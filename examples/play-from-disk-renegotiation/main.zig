@@ -4,157 +4,169 @@ const media = @import("media");
 const ivf = @import("ivf");
 const rtp = @import("rtp");
 const webrtc = @import("webrtc");
+const ice = @import("ice");
+const common = @import("common");
+const IvfReader = common.IvfReader;
 
 const Io = std.Io;
 const html_file = @embedFile("index.html");
 
 var grp: Io.Group = undefined;
-var app_state: AppState = undefined;
+var conn_ctx: ConnectionContext = undefined;
 
-const Handler = struct {
+const ConnectionContext = struct {
     io: std.Io,
-    gathering_done: std.Io.Event = .unset,
-    connected: std.Io.Event = .unset,
-    done: std.Io.Event = .unset,
-
-    fn peerConnectionHandler(handler: *Handler) webrtc.PeerConnectionHandler {
-        return .{
-            .userdata = handler,
-            .vtable = &.{
-                .onGatheringStateChange = onGatheringStateChange,
-                .onConnectionStateChange = onConnectionStateChange,
-            },
-        };
-    }
-
-    fn onGatheringStateChange(userdata: ?*anyopaque, state: webrtc.PeerConnection.GatheringState) void {
-        const handler: *Handler = @ptrCast(@alignCast(userdata.?));
-        if (state == .complete) handler.gathering_done.set(handler.io);
-    }
-
-    fn onConnectionStateChange(userdata: ?*anyopaque, state: webrtc.PeerConnection.ConnectionState) void {
-        std.debug.print("[Handler] connection state: {}\n", .{state});
-        const handler: *Handler = @ptrCast(@alignCast(userdata.?));
-        switch (state) {
-            .connected => handler.connected.set(handler.io),
-            .disconnected, .closed, .failed => handler.done.set(handler.io),
-            else => {},
-        }
-    }
-};
-
-const AppState = struct {
-    handler: *Handler,
     pc: webrtc.PeerConnection,
+    socket: std.Io.net.Socket,
+    done: std.Io.Event,
+    connected: std.Io.Event,
+    send_buffer: [1500]u8,
+    recv_buffer: [1500]u8,
+    mutex: Io.Mutex,
+    prng: std.Random.DefaultCsprng,
+    senders: std.ArrayList(u32),
     file_path: []const u8,
-    senders: std.ArrayList(*webrtc.RtpSender) = .empty,
 
-    fn init(io: std.Io, allocator: std.mem.Allocator, file_path: []const u8, media_engine: *webrtc.MediaEngine) !AppState {
-        const handler = try allocator.create(Handler);
-        errdefer allocator.destroy(handler);
-        handler.* = .{ .io = io };
+    fn init(
+        conn: *ConnectionContext,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        media_engine: *webrtc.MediaEngine,
+        file_path: []const u8,
+    ) !void {
+        var if_it = try ice.IfIterator.init(allocator, .{});
+        defer if_it.deinit(allocator);
 
-        return .{
-            .handler = handler,
-            .pc = try webrtc.PeerConnection.init(io, allocator, .{
-                .handler = handler.peerConnectionHandler(),
-                .media_engine = media_engine,
-                .rtc_configuration = .{
-                    .ice_servers = &.{.{ .url = "stun:stun.l.google.com:19302" }},
-                },
-            }),
-            .file_path = file_path,
-        };
+        const addr = if_it.next() orelse return error.NoNetworkInterface;
+        const socket = try addr.bind(io, .{ .mode = .dgram });
+        errdefer socket.close(io);
+
+        var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = undefined;
+        try io.randomSecure(&seed);
+        conn.prng = std.Random.DefaultCsprng.init(seed);
+
+        conn.pc = try .init(io, allocator, .{
+            .media_engine = media_engine,
+            .random = conn.prng.random(),
+        });
+        errdefer conn.pc.deinit();
+
+        const now = Io.Timestamp.now(io, .awake).toMilliseconds();
+        try conn.pc.addLocalCandidates(&.{socket.address}, now);
+
+        conn.io = io;
+        conn.socket = socket;
+        conn.done = .unset;
+        conn.connected = .unset;
+        conn.mutex = .init;
+        conn.send_buffer = undefined;
+        conn.recv_buffer = undefined;
+        conn.senders = .empty;
+        conn.file_path = file_path;
     }
 
-    fn deinit(self: *AppState, allocator: std.mem.Allocator) void {
+    fn deinit(self: *ConnectionContext) void {
+        self.senders.deinit(self.pc.allocator);
+        self.socket.close(self.io);
         self.pc.deinit();
-        self.senders.deinit(allocator);
-        allocator.destroy(self.handler);
     }
 
-    fn addTrack(self: *AppState, allocator: std.mem.Allocator, offer: webrtc.SessionDescription) !void {
-        const io = self.handler.io;
-
-        var buf: [8]u8 = @splat(0);
+    fn addTrack(conn: *ConnectionContext, allocator: std.mem.Allocator, offer: webrtc.SessionDescription) !void {
         var stream: [16]u8 = @splat(0);
-        io.random(&buf);
-        try std.crypto.codecs.hex.encode(&stream, &buf, .lower);
+        common.utils.randString(conn.io, &stream);
 
-        const sender = try self.pc.addTrack(.init(io, .video), &stream);
-        try self.senders.append(allocator, sender);
+        const sender_id = try conn.pc.addTrack(.init(.video, conn.prng.random()), &stream);
+        try conn.senders.append(allocator, sender_id);
 
-        try self.pc.setRemoteDescription(offer);
-        const answer = try self.pc.createAnswer();
-        try self.pc.setLocalDescription(answer);
-        try self.handler.gathering_done.wait(io);
+        try conn.pc.setRemoteDescription(offer);
+        const answer = try conn.pc.createAnswer();
+        try conn.pc.setLocalDescription(answer);
 
-        try grp.concurrent(io, sendMediaData, .{ io, allocator, self.file_path, sender, &self.handler.connected });
+        try grp.concurrent(conn.io, sendMediaData, .{ conn.pc.allocator, conn.file_path, conn, sender_id });
     }
 
-    fn removeTrack(self: *AppState, offer: webrtc.SessionDescription) !void {
-        if (self.senders.items.len == 0) return;
-        if (self.senders.pop()) |sender| {
-            const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
+    fn removeTrack(conn: *ConnectionContext, offer: webrtc.SessionDescription) !void {
+        if (conn.senders.items.len == 0) return;
+        if (conn.senders.pop()) |sender_id| {
+            const tr = &conn.pc.getTransceivers()[sender_id];
             tr.removeTrack();
 
-            try self.pc.setRemoteDescription(offer);
-            const answer = try self.pc.createAnswer();
-            try self.pc.setLocalDescription(answer);
+            try conn.pc.setRemoteDescription(offer);
+            const answer = try conn.pc.createAnswer();
+            try conn.pc.setLocalDescription(answer);
         }
     }
 
-    fn waitForCloseEvent(self: *AppState) !void {
-        try self.handler.done.wait(self.handler.io);
+    fn receive(conn: *ConnectionContext) !void {
+        while (true) {
+            const inc = conn.socket.receive(conn.io, &conn.recv_buffer) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return,
+            };
+
+            const now = Io.Timestamp.now(conn.io, .awake).toMilliseconds();
+            try conn.mutex.lock(conn.io);
+            defer conn.mutex.unlock(conn.io);
+
+            _ = conn.pc.handleRead(.{
+                .data = inc.data,
+                .from = &inc.from,
+                .to = &conn.socket.address,
+            }, now) catch continue;
+
+            conn.handle(now) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => {},
+            };
+        }
     }
 
-    fn sendMediaData(io: Io, allocator: std.mem.Allocator, path: []const u8, sender: *webrtc.RtpSender, connected: *Io.Event) !void {
-        doSendMediaData(io, allocator, path, sender, connected) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => |e| std.log.err("Error occurred while sending file: {}", .{e}),
-        };
+    fn onTimeout(conn: *ConnectionContext) !void {
+        while (true) {
+            const now = Io.Timestamp.now(conn.io, .awake).toMilliseconds();
+
+            const deadline = blk: {
+                try conn.mutex.lock(conn.io);
+                defer conn.mutex.unlock(conn.io);
+
+                _ = conn.pc.handleTimeout(now, 0) catch {};
+                conn.handle(now) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => {},
+                };
+                break :blk conn.pc.pollTimeout() orelse now + 50;
+            };
+
+            try conn.io.sleep(.fromMilliseconds(deadline - now), .awake);
+        }
     }
 
-    fn doSendMediaData(io: Io, allocator: std.mem.Allocator, path: []const u8, sender: *webrtc.RtpSender, connected: *Io.Event) !void {
-        var file = try Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
-        defer file.close(io);
+    fn send(conn: *ConnectionContext, sender_id: webrtc.PeerConnection.RtpSenderID, sample: *const media.Packet) !void {
+        var buffer: [1500]u8 = undefined;
+        const now = Io.Timestamp.now(conn.io, .awake).toMicroseconds();
 
-        var buffer: [1024]u8 = @splat(0);
-        var reader = file.reader(io, &buffer);
-        var ivf_reader = ivf.Reader.init(&reader.interface) catch |err| switch (err) {
-            error.ReadFailed => return reader.err.?,
-            else => |e| return e,
+        try conn.mutex.lock(conn.io);
+        defer conn.mutex.unlock(conn.io);
+
+        const sender = &conn.pc.transceivers.items[sender_id].sender;
+        var it = try sender.handleMediaPacketWrite(sample);
+        while (try it.next(&buffer, now)) |message| {
+            try conn.socket.send(conn.io, message.to, message.data);
+        }
+    }
+
+    fn handle(conn: *ConnectionContext, now: i64) !void {
+        while (conn.pc.pollEvent()) |event| switch (event) {
+            .connection_state => |state| switch (state) {
+                .connected => conn.connected.set(conn.io),
+                .disconnected, .closed, .failed => conn.done.set(conn.io),
+                else => {},
+            },
+            else => {},
         };
 
-        const video_stream = &ivf_reader.stream;
-
-        const start_timestamp = Io.Clock.now(.awake, io).toMilliseconds();
-        const clock_rate = sender.codecs[0].rtp_codec.clock_rate;
-
-        try connected.wait(io);
-
-        var curr_packet = try ivf_reader.next(allocator);
-        defer if (curr_packet) |*p| p.deinit(allocator);
-
-        outer: while (true) {
-            const elapsed: u64 = @intCast(std.Io.Clock.now(.awake, io).toMilliseconds() - start_timestamp);
-
-            while (true) {
-                if (curr_packet == null) break :outer;
-                const dts = elapsed * video_stream.time_base.den / std.time.ms_per_s;
-                if (curr_packet.?.dts >= dts) break;
-
-                var p = curr_packet.?;
-                p.scaleTimestamps(video_stream.time_base, .ofDen(clock_rate));
-                curr_packet = null;
-                defer p.deinit(allocator);
-
-                try sender.sendSample(&p);
-
-                curr_packet = try ivf_reader.next(allocator);
-            }
-
-            try io.sleep(.fromMilliseconds(10), .awake);
+        while (try conn.pc.pollTransmit(&conn.send_buffer, now)) |message| {
+            try conn.socket.send(conn.io, message.to, message.data);
         }
     }
 };
@@ -182,11 +194,13 @@ pub fn main(init: std.process.Init) !void {
     });
     defer media_engine.deinit(allocator);
 
-    app_state = try AppState.init(io, allocator, file_path, &media_engine);
-    defer app_state.deinit(allocator);
+    try conn_ctx.init(io, allocator, &media_engine, file_path);
+    defer conn_ctx.deinit();
 
+    try grp.concurrent(io, ConnectionContext.receive, .{&conn_ctx});
+    try grp.concurrent(io, ConnectionContext.onTimeout, .{&conn_ctx});
     try grp.concurrent(io, startHttpServer, .{ io, allocator });
-    try app_state.waitForCloseEvent();
+    try conn_ctx.done.wait(io);
 }
 
 fn startHttpServer(io: Io, allocator: std.mem.Allocator) !void {
@@ -234,18 +248,22 @@ fn doHandleClientConnection(io: Io, allocator: std.mem.Allocator, stream: Io.net
         var parsed = try readRequestContent(allocator, &req);
         defer parsed.deinit();
 
-        try app_state.addTrack(allocator, parsed.value);
-        try writeLocalDescription(allocator, &req);
+        try conn_ctx.addTrack(allocator, parsed.value);
+        writeLocalDescription(allocator, &req) catch |err| switch (err) {
+            error.WriteFailed => return w.err.?,
+            else => |e| return e,
+        };
     } else if (std.mem.eql(u8, req.head.target, "/removeVideo") and req.head.method == .POST) {
         std.log.info("Remove video", .{});
         var parsed = try readRequestContent(allocator, &req);
         defer parsed.deinit();
 
-        app_state.removeTrack(parsed.value) catch |err| {
-            std.log.err("Error while removing video track: {}", .{err});
-            return;
+        try conn_ctx.removeTrack(parsed.value);
+
+        writeLocalDescription(allocator, &req) catch |err| switch (err) {
+            error.WriteFailed => return w.err.?,
+            else => |e| return e,
         };
-        try writeLocalDescription(allocator, &req);
     }
 }
 
@@ -264,7 +282,7 @@ fn writeLocalDescription(allocator: std.mem.Allocator, req: *std.http.Server.Req
         .respond_options = .{ .transfer_encoding = .none },
     });
 
-    var answer = (try app_state.pc.getLocalDescription()).?;
+    var answer = (try conn_ctx.pc.getLocalDescription()).?;
     defer answer.deinit(allocator);
 
     std.log.info("Answer:\n{s}\n", .{answer.sdp});
@@ -273,4 +291,44 @@ fn writeLocalDescription(allocator: std.mem.Allocator, req: *std.http.Server.Req
     try formatter.format(&body_writer.writer);
 
     try body_writer.flush();
+}
+
+fn sendMediaData(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    conn: *ConnectionContext,
+    sender_id: webrtc.PeerConnection.RtpSenderID,
+) !void {
+    try conn.connected.wait(conn.io);
+
+    var ivf_reader: IvfReader = undefined;
+    ivf_reader.init(conn.io, path) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return,
+    };
+    defer ivf_reader.deinit(allocator);
+
+    while (true) {
+        const now = Io.Timestamp.now(conn.io, .awake).toMilliseconds();
+
+        while (true) {
+            var maybe_packet = ivf_reader.next(allocator, now) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return,
+            };
+
+            if (maybe_packet) |*packet| {
+                defer packet.deinit(allocator);
+                conn.send(sender_id, packet) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => return,
+                };
+                continue;
+            }
+
+            break;
+        }
+
+        try conn.io.sleep(.fromMilliseconds(10), .awake);
+    }
 }

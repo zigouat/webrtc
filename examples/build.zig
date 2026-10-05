@@ -10,11 +10,13 @@ pub fn build(b: *std.Build) void {
     const protocols = b.dependency("media_protocols", .{ .target = target, .optimize = optimize });
 
     const common_mod = b.addModule("common", .{
-        .root_source_file = b.path("common/utils.zig"),
+        .root_source_file = b.path("common/common.zig"),
         .optimize = optimize,
         .target = target,
         .imports = &.{
+            .{ .name = "media", .module = media.module("media") },
             .{ .name = "webrtc", .module = webrtc.module("webrtc") },
+            .{ .name = "ivf", .module = media_formats.module("ivf") },
         },
     });
 
@@ -54,6 +56,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "rtp", .module = protocols.module("rtp") },
                     .{ .name = "webrtc", .module = webrtc.module("webrtc") },
                     .{ .name = "ivf", .module = media_formats.module("ivf") },
+                    .{ .name = "ice", .module = protocols.module("ice") },
                 },
             }),
         });

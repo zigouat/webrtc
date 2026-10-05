@@ -3,6 +3,7 @@ const stun = @import("stun");
 const ice = @import("ice");
 const rtp = @import("rtp");
 const srtp = @import("srtp");
+const webrtc = @import("webrtc.zig");
 const dtls = @import("dtls/dtls.zig");
 const utils = @import("utils.zig");
 const SDPSession = @import("sdp_session.zig");
@@ -48,11 +49,11 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !DtlsTransport
     var credens = try ice.Credentials.generate(io, allocator);
     defer credens.deinit(allocator);
 
-    var ice_agent = try IceAgent.init(allocator, .{
+    var ice_agent = IceAgent.init(allocator, .{
         .credentials = credens,
         .role = .controlling,
         .random = config.random,
-    });
+    }) catch return error.OutOfMemory;
     errdefer ice_agent.deinit();
 
     var der_buffer: [256]u8 = @splat(0);
@@ -82,11 +83,7 @@ pub fn deinit(transport: *DtlsTransport) void {
     }
 }
 
-pub fn setPeerFingerprint(transport: *DtlsTransport, fingerprint: *const [32]u8) void {
-    transport.session.setPeerFingerprint(fingerprint);
-}
-
-pub fn applyIceAttributes(transport: *DtlsTransport, media: *SDPSession.Media) !void {
+pub fn applyIceAttributes(transport: *DtlsTransport, media: *SDPSession.Media, fingerprint: *const [32]u8) !void {
     Logger.debug("Apply remote credentials and candidates...", .{});
     const remote_credens = transport.ice_agent.getRemoteCredentials();
     if (remote_credens) |credens| {
@@ -107,6 +104,8 @@ pub fn applyIceAttributes(transport: *DtlsTransport, media: *SDPSession.Media) !
         try transport.session.setRole(media.setup == .active);
         try transport.drainEvents(now);
     }
+
+    transport.session.setPeerFingerprint(fingerprint);
 }
 
 pub fn getConnectionState(transport: *const DtlsTransport) struct { ice.ConnectionState, dtls.ConnectionState } {
@@ -127,6 +126,20 @@ pub fn addIceLocalAddrs(transport: *DtlsTransport, addrs: []const Io.net.IpAddre
     try transport.drainEvents(now);
 }
 
+pub fn addIceStunServer(transport: *DtlsTransport, addr: Io.net.IpAddress, stun_server: Io.net.IpAddress) !void {
+    try transport.ice_agent.addStunServer(addr, stun_server);
+}
+
+pub fn addIceTurnServer(
+    transport: *DtlsTransport,
+    addr: Io.net.IpAddress,
+    turn_server: Io.net.IpAddress,
+    username: []const u8,
+    password: []const u8,
+) !void {
+    try transport.ice_agent.addTurnServer(addr, turn_server, username, password);
+}
+
 pub fn handleMediaWrite(transport: *DtlsTransport, buffer: []u8, payload_len: usize, comptime is_rtp: bool) ![]const u8 {
     return if (is_rtp)
         try transport.out_srtp_session.?.encryptRtp(buffer[0..payload_len], buffer)
@@ -139,19 +152,11 @@ pub fn handleWrite(transport: *DtlsTransport, data: []const u8, buffer: []u8) []
     return buffer[0..size];
 }
 
-pub fn handleRead(
-    transport: *DtlsTransport,
-    data: []const u8,
-    from: *const Io.net.IpAddress,
-    to: *const Io.net.IpAddress,
-    now: i64,
-    buffer: []u8,
-) !?DataEvent {
-    const result = try transport.ice_agent.handleRead(.{
-        .data = data,
-        .from = from,
-        .to = to,
-    }, now);
+pub fn handleRead(transport: *DtlsTransport, message: webrtc.TransportMessage, now: i64, buffer: []u8) !?DataEvent {
+    const result = try transport.ice_agent.handleRead(
+        .{ .data = message.data, .from = message.from, .to = message.to },
+        now,
+    );
 
     switch (result) {
         .app_data => |app_data| if (try transport.handleIceData(

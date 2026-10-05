@@ -2,6 +2,8 @@ const std = @import("std");
 const webrtc = @import("webrtc");
 const media = @import("media");
 const rtp = @import("rtp");
+const ice = @import("ice");
+const common = @import("common");
 
 const Io = std.Io;
 const BroadcastChannel = media.BroadcastChannel(rtp.Packet, 16);
@@ -13,85 +15,285 @@ var queue: Io.Queue(std.json.Parsed(webrtc.SessionDescription)) = .init(&queue_b
 
 pub const std_options = std.Options{ .log_level = .info };
 
-const PublisherHandler = struct {
+const PublisherConnection = struct {
     io: std.Io,
-    allocator: std.mem.Allocator,
-    grp: *Io.Group,
-    gathering_done: std.Io.Event = .unset,
-    done: std.Io.Event = .unset,
+    pc: webrtc.PeerConnection,
+    socket: std.Io.net.Socket,
+    done: std.Io.Event,
+    connected: std.Io.Event,
+    send_buffer: [1500]u8,
+    recv_buffer: [1500]u8,
+    mutex: Io.Mutex,
+    prng: std.Random.DefaultCsprng,
     channel: *BroadcastChannel,
     memory_pool: *MemoryPool,
-    receiver: *webrtc.RtpReceiver = undefined,
 
-    fn peerConnectionHandler(handler: *PublisherHandler) webrtc.PeerConnectionHandler {
-        return .{
-            .userdata = handler,
-            .vtable = &.{
-                .onGatheringStateChange = onGatheringStateChange,
-                .onConnectionStateChange = onConnectionStateChange,
-                .onTrack = onTrack,
-            },
-        };
+    const Config = struct {
+        media_engine: *webrtc.MediaEngine,
+        memory_pool: *MemoryPool,
+        channel: *BroadcastChannel,
+    };
+
+    fn init(conn: *PublisherConnection, io: std.Io, allocator: std.mem.Allocator, config: Config) !void {
+        var if_it = try ice.IfIterator.init(allocator, .{});
+        defer if_it.deinit(allocator);
+
+        const addr = if_it.next() orelse return error.NoNetworkInterface;
+        const socket = try addr.bind(io, .{ .mode = .dgram });
+        errdefer socket.close(io);
+
+        var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = undefined;
+        try io.randomSecure(&seed);
+        conn.prng = std.Random.DefaultCsprng.init(seed);
+
+        conn.pc = try .init(io, allocator, .{
+            .media_engine = config.media_engine,
+            .random = conn.prng.random(),
+        });
+        errdefer conn.pc.deinit();
+
+        const now = Io.Timestamp.now(io, .awake).toMilliseconds();
+        try conn.pc.addLocalCandidates(&.{socket.address}, now);
+
+        conn.io = io;
+        conn.socket = socket;
+        conn.done = .unset;
+        conn.connected = .unset;
+        conn.mutex = .init;
+        conn.send_buffer = undefined;
+        conn.recv_buffer = undefined;
+        conn.memory_pool = config.memory_pool;
+        conn.channel = config.channel;
     }
 
-    fn onGatheringStateChange(userdata: ?*anyopaque, state: webrtc.PeerConnection.GatheringState) void {
-        const handler: *PublisherHandler = @ptrCast(@alignCast(userdata.?));
-        if (state == .complete) handler.gathering_done.set(handler.io);
+    fn deinit(self: *PublisherConnection) void {
+        self.socket.close(self.io);
+        self.pc.deinit();
     }
 
-    fn onConnectionStateChange(userdata: ?*anyopaque, state: webrtc.PeerConnection.ConnectionState) void {
-        std.log.info("Connection state changed: {s}", .{@tagName(state)});
-        const handler: *PublisherHandler = @ptrCast(@alignCast(userdata.?));
-        switch (state) {
-            .connected => handler.grp.concurrent(handler.io, sendPli, .{
-                handler.io,
-                handler.receiver,
-            }) catch @panic("ConcurrencyUnavailable"),
-            .closed, .failed => handler.done.set(handler.io),
-            else => {},
+    fn sendPli(conn: *PublisherConnection) !void {
+        try conn.mutex.lock(conn.io);
+        defer conn.mutex.unlock(conn.io);
+
+        const receiver = &conn.pc.transceivers.items[0].receiver;
+        const msg = try receiver.sendPli(&conn.send_buffer);
+        try conn.socket.send(conn.io, msg.to, msg.data);
+    }
+
+    fn receive(conn: *PublisherConnection) !void {
+        while (true) {
+            const inc = conn.socket.receive(conn.io, &conn.recv_buffer) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return,
+            };
+
+            const now = Io.Timestamp.now(conn.io, .awake).toMilliseconds();
+            try conn.mutex.lock(conn.io);
+            defer conn.mutex.unlock(conn.io);
+
+            const read_result = conn.pc.handleRead(.{
+                .data = inc.data,
+                .from = &inc.from,
+                .to = &conn.socket.address,
+            }, now) catch continue;
+
+            switch (read_result) {
+                .rtp => |received| {
+                    const buffer = conn.memory_pool.create(conn.pc.allocator) catch return;
+                    const payload = received.@"1".payload;
+                    @memcpy(buffer[0..payload.len], payload);
+                    const packet = rtp.Packet{
+                        .header = received.@"1".header,
+                        .payload = buffer[0..payload.len],
+                    };
+                    conn.channel.send(conn.io, packet);
+                },
+                .rtcp => {
+                    var it = read_result.rtcp;
+                    while (it.next() catch continue) |packet| {
+                        std.debug.print("[{}]: {s}", .{ packet.@"0", @tagName(packet.@"1".header.payload_type) });
+                    }
+                },
+                else => {},
+            }
+
+            conn.handle(now) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => {},
+            };
         }
     }
 
-    fn onTrack(userdata: ?*anyopaque, event: webrtc.RtpTransceiver.TrackEventInit) void {
-        const handler: *PublisherHandler = @ptrCast(@alignCast(userdata.?));
-        std.log.info("New remote track({s}): {s}", .{ @tagName(event.track.kind), event.track.id });
-        event.receiver.registerCallback(handler, receivePublishedData);
-        handler.receiver = event.receiver;
+    fn onTimeout(conn: *PublisherConnection) !void {
+        while (true) {
+            const now = Io.Timestamp.now(conn.io, .awake).toMilliseconds();
+
+            const deadline = blk: {
+                try conn.mutex.lock(conn.io);
+                defer conn.mutex.unlock(conn.io);
+
+                _ = conn.pc.handleTimeout(now, 0) catch {};
+                conn.handle(now) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => {},
+                };
+                break :blk conn.pc.pollTimeout() orelse now + 50;
+            };
+
+            try conn.io.sleep(.fromMilliseconds(deadline - now), .awake);
+        }
+    }
+
+    fn handle(conn: *PublisherConnection, now: i64) !void {
+        while (conn.pc.pollEvent()) |event| switch (event) {
+            .connection_state => |state| switch (state) {
+                .connected => conn.connected.set(conn.io),
+                .disconnected, .closed, .failed => conn.done.set(conn.io),
+                else => {},
+            },
+            else => {},
+        };
+
+        while (try conn.pc.pollTransmit(&conn.send_buffer, now)) |message| {
+            try conn.socket.send(conn.io, message.to, message.data);
+        }
     }
 };
 
-const ViewerHandler = struct {
+const ViewerConnection = struct {
     io: std.Io,
-    grp: *Io.Group,
-    gathering_done: std.Io.Event = .unset,
-    channel: *BroadcastChannel,
-    sender: *webrtc.RtpSender,
+    pc: webrtc.PeerConnection,
+    socket: std.Io.net.Socket,
+    publisher: *PublisherConnection,
+    done: std.Io.Event,
+    connected: std.Io.Event,
+    send_buffer: [1500]u8,
+    recv_buffer: [1500]u8,
+    mutex: Io.Mutex,
+    prng: std.Random.DefaultCsprng,
+    sender_id: u32,
 
-    fn peerConnectionHandler(handler: *ViewerHandler) webrtc.PeerConnectionHandler {
-        return .{
-            .userdata = handler,
-            .vtable = &.{
-                .onGatheringStateChange = onGatheringStateChange,
-                .onConnectionStateChange = onConnectionStateChange,
+    const Config = struct {
+        media_engine: *webrtc.MediaEngine,
+        publisher: *PublisherConnection,
+    };
+
+    fn init(conn: *ViewerConnection, io: std.Io, allocator: std.mem.Allocator, config: Config) !void {
+        var if_it = try ice.IfIterator.init(allocator, .{});
+        defer if_it.deinit(allocator);
+
+        const addr = if_it.next() orelse return error.NoNetworkInterface;
+        const socket = try addr.bind(io, .{ .mode = .dgram });
+        errdefer socket.close(io);
+
+        var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = undefined;
+        try io.randomSecure(&seed);
+        conn.prng = std.Random.DefaultCsprng.init(seed);
+
+        conn.pc = try .init(io, allocator, .{
+            .media_engine = config.media_engine,
+            .random = conn.prng.random(),
+        });
+        errdefer conn.pc.deinit();
+
+        const now = Io.Timestamp.now(io, .awake).toMilliseconds();
+        try conn.pc.addLocalCandidates(&.{socket.address}, now);
+
+        conn.sender_id = try conn.pc.addTrack(.init(.video, conn.prng.random()), "stream");
+
+        conn.io = io;
+        conn.socket = socket;
+        conn.done = .unset;
+        conn.connected = .unset;
+        conn.mutex = .init;
+        conn.send_buffer = undefined;
+        conn.recv_buffer = undefined;
+        conn.publisher = config.publisher;
+    }
+
+    fn deinit(self: *ViewerConnection) void {
+        self.socket.close(self.io);
+        self.pc.deinit();
+    }
+
+    fn receive(conn: *ViewerConnection) !void {
+        while (true) {
+            const inc = conn.socket.receive(conn.io, &conn.recv_buffer) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return,
+            };
+
+            try conn.mutex.lock(conn.io);
+            defer conn.mutex.unlock(conn.io);
+
+            const now = Io.Timestamp.now(conn.io, .awake).toMilliseconds();
+            const read_result = conn.pc.handleRead(.{
+                .data = inc.data,
+                .from = &inc.from,
+                .to = &conn.socket.address,
+            }, now) catch continue;
+
+            if (read_result == .rtcp) {
+                var it = read_result.rtcp;
+                while (it.next() catch continue) |rtcp_packet| {
+                    _, const packet = rtcp_packet;
+
+                    switch (packet.payload) {
+                        .pli => conn.publisher.sendPli() catch {},
+                        else => {},
+                    }
+                }
+            }
+
+            conn.handle(now) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => {},
+            };
+        }
+    }
+
+    fn onTimeout(conn: *ViewerConnection) !void {
+        while (true) {
+            const now = Io.Timestamp.now(conn.io, .awake).toMilliseconds();
+
+            const deadline = blk: {
+                try conn.mutex.lock(conn.io);
+                defer conn.mutex.unlock(conn.io);
+
+                _ = conn.pc.handleTimeout(now, 0) catch {};
+                conn.handle(now) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => {},
+                };
+                break :blk conn.pc.pollTimeout() orelse now + 50;
+            };
+
+            try conn.io.sleep(.fromMilliseconds(deadline - now), .awake);
+        }
+    }
+
+    fn send(conn: *ViewerConnection, rtp_packet: *const rtp.Packet) !void {
+        try conn.mutex.lock(conn.io);
+        defer conn.mutex.unlock(conn.io);
+
+        const sender = &conn.pc.transceivers.items[conn.sender_id].sender;
+        const now = Io.Timestamp.now(conn.io, .awake).toMicroseconds();
+        const msg = try sender.handleWrite(rtp_packet, &conn.send_buffer, now);
+        try conn.socket.send(conn.io, msg.to, msg.data);
+    }
+
+    fn handle(conn: *ViewerConnection, now: i64) !void {
+        while (conn.pc.pollEvent()) |event| switch (event) {
+            .connection_state => |state| switch (state) {
+                .connected => conn.connected.set(conn.io),
+                .disconnected, .closed, .failed => conn.done.set(conn.io),
+                else => {},
             },
-        };
-    }
-
-    fn onGatheringStateChange(userdata: ?*anyopaque, state: webrtc.PeerConnection.GatheringState) void {
-        const handler: *ViewerHandler = @ptrCast(@alignCast(userdata.?));
-        if (state == .complete) handler.gathering_done.set(handler.io);
-    }
-
-    fn onConnectionStateChange(userdata: ?*anyopaque, state: webrtc.PeerConnection.ConnectionState) void {
-        std.log.info("Connection state changed: {s}", .{@tagName(state)});
-        const handler: *ViewerHandler = @ptrCast(@alignCast(userdata.?));
-        switch (state) {
-            .connected => handler.grp.concurrent(handler.io, sendDataToSubscriber, .{
-                handler.io,
-                handler.sender,
-                handler.channel,
-            }) catch @panic("ConcurrencyUnavailable"),
             else => {},
+        };
+
+        while (try conn.pc.pollTransmit(&conn.send_buffer, now)) |message| {
+            try conn.socket.send(conn.io, message.to, message.data);
         }
     }
 };
@@ -103,50 +305,12 @@ pub fn main(init: std.process.Init) !void {
     var grp: Io.Group = .init;
     defer grp.cancel(io);
 
-    try grp.concurrent(io, startHttpServer, .{ io, allocator });
-
     var memory_pool = try MemoryPool.initCapacity(allocator, 16);
     defer memory_pool.deinit(allocator);
 
     var media_engine = webrtc.MediaEngine.init(.{});
     try media_engine.registerDefaultCodecs(allocator);
     defer media_engine.deinit(allocator);
-
-    var publisher_handler = PublisherHandler{
-        .io = io,
-        .allocator = allocator,
-        .grp = &grp,
-        .channel = undefined,
-        .memory_pool = &memory_pool,
-    };
-
-    // start publisher
-    const pc = blk: {
-        const offer = try queue.getOne(io);
-        defer offer.deinit();
-
-        var pc = try allocator.create(webrtc.PeerConnection);
-        pc.* = try .init(io, allocator, .{
-            .media_engine = &media_engine,
-            .handler = publisher_handler.peerConnectionHandler(),
-        });
-        errdefer {
-            pc.deinit();
-            allocator.destroy(pc);
-        }
-
-        _ = try pc.addTransceiverFromKind(.video, .{ .direction = .recvonly });
-        try pc.setRemoteDescription(offer.value);
-
-        const answer = try pc.createAnswer();
-        try pc.setLocalDescription(answer);
-
-        break :blk pc;
-    };
-    defer {
-        pc.deinit();
-        allocator.destroy(pc);
-    }
 
     var rtp_channel = BroadcastChannel.init(.{
         .deinit = deinitPacket,
@@ -156,40 +320,64 @@ pub fn main(init: std.process.Init) !void {
     // No need for rtp_channel.deinit() since all the buffers will be released when the
     // memory is destroyed.
 
-    publisher_handler.channel = &rtp_channel;
+    var publisher: PublisherConnection = undefined;
+    try publisher.init(io, allocator, .{
+        .media_engine = &media_engine,
+        .memory_pool = &memory_pool,
+        .channel = &rtp_channel,
+    });
+    defer publisher.deinit();
 
-    try grp.concurrent(io, exit, .{ io, &publisher_handler.done });
-    try publisher_handler.gathering_done.wait(io);
+    try grp.concurrent(io, startHttpServer, .{ io, allocator });
+    try grp.concurrent(io, PublisherConnection.receive, .{&publisher});
+    try grp.concurrent(io, PublisherConnection.onTimeout, .{&publisher});
+    try grp.concurrent(io, exit, .{ io, &publisher.done });
 
-    try encodeSdp(pc);
+    {
+        const offer = try queue.getOne(io);
+        defer offer.deinit();
 
-    const Viewer = struct {
-        pc: webrtc.PeerConnection,
-        handler: ViewerHandler,
-    };
+        _ = try publisher.pc.addTransceiverFromKind(.video, .{ .direction = .recvonly });
+        try publisher.pc.setRemoteDescription(offer.value);
 
-    var viewers = std.ArrayList(Viewer).empty;
+        const answer = try publisher.pc.createAnswer();
+        try publisher.pc.setLocalDescription(answer);
+    }
+
+    try common.utils.writeSdpToStdout(io, allocator, &publisher.pc);
+
+    var viewers: std.ArrayList(*ViewerConnection) = .empty;
     defer {
-        for (viewers.items) |*viewer| viewer.pc.deinit();
+        for (viewers.items) |viewer| {
+            viewer.deinit();
+            allocator.destroy(viewer);
+        }
         viewers.deinit(allocator);
     }
 
     while (queue.getOne(io)) |offer| {
         defer offer.deinit();
 
-        const viewer = try viewers.addOne(allocator);
-        errdefer _ = viewers.swapRemove(viewers.items.len - 1);
+        try viewers.ensureUnusedCapacity(allocator, 1);
+        var viewer = try allocator.create(ViewerConnection);
+        errdefer allocator.destroy(viewer);
 
-        viewer.handler = ViewerHandler{ .io = io, .channel = &rtp_channel, .grp = &grp, .sender = undefined };
-        viewer.pc = try .init(io, allocator, .{ .media_engine = &media_engine, .handler = viewer.handler.peerConnectionHandler() });
+        try viewer.init(io, allocator, .{
+            .media_engine = &media_engine,
+            .publisher = &publisher,
+        });
+        errdefer viewer.deinit();
 
-        viewer.handler.sender = try viewer.pc.addTrack(.init(io, .video), "stream");
         try viewer.pc.setRemoteDescription(offer.value);
         const answer = try viewer.pc.createAnswer();
         try viewer.pc.setLocalDescription(answer);
 
-        try viewer.handler.gathering_done.wait(io);
-        try encodeSdp(&viewer.pc);
+        try grp.concurrent(io, ViewerConnection.receive, .{viewer});
+        try grp.concurrent(io, ViewerConnection.onTimeout, .{viewer});
+        try grp.concurrent(io, sendDataToSubscriber, .{ viewer, &rtp_channel });
+
+        try common.utils.writeSdpToStdout(io, allocator, &viewer.pc);
+        viewers.appendAssumeCapacity(viewer);
     } else |_| {}
 }
 
@@ -277,48 +465,14 @@ fn readRequestContent(allocator: std.mem.Allocator, req: *std.http.Server.Reques
     return try std.json.parseFromSlice(webrtc.SessionDescription, allocator, offer, .{});
 }
 
-fn encodeSdp(pc: *webrtc.PeerConnection) !void {
-    var sdp = (try pc.getLocalDescription()).?;
-    defer sdp.deinit(pc.allocator);
+fn sendDataToSubscriber(viewer: *ViewerConnection, c: *BroadcastChannel) !void {
+    try viewer.connected.wait(viewer.io);
 
-    var w = Io.Writer.Allocating.init(pc.allocator);
-    defer w.deinit();
-
-    const formatter = std.json.fmt(sdp, .{});
-    try formatter.format(&w.writer);
-
-    const sdp_len = std.base64.standard.Encoder.calcSize(w.written().len);
-    const base64_sdp = try pc.allocator.alloc(u8, sdp_len);
-    defer pc.allocator.free(base64_sdp);
-
-    const result = std.base64.standard.Encoder.encode(base64_sdp, w.written());
-    std.debug.print("{s}\n", .{result});
-}
-
-fn receivePublishedData(userdata: ?*anyopaque, _: *webrtc.RtpReceiver, event: webrtc.RtpReceiver.TrackEvent) void {
-    const c: *PublisherHandler = @ptrCast(@alignCast(userdata.?));
-    const buffer = c.memory_pool.create(c.allocator) catch return;
-    @memcpy(buffer[0..event.rtp.payload.len], event.rtp.payload);
-    const packet = rtp.Packet{
-        .header = event.rtp.header,
-        .payload = buffer[0..event.rtp.payload.len],
-    };
-    c.channel.send(c.io, packet);
-}
-
-fn sendPli(io: Io, receiver: *webrtc.RtpReceiver) !void {
-    while (true) {
-        try io.sleep(.fromSeconds(3), .awake);
-        receiver.sendPli() catch return;
-    }
-}
-
-fn sendDataToSubscriber(io: Io, sender: *webrtc.RtpSender, c: *BroadcastChannel) !void {
     var buffer: [1500]u8 = undefined;
     var sub = c.subscribe(clonePacket, &buffer);
 
-    while (c.receive(io, &sub)) |packet| {
-        sender.sendRtp(&packet) catch return;
+    while (c.receive(viewer.io, &sub)) |packet| {
+        viewer.send(&packet) catch return;
     } else |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => std.log.err("Error while receiving data from broadcast channel: {}", .{err}),
