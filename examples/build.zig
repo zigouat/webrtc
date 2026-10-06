@@ -43,6 +43,8 @@ pub fn build(b: *std.Build) void {
         },
     };
 
+    const build_step = b.step("all", "Build all apps");
+
     inline for (apps) |app| {
         const exe = b.addExecutable(.{
             .name = app.name,
@@ -70,5 +72,7 @@ pub fn build(b: *std.Build) void {
         if (b.args) |args| {
             run_cmd.addArgs(args);
         }
+
+        build_step.dependOn(&exe.step);
     }
 }
