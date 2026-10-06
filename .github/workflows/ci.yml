@@ -24,7 +24,7 @@ jobs:
       - run: zig build test --summary all
       - name: Build examples
         working-directory: examples
-        run: zig build
+        run: zig build all
   lint:
     runs-on: ubuntu-latest
     steps:
