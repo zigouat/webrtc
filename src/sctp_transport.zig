@@ -116,10 +116,7 @@ pub fn sendDataChannelMessage(sctp_transport: *SctpTranport, channel_id: Channel
     else
         TEXT_MESSAGE_PPID;
 
-    const copy = try sctp_transport.assoc.allocator.dupe(u8, data);
-    errdefer sctp_transport.assoc.allocator.free(copy);
-
-    try sctp_transport.handleWrite(copy, .{
+    try sctp_transport.handleWrite(data, .{
         .ppid = ppid,
         .stream_id = data_channel.id.?,
     });
@@ -142,9 +139,7 @@ pub fn getDataChannel(self: *SctpTranport, id: ChannelId) *DataChannel {
 }
 
 pub fn handleWrite(sctp_transport: *SctpTranport, data: []const u8, config: sctp.message.UserMessageConfig) !void {
-    const buffer = try sctp_transport.assoc.allocator.dupe(u8, data);
-    errdefer sctp_transport.assoc.allocator.free(buffer);
-    try sctp_transport.assoc.handleWrite(buffer, config);
+    try sctp_transport.assoc.handleWrite(data, config);
 }
 
 pub fn handleTimeout(sctp_transport: *SctpTranport, now: i64) !void {
@@ -195,7 +190,6 @@ pub fn handleRead(sctp_transport: *SctpTranport, data: []const u8, now: i64) !vo
         .message => |message| {
             try sctp_transport.handleAppData(message.ppid, message.stream_id, message.data);
         },
-        .release => |msg| sctp_transport.assoc.allocator.free(msg),
     };
 }
 
