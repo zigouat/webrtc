@@ -120,7 +120,10 @@ const ConnectionContext = struct {
                     try grp.concurrent(conn.io, sendMessage, .{ conn, id });
                 },
                 .close => |id| std.log.info("Data channel closed: {}", .{id}),
-                .message => |msg| std.debug.print("[{}]: {s}\n", .{ msg.channel_id, msg.data }),
+                .message => |msg| {
+                    std.debug.print("[{}]: {s}\n", .{ msg.channel_id, msg.data });
+                    conn.pc.allocator.free(msg.data);
+                },
             },
             else => {},
         };
