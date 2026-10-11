@@ -509,6 +509,7 @@ pub fn close(pc: *PeerConnection) void {
 pub const ReadResult = union(enum) {
     rtp: struct { RtpReceiverID, rtp.Packet },
     rtcp: RtcpIterator,
+    app_data: SctpTransport.MessageIterator,
     none,
 };
 
@@ -539,6 +540,9 @@ pub const RtcpIterator = struct {
 ///
 /// Not that in the case of RTP/RTCP packets, the packet is decrypted in place. Meaning that the data
 /// slice will be modified and the caller should not use it after this call.
+///
+/// `app_data` returns data channel messages, if any. Also it drives the SCTP transport state machine, not
+/// consuming the iterator will exercise backpressure on the SCTP association and data channels events will be stalled.
 pub fn handleRead(pc: *PeerConnection, message: webrtc.TransportMessage, now: i64) !ReadResult {
     const data_event = (try pc.dtls_transport.handleRead(
         message,
@@ -552,7 +556,7 @@ pub fn handleRead(pc: *PeerConnection, message: webrtc.TransportMessage, now: i6
     switch (data_event) {
         .rtp => |data| return try pc.handleRtpData(data),
         .rtcp => |data| return .{ .rtcp = .init(pc, data) },
-        .app_data => |data| try pc.sctp_transport.handleRead(data, now),
+        .app_data => |data| return if (try pc.sctp_transport.handleRead(data, now)) |msg| .{ .app_data = msg } else .none,
     }
 
     return .none;

@@ -64,11 +64,21 @@ const ConnectionContext = struct {
             try conn.mutex.lock(conn.io);
             defer conn.mutex.unlock(conn.io);
 
-            _ = conn.pc.handleRead(.{
+            var result = conn.pc.handleRead(.{
                 .data = inc.data,
                 .from = &inc.from,
                 .to = &conn.socket.address,
             }, now) catch continue;
+
+            switch (result) {
+                .app_data => |*it| {
+                    while (it.next() catch return) |msg| {
+                        std.debug.print("[{}]: {s}\n", .{ msg.channel_id, msg.data });
+                        conn.pc.allocator.free(msg.data);
+                    }
+                },
+                else => {},
+            }
 
             conn.handle(now) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
@@ -120,10 +130,6 @@ const ConnectionContext = struct {
                     try grp.concurrent(conn.io, sendMessage, .{ conn, id });
                 },
                 .close => |id| std.log.info("Data channel closed: {}", .{id}),
-                .message => |msg| {
-                    std.debug.print("[{}]: {s}\n", .{ msg.channel_id, msg.data });
-                    conn.pc.allocator.free(msg.data);
-                },
             },
             else => {},
         };
