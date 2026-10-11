@@ -11,15 +11,16 @@ pub const StreamResetFlag = struct {
 
 pub const State = enum { connecting, open, closing, closed };
 
+pub const UserMessage = struct {
+    channel_id: ChannelId,
+    binary: bool,
+    data: []const u8,
+};
+
 pub const Event = union(enum) {
     new: ChannelId,
     open: ChannelId,
     close: ChannelId,
-    message: struct {
-        channel_id: ChannelId,
-        binary: bool,
-        data: []const u8,
-    },
 };
 
 pub const MessageType = enum(u8) {
