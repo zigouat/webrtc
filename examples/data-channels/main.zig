@@ -113,7 +113,7 @@ const ConnectionContext = struct {
         while (true) {
             try conn.io.sleep(.fromSeconds(5), .awake);
             common.utils.randString(conn.io, &message);
-            conn.pc.sendDataChannelMessage(channel_id, &message) catch return;
+            conn.pc.getDataChannel(channel_id).send(&message) catch return;
         }
     }
 
@@ -124,7 +124,10 @@ const ConnectionContext = struct {
                 else => {},
             },
             .data_channel => |dc_event| switch (dc_event) {
-                .new => |id| std.log.info("New data channel: {}", .{id}),
+                .new => |id| {
+                    const dc = conn.pc.getDataChannel(id);
+                    std.log.info("New data channel: {} label=\"{s}\" protocol=\"{s}\"", .{ id, dc.getLabel(), dc.getProtocol() });
+                },
                 .open => |id| {
                     std.log.info("Data channel open: {}", .{id});
                     try grp.concurrent(conn.io, sendMessage, .{ conn, id });

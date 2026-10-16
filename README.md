@@ -58,3 +58,4 @@ The following projects are related to WebRTC and some of them used as a dependen
 * [media](https://github.com/zigouat/media) - A zig library for media common structures and codecs.
 * [media-protocols](https://github.com/zigouat/media-protocols) - A zig library for media protocols (RTP, RTCP, SDP, etc.).
 * [media-formats](https://github.com/zigouat/media-formats) - A zig library for muxers/demuxers (MP4, IVF, etc.).
+* [sctp](https://github.com/zigouat/sctp) - A zig implementation of the SCTP protocol.

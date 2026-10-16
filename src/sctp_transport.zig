@@ -1,7 +1,7 @@
 const std = @import("std");
 const sctp = @import("sctp");
 
-const DataChannel = @import("data_channel.zig");
+const DataChannel = @import("internal_data_channel.zig");
 const DtlsTransport = @import("dtls_transport.zig");
 const SctpTranport = @This();
 
@@ -85,17 +85,6 @@ pub fn nextStreamId(sctp_transport: *const SctpTranport, used_sids: []const u16)
         if (std.mem.indexOfScalar(u16, used_sids, sid) == null) return sid;
     }
     return error.NoAvailableStreamId;
-}
-
-pub fn closeDataChannel(sctp_transport: *SctpTranport, data_channel: *DataChannel) !void {
-    if (data_channel.ready_state == .closing or data_channel.ready_state == .closed) return;
-
-    const sid = data_channel.id orelse {
-        sctp_transport.markDataChannelDeleted(data_channel);
-        return;
-    };
-    try sctp_transport.resetStreams(&.{sid}, .{ .outgoing = true });
-    data_channel.ready_state = .closing;
 }
 
 pub fn handleWrite(sctp_transport: *SctpTranport, msg: sctp.message.UserMessage) !void {
@@ -196,15 +185,4 @@ pub fn resetStreams(sctp_transport: *SctpTranport, stream_ids: []const u16, flag
     _ = sctp_transport;
     _ = stream_ids;
     _ = flags;
-}
-
-fn markDataChannelDeleted(sctp_transport: *SctpTranport, channel_id: ChannelId) void {
-    _ = sctp_transport;
-    _ = channel_id;
-    // const pc: *PeerConnection = @alignCast(@fieldParentPtr("sctp_transport", sctp_transport));
-    // const data_channel = pc.getDataChannel(channel_id);
-
-    // data_channel.ready_state = .closed;
-    // data_channel.id = null;
-    // data_channel.deinit(sctp_transport.assoc.allocator);
 }

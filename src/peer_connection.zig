@@ -20,6 +20,7 @@ const Mid = @import("mid.zig");
 const NackConfig = @import("pc/nack_config.zig");
 const NackGenerator = @import("nack/generator.zig");
 const DataChannel = @import("data_channel.zig");
+const InternalDataChannel = @import("internal_data_channel.zig");
 
 const Io = std.Io;
 const PeerConnection = @This();
@@ -139,7 +140,7 @@ random: std.Random,
 
 streams: std.ArrayList(webrtc.MediaStream) = .empty,
 transceivers: std.ArrayList(RtpTransceiver),
-data_channels: std.ArrayList(DataChannel),
+data_channels: std.ArrayList(InternalDataChannel),
 sid_to_channel: std.AutoArrayHashMapUnmanaged(u16, DataChannel.ChannelId) = .empty,
 
 events: std.Deque(Event),
@@ -506,20 +507,20 @@ pub const DataChannelError = error{
     OutOfMemory,
 };
 
-pub fn getDataChannel(pc: *PeerConnection, id: DataChannel.ChannelId) *DataChannel {
+pub fn getDataChannel(pc: *PeerConnection, id: DataChannel.ChannelId) DataChannel {
     std.debug.assert(id < pc.data_channels.items.len);
-    return &pc.data_channels.items[id];
+    return .{ .id = id, .pc = pc };
 }
 
 /// Create a new data channel.
-pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataChannel.Parameters) DataChannelError!DataChannel.ChannelId {
+pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataChannel.Parameters) DataChannelError!DataChannel {
     try pc.checkNotClosed();
     if (label.len > constants.max_data_channel_label_length) return error.LabelTooLong;
     if (params.protocol.len > constants.max_data_channel_label_length) return error.ProtocolTooLong;
     if (params.max_packet_lifetime != 0 and params.max_retransmits != 0) return error.InvalidParameters;
 
     try pc.data_channels.ensureUnusedCapacity(pc.allocator, 1);
-    var data_channel = try DataChannel.init(pc.allocator, label, params);
+    var data_channel = try InternalDataChannel.init(pc.allocator, label, params);
     errdefer data_channel.deinit(pc.allocator);
 
     const channel_id = pc.data_channels.items.len;
@@ -532,14 +533,32 @@ pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataCha
     }
 
     pc.data_channels.appendAssumeCapacity(data_channel);
-    return @intCast(channel_id);
+    return pc.getDataChannel(@intCast(channel_id));
 }
 
 pub fn sendDataChannelMessage(pc: *PeerConnection, channel_id: DataChannel.ChannelId, message: []const u8) !void {
     try pc.checkNotClosed();
-    const dc = pc.getDataChannel(channel_id);
+    const dc = pc.getInternalDataChannel(channel_id);
     if (dc.ready_state != .open) return error.DataChannelNotOpen;
     try pc.sctp_transport.handleWrite(dc.wrapMessage(message, false));
+}
+
+pub fn closeDataChannel(pc: *PeerConnection, channel_id: DataChannel.ChannelId) !void {
+    const dc = pc.getInternalDataChannel(channel_id);
+    if (dc.ready_state == .closing or dc.ready_state == .closed) return;
+
+    const sid = dc.id orelse {
+        try pc.events.pushBack(pc.allocator, .{ .data_channel = .{ .close = channel_id } });
+        dc.ready_state = .closed;
+        return;
+    };
+    try pc.sctp_transport.resetStreams(&.{sid}, .{ .outgoing = true });
+    dc.ready_state = .closing;
+}
+
+fn getInternalDataChannel(pc: *PeerConnection, id: DataChannel.ChannelId) *InternalDataChannel {
+    std.debug.assert(id < pc.data_channels.items.len);
+    return &pc.data_channels.items[id];
 }
 
 pub fn close(pc: *PeerConnection) void {
@@ -609,7 +628,7 @@ pub const SctpMessageIterator = struct {
                     pc.events.pushBackAssumeCapacity(.{ .data_channel = .{ .open = id } });
                 },
                 .ack => |sid| if (pc.sid_to_channel.get(sid)) |channel_id| {
-                    pc.getDataChannel(channel_id).ready_state = .open;
+                    pc.getInternalDataChannel(channel_id).ready_state = .open;
                     try pc.events.pushBack(pc.allocator, .{ .data_channel = .{ .open = channel_id } });
                 },
                 .message => |m| if (pc.sid_to_channel.get(m.stream_id)) |channel_id| return .{
@@ -1241,7 +1260,7 @@ fn handleSctpTransportEvents(pc: *PeerConnection) !void {
     };
 }
 
-fn assignStreamId(pc: *PeerConnection, dc: *DataChannel, channel_id: DataChannel.ChannelId) !void {
+fn assignStreamId(pc: *PeerConnection, dc: *InternalDataChannel, channel_id: DataChannel.ChannelId) !void {
     try pc.sid_to_channel.ensureUnusedCapacity(pc.allocator, 1);
     const sid = try pc.sctp_transport.nextStreamId(pc.sid_to_channel.keys());
     pc.sid_to_channel.putAssumeCapacity(sid, channel_id);
@@ -1426,7 +1445,7 @@ test {
     _ = @import("nack/send_buffer.zig");
     _ = @import("nack/receive_log.zig");
     _ = @import("nack/generator.zig");
-    _ = @import("data_channel.zig");
+    _ = @import("internal_data_channel.zig");
 }
 
 test "nextPeerConnectionState" {

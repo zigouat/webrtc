@@ -1,281 +1,33 @@
-const std = @import("std");
-const sctp = @import("sctp");
+const PeerConnection = @import("peer_connection.zig");
+const InternalDataChannel = @import("internal_data_channel.zig");
 
 const DataChannel = @This();
 
-pub const ChannelId = u32;
+pub const ChannelId = InternalDataChannel.ChannelId;
+pub const Parameters = InternalDataChannel.Parameters;
+pub const State = InternalDataChannel.State;
+pub const Event = InternalDataChannel.Event;
+pub const UserMessage = InternalDataChannel.UserMessage;
 
-pub const StreamResetFlag = struct {
-    outgoing: bool = false,
-    incoming: bool = false,
-};
+id: ChannelId,
+pc: *PeerConnection,
 
-pub const State = enum { connecting, open, closing, closed };
-
-pub const UserMessage = struct {
-    channel_id: ChannelId,
-    binary: bool,
-    data: []const u8,
-};
-
-pub const Event = union(enum) {
-    new: ChannelId,
-    open: ChannelId,
-    close: ChannelId,
-};
-
-pub const MessageType = enum(u8) {
-    ack = 0x02,
-    open = 0x03,
-};
-
-pub const Message = union(MessageType) {
-    pub const ChannelType = enum(u8) {
-        reliable = 0x00,
-        reliable_unordered = 0x80,
-        partial_reliable_rexmit = 0x01,
-        partial_reliable_rexmit_unordered = 0x81,
-        partial_reliable_timed = 0x02,
-        partial_reliable_timed_unordered = 0x82,
-    };
-
-    ack: void,
-    open: struct {
-        channel_type: ChannelType,
-        priority: u16,
-        reliability_param: u32,
-        label: []const u8,
-        protocol: []const u8,
-    },
-
-    pub fn parse(data: []const u8) error{ParseError}!Message {
-        var r = std.Io.Reader.fixed(data);
-        const message_type = r.takeEnum(MessageType, .big) catch return error.ParseError;
-        switch (message_type) {
-            .ack => {
-                if (data.len != 1) return error.ParseError;
-                return .ack;
-            },
-            .open => {
-                const channel_type = r.takeEnum(ChannelType, .big) catch return error.ParseError;
-                const priority = r.takeInt(u16, .big) catch return error.ParseError;
-                const reliability_param = r.takeInt(u32, .big) catch return error.ParseError;
-
-                const label_length = r.takeInt(u16, .big) catch return error.ParseError;
-                const protocol_length = r.takeInt(u16, .big) catch return error.ParseError;
-
-                const label = r.take(label_length) catch return error.ParseError;
-                const protocol = r.take(protocol_length) catch return error.ParseError;
-
-                if (r.bufferedLen() != 0) return error.ParseError;
-
-                return Message{
-                    .open = .{
-                        .channel_type = channel_type,
-                        .priority = priority,
-                        .reliability_param = reliability_param,
-                        .label = label,
-                        .protocol = protocol,
-                    },
-                };
-            },
-        }
-    }
-
-    pub fn toParameters(message: *const Message, stream_id: u16) Parameters {
-        const open_msg = message.open;
-        return DataChannel.Parameters{
-            .protocol = open_msg.protocol,
-            .ordered = switch (open_msg.channel_type) {
-                .reliable, .partial_reliable_rexmit, .partial_reliable_timed => true,
-                else => false,
-            },
-            .max_packet_lifetime = switch (open_msg.channel_type) {
-                .partial_reliable_timed, .partial_reliable_timed_unordered => open_msg.reliability_param,
-                else => 0,
-            },
-            .max_retransmits = switch (open_msg.channel_type) {
-                .partial_reliable_rexmit, .partial_reliable_rexmit_unordered => open_msg.reliability_param,
-                else => 0,
-            },
-            .id = stream_id,
-        };
-    }
-};
-
-pub const Parameters = struct {
-    ordered: bool = true,
-    max_packet_lifetime: u32 = 0,
-    max_retransmits: u32 = 0,
-    protocol: []const u8 = "",
-    id: ?u16 = null,
-};
-
-id: ?u16,
-slice: []const u8, // label + protocol
-label_length: u16,
-ordered: bool,
-max_packet_lifetime: u32,
-max_retransmits: u32,
-ready_state: State,
-
-pub fn init(allocator: std.mem.Allocator, label: []const u8, params: Parameters) std.mem.Allocator.Error!DataChannel {
-    const slice = try allocator.alloc(u8, label.len + params.protocol.len);
-    @memcpy(slice[0..label.len], label);
-    @memcpy(slice[label.len..], params.protocol);
-
-    return DataChannel{
-        .id = params.id,
-        .slice = slice,
-        .label_length = @intCast(label.len),
-        .ordered = params.ordered,
-        .max_packet_lifetime = params.max_packet_lifetime,
-        .max_retransmits = params.max_retransmits,
-        .ready_state = State.connecting,
-    };
+pub fn send(dc: DataChannel, data: []const u8) !void {
+    return dc.pc.sendDataChannelMessage(dc.id, data);
 }
 
-pub fn deinit(data_channel: *DataChannel, allocator: std.mem.Allocator) void {
-    allocator.free(data_channel.slice);
-    data_channel.slice = &.{};
-    data_channel.label_length = 0;
+pub fn close(dc: DataChannel) !void {
+    return dc.pc.closeDataChannel(dc.id);
 }
 
-pub fn getLabel(data_channel: *DataChannel) []const u8 {
-    return data_channel.slice[0..data_channel.label_length];
+pub fn getLabel(dc: DataChannel) []const u8 {
+    return dc.internal().getLabel();
 }
 
-pub fn getProtocol(data_channel: *DataChannel) []const u8 {
-    return data_channel.slice[data_channel.label_length..];
+pub fn getProtocol(dc: DataChannel) []const u8 {
+    return dc.internal().getProtocol();
 }
 
-const DCEP_PPID: u32 = 50;
-const TEXT_MESSAGE_PPID: u32 = 51;
-const BINARY_MESSAGE_PPID: u32 = 53;
-const EMPTY_TEXT_MESSAGE_PPID: u32 = 56;
-const EMPTY_BINRAY_MESSAGE_PPID: u32 = 57;
-
-pub fn writeOpenMessage(data_channel: *const DataChannel, buffer: []u8) std.Io.Writer.Error!sctp.message.UserMessage {
-    var w = std.Io.Writer.fixed(buffer);
-
-    try w.writeInt(u8, @intFromEnum(MessageType.open), .big);
-    const channel_type = data_channel.getChannelType();
-    try w.writeInt(u8, @intFromEnum(channel_type), .big);
-    try w.writeInt(u16, 0, .big); // priority
-    try w.writeInt(u32, switch (channel_type) {
-        .reliable, .reliable_unordered => 0,
-        .partial_reliable_rexmit, .partial_reliable_rexmit_unordered => data_channel.max_retransmits,
-        .partial_reliable_timed, .partial_reliable_timed_unordered => data_channel.max_packet_lifetime,
-    }, .big);
-    try w.writeInt(u16, data_channel.label_length, .big);
-    try w.writeInt(u16, @intCast(data_channel.slice.len - data_channel.label_length), .big);
-    try w.writeAll(data_channel.slice);
-
-    return sctp.message.UserMessage{
-        .data = w.buffered(),
-        .ppid = DCEP_PPID,
-        .stream_id = data_channel.id.?,
-        .unordered = false,
-        .stream_seq = 0,
-    };
-}
-
-pub fn writeAckMessage(data_channel: *const DataChannel) sctp.message.UserMessage {
-    return sctp.message.UserMessage{
-        .data = &[_]u8{@intFromEnum(MessageType.ack)},
-        .ppid = DCEP_PPID,
-        .stream_id = data_channel.id.?,
-        .unordered = false,
-        .stream_seq = 0,
-    };
-}
-
-pub fn wrapMessage(dc: *const DataChannel, data: []const u8, binary: bool) sctp.message.UserMessage {
-    const ppid = if (binary and data.len == 0)
-        EMPTY_BINRAY_MESSAGE_PPID
-    else if (binary)
-        BINARY_MESSAGE_PPID
-    else if (data.len == 0)
-        EMPTY_TEXT_MESSAGE_PPID
-    else
-        TEXT_MESSAGE_PPID;
-
-    return sctp.message.UserMessage{
-        .data = data,
-        .ppid = ppid,
-        .stream_id = dc.id.?,
-        .unordered = !dc.ordered,
-        .stream_seq = 0,
-    };
-}
-
-pub fn format(data_channel: *DataChannel, writer: *std.Io.Writer) !void {
-    try writer.print("DataChannel {{ id: {?}, label: \"{s}\", ordered: {}, max_packet_lifetime: {}, max_retransmits: {}, protocol: \"{s}\", ready_state: {} }}", .{
-        data_channel.id,
-        data_channel.label_length,
-        data_channel.ordered,
-        data_channel.max_packet_lifetime,
-        data_channel.max_retransmits,
-        data_channel.protocol,
-        data_channel.ready_state,
-    });
-}
-
-fn getChannelType(data_channel: *const DataChannel) Message.ChannelType {
-    if (data_channel.ordered) {
-        if (data_channel.max_packet_lifetime != 0) {
-            return .partial_reliable_timed;
-        } else if (data_channel.max_retransmits != 0) {
-            return .partial_reliable_rexmit;
-        } else {
-            return .reliable;
-        }
-    } else {
-        if (data_channel.max_packet_lifetime != 0) {
-            return .partial_reliable_timed_unordered;
-        } else if (data_channel.max_retransmits != 0) {
-            return .partial_reliable_rexmit_unordered;
-        } else {
-            return .reliable_unordered;
-        }
-    }
-}
-
-const testing = std.testing;
-
-test "DataChannel.Message.parse" {
-    const data = [_]u8{
-        0x03, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x04,
-        0x00, 0x00, 0x64, 0x61, 0x74,
-        0x61,
-    };
-    const msg = try Message.parse(&data);
-    try testing.expect(msg == .open);
-
-    const open_msg = msg.open;
-    try testing.expectEqual(.reliable, open_msg.channel_type);
-    try testing.expectEqual(0, open_msg.priority);
-    try testing.expectEqual(0, open_msg.reliability_param);
-    try testing.expectEqualStrings("data", open_msg.label);
-    try testing.expectEqualStrings("", open_msg.protocol);
-}
-
-test "DataChannel.writeOpenMessage" {
-    const expected = [_]u8{
-        0x03, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x04,
-        0x00, 0x00, 0x64, 0x61, 0x74,
-        0x61,
-    };
-    var buffer: [1024]u8 = undefined;
-
-    var data_channel = try init(testing.allocator, "data", .{
-        .id = 0,
-        .ordered = true,
-    });
-    defer data_channel.deinit(testing.allocator);
-
-    const written = try data_channel.writeOpenMessage(&buffer);
-    try testing.expectEqualSlices(u8, &expected, written.data);
+fn internal(dc: DataChannel) *InternalDataChannel {
+    return &dc.pc.data_channels.items[dc.id];
 }
