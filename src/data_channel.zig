@@ -1,4 +1,5 @@
 const std = @import("std");
+const sctp = @import("sctp");
 
 const DataChannel = @This();
 
@@ -148,7 +149,13 @@ pub fn getProtocol(data_channel: *DataChannel) []const u8 {
     return data_channel.slice[data_channel.label_length..];
 }
 
-pub fn writeOpenMessage(data_channel: *DataChannel, buffer: []u8) std.Io.Writer.Error![]const u8 {
+const DCEP_PPID: u32 = 50;
+const TEXT_MESSAGE_PPID: u32 = 51;
+const BINARY_MESSAGE_PPID: u32 = 53;
+const EMPTY_TEXT_MESSAGE_PPID: u32 = 56;
+const EMPTY_BINRAY_MESSAGE_PPID: u32 = 57;
+
+pub fn writeOpenMessage(data_channel: *const DataChannel, buffer: []u8) std.Io.Writer.Error!sctp.message.UserMessage {
     var w = std.Io.Writer.fixed(buffer);
 
     try w.writeInt(u8, @intFromEnum(MessageType.open), .big);
@@ -164,7 +171,42 @@ pub fn writeOpenMessage(data_channel: *DataChannel, buffer: []u8) std.Io.Writer.
     try w.writeInt(u16, @intCast(data_channel.slice.len - data_channel.label_length), .big);
     try w.writeAll(data_channel.slice);
 
-    return w.buffered();
+    return sctp.message.UserMessage{
+        .data = w.buffered(),
+        .ppid = DCEP_PPID,
+        .stream_id = data_channel.id.?,
+        .unordered = false,
+        .stream_seq = 0,
+    };
+}
+
+pub fn writeAckMessage(data_channel: *const DataChannel) sctp.message.UserMessage {
+    return sctp.message.UserMessage{
+        .data = &[_]u8{@intFromEnum(MessageType.ack)},
+        .ppid = DCEP_PPID,
+        .stream_id = data_channel.id.?,
+        .unordered = false,
+        .stream_seq = 0,
+    };
+}
+
+pub fn wrapMessage(dc: *const DataChannel, data: []const u8, binary: bool) sctp.message.UserMessage {
+    const ppid = if (binary and data.len == 0)
+        EMPTY_BINRAY_MESSAGE_PPID
+    else if (binary)
+        BINARY_MESSAGE_PPID
+    else if (data.len == 0)
+        EMPTY_TEXT_MESSAGE_PPID
+    else
+        TEXT_MESSAGE_PPID;
+
+    return sctp.message.UserMessage{
+        .data = data,
+        .ppid = ppid,
+        .stream_id = dc.id.?,
+        .unordered = !dc.ordered,
+        .stream_seq = 0,
+    };
 }
 
 pub fn format(data_channel: *DataChannel, writer: *std.Io.Writer) !void {
@@ -179,7 +221,7 @@ pub fn format(data_channel: *DataChannel, writer: *std.Io.Writer) !void {
     });
 }
 
-fn getChannelType(data_channel: *DataChannel) Message.ChannelType {
+fn getChannelType(data_channel: *const DataChannel) Message.ChannelType {
     if (data_channel.ordered) {
         if (data_channel.max_packet_lifetime != 0) {
             return .partial_reliable_timed;
@@ -235,5 +277,5 @@ test "DataChannel.writeOpenMessage" {
     defer data_channel.deinit(testing.allocator);
 
     const written = try data_channel.writeOpenMessage(&buffer);
-    try testing.expectEqualSlices(u8, &expected, written);
+    try testing.expectEqualSlices(u8, &expected, written.data);
 }
