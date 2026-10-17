@@ -201,7 +201,7 @@ pub fn wrapMessage(dc: *const InternalDataChannel, data: []const u8, binary: boo
         TEXT_MESSAGE_PPID;
 
     return sctp.message.UserMessage{
-        .data = data,
+        .data = if (data.len == 0) &[_]u8{0} else data,
         .ppid = ppid,
         .stream_id = dc.id.?,
         .unordered = !dc.ordered,
@@ -414,24 +414,24 @@ test "InternalDataChannel.wrapMessage" {
     var unordered = try init(testing.allocator, "data", .{ .id = 2, .ordered = false });
     defer unordered.deinit(testing.allocator);
 
-    const Case = struct { []const u8, bool, u32 };
+    const Case = struct { []const u8, []const u8, bool, u32 };
     const cases = [_]Case{
-        .{ "hello", false, TEXT_MESSAGE_PPID },
-        .{ "", false, EMPTY_TEXT_MESSAGE_PPID },
-        .{ "hello", true, BINARY_MESSAGE_PPID },
-        .{ "", true, EMPTY_BINRAY_MESSAGE_PPID },
+        .{ "hello", "hello", false, TEXT_MESSAGE_PPID },
+        .{ "", &[_]u8{0}, false, EMPTY_TEXT_MESSAGE_PPID },
+        .{ "hello", "hello", true, BINARY_MESSAGE_PPID },
+        .{ "", &[_]u8{0}, true, EMPTY_BINRAY_MESSAGE_PPID },
     };
 
     for (cases) |case| {
-        const data, const binary, const ppid = case;
+        const data, const expected, const is_binary, const ppid = case;
 
-        const msg = ordered.wrapMessage(data, binary);
+        const msg = ordered.wrapMessage(data, is_binary);
         try testing.expectEqual(ppid, msg.ppid);
-        try testing.expectEqualSlices(u8, data, msg.data);
+        try testing.expectEqualSlices(u8, expected, msg.data);
         try testing.expectEqual(1, msg.stream_id);
         try testing.expectEqual(false, msg.unordered);
 
-        try testing.expectEqual(true, unordered.wrapMessage(data, binary).unordered);
+        try testing.expectEqual(true, unordered.wrapMessage(data, is_binary).unordered);
     }
 }
 
