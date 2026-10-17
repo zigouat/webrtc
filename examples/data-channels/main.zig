@@ -71,11 +71,9 @@ const ConnectionContext = struct {
             }, now) catch continue;
 
             switch (result) {
-                .app_data => |*it| {
-                    while (it.next() catch return) |msg| {
-                        std.debug.print("[{}]: {s}\n", .{ msg.channel_id, msg.data });
-                        conn.pc.allocator.free(msg.data);
-                    }
+                .app_data => |*it| while (it.next() catch return) |msg| {
+                    std.debug.print("[{s}]: {s}\n", .{ conn.pc.getDataChannel(msg.channel_id).getLabel(), msg.data });
+                    conn.pc.allocator.free(msg.data);
                 },
                 else => {},
             }
@@ -109,11 +107,14 @@ const ConnectionContext = struct {
 
     fn sendMessage(conn: *ConnectionContext, channel_id: webrtc.DataChannel.ChannelId) !void {
         var message: [20]u8 = @splat(0);
-
+        const dc = conn.pc.getDataChannel(channel_id);
         while (true) {
             try conn.io.sleep(.fromSeconds(5), .awake);
             common.utils.randString(conn.io, &message);
-            conn.pc.getDataChannel(channel_id).send(&message) catch return;
+            dc.sendText(&message) catch |err| {
+                std.log.err("Failed to send data channel message: {}", .{err});
+                return;
+            };
         }
     }
 
@@ -126,10 +127,11 @@ const ConnectionContext = struct {
             .data_channel => |dc_event| switch (dc_event) {
                 .new => |id| {
                     const dc = conn.pc.getDataChannel(id);
-                    std.log.info("New data channel: {} label=\"{s}\" protocol=\"{s}\"", .{ id, dc.getLabel(), dc.getProtocol() });
+                    std.log.info("New data channel: {s}", .{dc.getLabel()});
                 },
                 .open => |id| {
-                    std.log.info("Data channel open: {}", .{id});
+                    const dc = conn.pc.getDataChannel(id);
+                    std.log.info("Data channel open: {s}", .{dc.getLabel()});
                     try grp.concurrent(conn.io, sendMessage, .{ conn, id });
                 },
                 .close => |id| std.log.info("Data channel closed: {}", .{id}),
