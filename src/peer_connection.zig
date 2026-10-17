@@ -536,11 +536,16 @@ pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataCha
     return pc.getDataChannel(@intCast(channel_id));
 }
 
-pub fn sendDataChannelMessage(pc: *PeerConnection, channel_id: DataChannel.ChannelId, message: []const u8) !void {
+pub fn sendDataChannelMessage(
+    pc: *PeerConnection,
+    channel_id: DataChannel.ChannelId,
+    message: []const u8,
+    is_binary: bool,
+) !void {
     try pc.checkNotClosed();
     const dc = pc.getInternalDataChannel(channel_id);
     if (dc.ready_state != .open) return error.DataChannelNotOpen;
-    try pc.sctp_transport.handleWrite(dc.wrapMessage(message, false));
+    try pc.sctp_transport.handleWrite(dc.wrapMessage(message, is_binary));
 }
 
 pub fn closeDataChannel(pc: *PeerConnection, channel_id: DataChannel.ChannelId) !void {

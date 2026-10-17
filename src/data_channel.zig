@@ -13,7 +13,11 @@ id: ChannelId,
 pc: *PeerConnection,
 
 pub fn send(dc: DataChannel, data: []const u8) !void {
-    return dc.pc.sendDataChannelMessage(dc.id, data);
+    return dc.pc.sendDataChannelMessage(dc.id, data, true);
+}
+
+pub fn sendText(dc: DataChannel, text: []const u8) !void {
+    return dc.pc.sendDataChannelMessage(dc.id, text, false);
 }
 
 pub fn close(dc: DataChannel) !void {
