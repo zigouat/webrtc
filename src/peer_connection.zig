@@ -519,14 +519,9 @@ pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataCha
     const channel_id = pc.data_channels.items.len;
 
     if (pc.sctp_transport.connection_state == .connected) {
-        var buffer: [1024]u8 = undefined;
         try pc.assignStreamId(&data_channel, @intCast(channel_id));
         errdefer _ = pc.sid_to_channel.swapRemove(data_channel.id.?);
-        const open_msg = data_channel.writeOpenMessage(&buffer) catch unreachable;
-        pc.sctp_transport.handleWrite(open_msg) catch |err| switch (err) {
-            error.AssocNotConnected => unreachable,
-            else => |e| return e,
-        };
+        try pc.sendOpenMessage(&data_channel);
     }
 
     pc.data_channels.appendAssumeCapacity(data_channel);
@@ -1272,7 +1267,6 @@ fn findTransceiverByMid(pc: *PeerConnection, mid: Mid.Int) ?*RtpTransceiver {
 }
 
 fn handleSctpTransportEvents(pc: *PeerConnection) std.mem.Allocator.Error!void {
-    var buffer: [1024]u8 = undefined;
     while (pc.sctp_transport.pollEvent()) |event| switch (event) {
         .connection_state => |state| switch (state) {
             .connected => for (pc.data_channels.items, 0..) |*dc, idx| {
@@ -1285,11 +1279,7 @@ fn handleSctpTransportEvents(pc: *PeerConnection) std.mem.Allocator.Error!void {
                     },
                     else => |e| return e,
                 };
-                const open_msg = dc.writeOpenMessage(&buffer) catch unreachable;
-                pc.sctp_transport.handleWrite(open_msg) catch |err| switch (err) {
-                    error.AssocNotConnected => unreachable,
-                    else => |e| return e,
-                };
+                try pc.sendOpenMessage(dc);
             },
             .closed => for (pc.data_channels.items, 0..) |*dc, idx| {
                 if (dc.ready_state == .closed) continue;
@@ -1301,6 +1291,14 @@ fn handleSctpTransportEvents(pc: *PeerConnection) std.mem.Allocator.Error!void {
         .buffered_amount_low_threshold => |stream_id| if (pc.sid_to_channel.get(stream_id)) |channel_id| {
             try pc.events.pushBack(pc.allocator, .{ .data_channel = .{ .buffered_amount_low_threshold = channel_id } });
         },
+    };
+}
+
+fn sendOpenMessage(pc: *PeerConnection, dc: *const InternalDataChannel) std.mem.Allocator.Error!void {
+    const open_msg = dc.writeOpenMessage(pc.int_buffers[packet_size..]) catch unreachable;
+    pc.sctp_transport.handleWrite(open_msg) catch |err| switch (err) {
+        error.AssocNotConnected => unreachable,
+        else => |e| return e,
     };
 }
 
