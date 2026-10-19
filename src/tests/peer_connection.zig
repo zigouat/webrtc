@@ -665,6 +665,45 @@ test "PeerConnection.negotiation between peers: add/remove tracks" {
     try testing.expect(event == null);
 }
 
+test "PeerConnection.createDataChannel: invalid parameters" {
+    var conn = try Connection.init(.{});
+    defer conn.deinit();
+
+    const long_label: [257]u8 = @splat('a');
+    try testing.expectError(error.LabelTooLong, conn.pc.createDataChannel(&long_label, .{}));
+    try testing.expectError(error.ProtocolTooLong, conn.pc.createDataChannel("dc", .{ .protocol = &long_label }));
+    try testing.expectError(error.InvalidParameters, conn.pc.createDataChannel("dc", .{ .id = 1 }));
+    try testing.expectError(
+        error.InvalidParameters,
+        conn.pc.createDataChannel("dc", .{ .max_retransmits = 1, .max_packet_lifetime = 1 }),
+    );
+    try testing.expectEqual(0, conn.pc.data_channels.items.len);
+}
+
+test "PeerConnection.DataChannel.close: before sctp connected" {
+    var conn = try Connection.init(.{});
+    defer conn.deinit();
+
+    const dc = try conn.pc.createDataChannel("dc", .{});
+    try dc.close();
+    try conn.expectEvent(.data_channel, .{ .close = dc.id });
+    try testing.expectError(error.DataChannelNotOpen, dc.sendText("hello"));
+
+    try dc.close();
+    try conn.expectNoEvent(.data_channel);
+}
+
+test "PeerConnection.close: closes data channels" {
+    var conn = try Connection.init(.{});
+    defer conn.deinit();
+
+    const dc = try conn.pc.createDataChannel("dc", .{});
+    conn.pc.close();
+
+    try testing.expectEqual(.closed, conn.pc.data_channels.items[dc.id].ready_state);
+    try testing.expectError(error.DataChannelNotOpen, dc.sendText("hello"));
+}
+
 fn negotiate(pc1: *PeerConnection, pc2: *PeerConnection) !void {
     const offer = try pc1.createOffer();
     try pc1.setLocalDescription(offer);

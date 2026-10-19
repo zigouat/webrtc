@@ -1,3 +1,4 @@
+const std = @import("std");
 const PeerConnection = @import("peer_connection.zig");
 const InternalDataChannel = @import("internal_data_channel.zig");
 
@@ -9,25 +10,33 @@ pub const State = InternalDataChannel.State;
 pub const Event = InternalDataChannel.Event;
 pub const UserMessage = InternalDataChannel.UserMessage;
 
-pub const Error = error{
+pub const CreateError = error{
     ConnectionClosed,
+    LabelTooLong,
+    ProtocolTooLong,
+    InvalidParameters,
+    NoAvailableStreamId,
+} || std.mem.Allocator.Error;
+
+pub const SendError = error{
     DataChannelNotOpen,
-    OutOfMemory,
-    AssocNotConnected,
-};
+    MessageTooLarge,
+} || std.mem.Allocator.Error;
+
+pub const CloseError = std.mem.Allocator.Error;
 
 id: ChannelId,
 pc: *PeerConnection,
 
-pub fn send(dc: DataChannel, data: []const u8) Error!void {
+pub fn send(dc: DataChannel, data: []const u8) SendError!void {
     return dc.pc.sendDataChannelMessage(dc.id, data, true);
 }
 
-pub fn sendText(dc: DataChannel, text: []const u8) Error!void {
+pub fn sendText(dc: DataChannel, text: []const u8) SendError!void {
     return dc.pc.sendDataChannelMessage(dc.id, text, false);
 }
 
-pub fn close(dc: DataChannel) error{OutOfMemory}!void {
+pub fn close(dc: DataChannel) CloseError!void {
     return dc.pc.closeDataChannel(dc.id);
 }
 

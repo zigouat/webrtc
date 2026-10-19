@@ -15,6 +15,8 @@ const EMPTY_BINRAY_MESSAGE_PPID: u32 = 57;
 
 pub const ConnectionState = enum(u8) { new, connecting, connected, closed };
 
+pub const default_max_message_size = 65536;
+
 pub const ReadError = error{InvalidPacket} || std.mem.Allocator.Error;
 pub const WriteError = error{AssocNotConnected} || std.mem.Allocator.Error;
 
@@ -49,7 +51,7 @@ pub fn init(allocator: std.mem.Allocator, init_config: InitConfig) SctpTranport 
             .random = init_config.random,
             .receive_buffer_size = 4 * 1024 * 1024,
         }),
-        .max_message_size = 0,
+        .max_message_size = default_max_message_size,
     };
 }
 
@@ -105,7 +107,7 @@ pub fn handleWrite(sctp_transport: *SctpTranport, msg: sctp.message.UserMessage)
         .stream_id = msg.stream_id,
         .unordered = msg.unordered,
     }) catch |err| switch (err) {
-        error.InvalidState => {}, // ignore messages on shutdown
+        error.InvalidState => return error.AssocNotConnected,
         else => |e| return e,
     };
 }

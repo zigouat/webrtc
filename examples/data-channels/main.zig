@@ -135,6 +135,7 @@ const ConnectionContext = struct {
                     try grp.concurrent(conn.io, sendMessage, .{ conn, id });
                 },
                 .close => |id| std.log.info("Data channel closed: {}", .{id}),
+                else => {},
             },
             else => {},
         };
