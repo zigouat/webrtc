@@ -49,7 +49,6 @@ pub fn init(allocator: std.mem.Allocator, init_config: InitConfig) SctpTranport 
             .source_port = init_config.local_port,
             .dest_port = init_config.remote_port,
             .random = init_config.random,
-            .receive_buffer_size = 4 * 1024 * 1024,
         }),
         .max_message_size = default_max_message_size,
     };
