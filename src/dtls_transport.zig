@@ -158,17 +158,14 @@ pub fn handleRead(transport: *DtlsTransport, message: webrtc.TransportMessage, n
         now,
     );
 
-    switch (result) {
-        .app_data => |app_data| if (try transport.handleIceData(
-            now,
-            app_data,
-            buffer,
-        )) |event| return event,
-        .consumed => {},
-    }
+    const event = switch (result) {
+        .app_data => |app_data| try transport.handleIceData(now, app_data, buffer),
+        .consumed => null,
+    };
 
+    // Always drain events, data may be bundled with handshake messages.
     try transport.drainEvents(now);
-    return null;
+    return event;
 }
 
 pub fn handleTimeout(transport: *DtlsTransport, now: i64) !void {

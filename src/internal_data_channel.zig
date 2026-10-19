@@ -22,6 +22,7 @@ pub const Event = union(enum) {
     new: ChannelId,
     open: ChannelId,
     close: ChannelId,
+    buffered_amount_low_threshold: ChannelId,
 };
 
 pub const MessageType = enum(u8) {
@@ -117,6 +118,7 @@ label_length: u16,
 ordered: bool,
 max_packet_lifetime: u32,
 max_retransmits: u32,
+buffered_amount_low_threshold: u32,
 ready_state: State,
 
 pub fn init(allocator: std.mem.Allocator, label: []const u8, params: Parameters) std.mem.Allocator.Error!InternalDataChannel {
@@ -131,6 +133,7 @@ pub fn init(allocator: std.mem.Allocator, label: []const u8, params: Parameters)
         .ordered = params.ordered,
         .max_packet_lifetime = params.max_packet_lifetime,
         .max_retransmits = params.max_retransmits,
+        .buffered_amount_low_threshold = 0,
         .ready_state = State.connecting,
     };
 }
@@ -190,7 +193,9 @@ pub fn writeAckMessage(data_channel: *const InternalDataChannel) sctp.message.Us
     };
 }
 
-pub fn wrapMessage(dc: *const InternalDataChannel, data: []const u8, binary: bool) sctp.message.UserMessage {
+pub fn wrapMessage(dc: *const InternalDataChannel, data: []const u8, binary: bool) error{DataChannelNotOpen}!sctp.message.UserMessage {
+    if (dc.ready_state != .open) return error.DataChannelNotOpen;
+
     const ppid = if (binary and data.len == 0)
         EMPTY_BINRAY_MESSAGE_PPID
     else if (binary)
@@ -413,6 +418,8 @@ test "InternalDataChannel.wrapMessage" {
     defer ordered.deinit(testing.allocator);
     var unordered = try init(testing.allocator, "data", .{ .id = 2, .ordered = false });
     defer unordered.deinit(testing.allocator);
+    ordered.ready_state = .open;
+    unordered.ready_state = .open;
 
     const Case = struct { []const u8, []const u8, bool, u32 };
     const cases = [_]Case{
@@ -425,13 +432,24 @@ test "InternalDataChannel.wrapMessage" {
     for (cases) |case| {
         const data, const expected, const is_binary, const ppid = case;
 
-        const msg = ordered.wrapMessage(data, is_binary);
+        const msg = try ordered.wrapMessage(data, is_binary);
         try testing.expectEqual(ppid, msg.ppid);
         try testing.expectEqualSlices(u8, expected, msg.data);
         try testing.expectEqual(1, msg.stream_id);
         try testing.expectEqual(false, msg.unordered);
 
-        try testing.expectEqual(true, unordered.wrapMessage(data, is_binary).unordered);
+        try testing.expectEqual(true, (try unordered.wrapMessage(data, is_binary)).unordered);
+    }
+}
+
+test "InternalDataChannel.wrapMessage: not open" {
+    var data_channel = try init(testing.allocator, "data", .{ .id = 1 });
+    defer data_channel.deinit(testing.allocator);
+
+    for ([_]State{ .connecting, .closing, .closed }) |state| {
+        data_channel.ready_state = state;
+        try testing.expectError(error.DataChannelNotOpen, data_channel.wrapMessage("hello", false));
+        try testing.expectError(error.DataChannelNotOpen, data_channel.wrapMessage("hello", true));
     }
 }
 

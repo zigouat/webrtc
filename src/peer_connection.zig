@@ -33,7 +33,7 @@ pub const RtpSenderID = u32;
 pub const RtpReceiverID = u32;
 
 pub const Error = error{
-    InvalidState,
+    ConnectionClosed,
     /// Returned when an ssrc cannot be
     /// generated for a sender
     SsrcUnavailable,
@@ -313,7 +313,7 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: 
 /// Removes a track from the PeerConnection.
 ///
 /// Removing a track will update the transceiver's direction and stop sending media.
-pub fn removeTrack(pc: *PeerConnection, sender_id: RtpSenderID) error{InvalidState}!void {
+pub fn removeTrack(pc: *PeerConnection, sender_id: RtpSenderID) error{ConnectionClosed}!void {
     try pc.checkNotClosed();
     const tr = &pc.transceivers.items[sender_id];
     tr.removeTrack();
@@ -497,15 +497,7 @@ pub fn writeLocalDescription(pc: *PeerConnection, w: *Io.Writer) !void {
     return if (sess_desc) |*desc| try pc.writeDescriptionWithCandidates(desc, w) else error.NoLocalDescription;
 }
 
-pub const DataChannelError = error{
-    InvalidState,
-    LabelTooLong,
-    ProtocolTooLong,
-    InvalidParameters,
-    NoAvailableStreamId,
-    WriteFailed,
-    OutOfMemory,
-};
+pub const DataChannelError = DataChannel.CreateError;
 
 pub fn getDataChannel(pc: *PeerConnection, id: DataChannel.ChannelId) DataChannel {
     std.debug.assert(id < pc.data_channels.items.len);
@@ -518,6 +510,7 @@ pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataCha
     if (label.len > constants.max_data_channel_label_length) return error.LabelTooLong;
     if (params.protocol.len > constants.max_data_channel_label_length) return error.ProtocolTooLong;
     if (params.max_packet_lifetime != 0 and params.max_retransmits != 0) return error.InvalidParameters;
+    if (params.id != null) return error.InvalidParameters;
 
     try pc.data_channels.ensureUnusedCapacity(pc.allocator, 1);
     var data_channel = try InternalDataChannel.init(pc.allocator, label, params);
@@ -526,10 +519,9 @@ pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataCha
     const channel_id = pc.data_channels.items.len;
 
     if (pc.sctp_transport.connection_state == .connected) {
-        var buffer: [1024]u8 = undefined;
         try pc.assignStreamId(&data_channel, @intCast(channel_id));
         errdefer _ = pc.sid_to_channel.swapRemove(data_channel.id.?);
-        try pc.sctp_transport.handleWrite(try data_channel.writeOpenMessage(&buffer));
+        try pc.sendOpenMessage(&data_channel);
     }
 
     pc.data_channels.appendAssumeCapacity(data_channel);
@@ -541,14 +533,19 @@ pub fn sendDataChannelMessage(
     channel_id: DataChannel.ChannelId,
     message: []const u8,
     is_binary: bool,
-) !void {
-    try pc.checkNotClosed();
-    const dc = pc.getInternalDataChannel(channel_id);
-    if (dc.ready_state != .open) return error.DataChannelNotOpen;
-    try pc.sctp_transport.handleWrite(dc.wrapMessage(message, is_binary));
+) DataChannel.SendError!void {
+    const msg = try pc.getInternalDataChannel(channel_id).wrapMessage(message, is_binary);
+
+    const max_message_size = pc.sctp_transport.max_message_size;
+    if (max_message_size != 0 and message.len > max_message_size) return error.MessageTooLarge;
+
+    pc.sctp_transport.handleWrite(msg) catch |err| switch (err) {
+        error.AssocNotConnected => return error.DataChannelNotOpen,
+        else => |e| return e,
+    };
 }
 
-pub fn closeDataChannel(pc: *PeerConnection, channel_id: DataChannel.ChannelId) !void {
+pub fn closeDataChannel(pc: *PeerConnection, channel_id: DataChannel.ChannelId) DataChannel.CloseError!void {
     const dc = pc.getInternalDataChannel(channel_id);
     if (dc.ready_state == .closing or dc.ready_state == .closed) return;
 
@@ -557,7 +554,7 @@ pub fn closeDataChannel(pc: *PeerConnection, channel_id: DataChannel.ChannelId) 
         dc.ready_state = .closed;
         return;
     };
-    try pc.sctp_transport.resetStreams(&.{sid}, .{ .outgoing = true });
+    pc.sctp_transport.resetStreams(&.{sid}, .{ .outgoing = true });
     dc.ready_state = .closing;
 }
 
@@ -568,7 +565,12 @@ fn getInternalDataChannel(pc: *PeerConnection, id: DataChannel.ChannelId) *Inter
 
 pub fn close(pc: *PeerConnection) void {
     pc.dtls_transport.close();
+    pc.closeDataChannels();
+}
+
+fn closeDataChannels(pc: *PeerConnection) void {
     pc.sctp_transport.close();
+    for (pc.data_channels.items) |*dc| dc.ready_state = .closed;
 }
 
 pub const ReadResult = union(enum) {
@@ -616,13 +618,22 @@ pub const SctpMessageIterator = struct {
                     var dc = new_dc;
                     errdefer dc.deinit(pc.allocator);
 
+                    if (pc.sid_to_channel.contains(dc.id.?)) {
+                        Logger.debug("Ignoring DCEP open on stream {} already in use", .{dc.id.?});
+                        dc.deinit(pc.allocator);
+                        continue;
+                    }
+
                     try pc.events.ensureUnusedCapacity(pc.allocator, 2);
                     try pc.data_channels.ensureUnusedCapacity(pc.allocator, 1);
                     try pc.sid_to_channel.ensureUnusedCapacity(pc.allocator, 1);
 
                     const id: DataChannel.ChannelId = @intCast(pc.data_channels.items.len);
                     pc.sctp_transport.handleWrite(dc.writeAckMessage()) catch |err| switch (err) {
-                        error.InvalidState => unreachable,
+                        error.AssocNotConnected => {
+                            dc.deinit(pc.allocator);
+                            break;
+                        },
                         else => |e| return e,
                     };
 
@@ -633,14 +644,20 @@ pub const SctpMessageIterator = struct {
                     pc.events.pushBackAssumeCapacity(.{ .data_channel = .{ .open = id } });
                 },
                 .ack => |sid| if (pc.sid_to_channel.get(sid)) |channel_id| {
-                    pc.getInternalDataChannel(channel_id).ready_state = .open;
-                    try pc.events.pushBack(pc.allocator, .{ .data_channel = .{ .open = channel_id } });
+                    _ = try pc.openDataChannel(channel_id);
                 },
-                .message => |m| if (pc.sid_to_channel.get(m.stream_id)) |channel_id| return .{
-                    .channel_id = channel_id,
-                    .binary = m.binary,
-                    .data = m.data,
-                } else pc.allocator.free(m.data),
+                .message => |m| {
+                    const channel_id = pc.sid_to_channel.get(m.stream_id) orelse {
+                        pc.allocator.free(m.data);
+                        continue;
+                    };
+                    errdefer pc.allocator.free(m.data);
+                    if (!try pc.openDataChannel(channel_id)) {
+                        pc.allocator.free(m.data);
+                        continue;
+                    }
+                    return .{ .channel_id = channel_id, .binary = m.binary, .data = m.data };
+                },
             }
         }
 
@@ -669,12 +686,9 @@ pub fn handleRead(pc: *PeerConnection, message: webrtc.TransportMessage, now: i6
         .rtp => |data| try pc.handleRtpData(data),
         .rtcp => |data| .{ .rtcp = .init(pc, data) },
         .app_data => |data| blk: {
-            if (try pc.sctp_transport.handleRead(data, now)) |it|
-                break :blk .{ .app_data = .{ .sctp_it = it, .pc = pc } }
-            else {
-                try pc.handleSctpTransportEvents();
-                break :blk .none;
-            }
+            const it = try pc.sctp_transport.handleRead(data, now);
+            try pc.handleSctpTransportEvents();
+            break :blk if (it) |sctp_it| .{ .app_data = .{ .sctp_it = sctp_it, .pc = pc } } else .none;
         },
     };
 }
@@ -711,7 +725,10 @@ pub fn pollEvent(pc: *PeerConnection) ?Event {
                         };
                     }
 
-                    if (pc.connection_state == .closed) pc.setSignalingState(.closed);
+                    if (pc.connection_state == .closed) {
+                        pc.setSignalingState(.closed);
+                        pc.closeDataChannels();
+                    }
                     return .{ .connection_state = new_state };
                 }
             },
@@ -810,7 +827,7 @@ fn deinitDescriptions(pc: *PeerConnection, descriptions: []const *?ParsedSession
 }
 
 fn checkNotClosed(pc: *const PeerConnection) !void {
-    if (pc.connection_state == .closed) return error.InvalidState;
+    if (pc.connection_state == .closed) return error.ConnectionClosed;
 }
 
 fn initTransceiverFromTrack(
@@ -1249,25 +1266,63 @@ fn findTransceiverByMid(pc: *PeerConnection, mid: Mid.Int) ?*RtpTransceiver {
     return null;
 }
 
-fn handleSctpTransportEvents(pc: *PeerConnection) !void {
-    var buffer: [1024]u8 = undefined;
+fn handleSctpTransportEvents(pc: *PeerConnection) std.mem.Allocator.Error!void {
     while (pc.sctp_transport.pollEvent()) |event| switch (event) {
-        .connection_state => |state| if (state == .connected) {
-            for (pc.data_channels.items, 0..) |*dc, idx| {
-                if (dc.id != null) continue;
-                try pc.assignStreamId(dc, @intCast(idx));
-                try pc.sctp_transport.handleWrite(try dc.writeOpenMessage(&buffer));
-            }
+        .connection_state => |state| switch (state) {
+            .connected => for (pc.data_channels.items, 0..) |*dc, idx| {
+                if (dc.id != null or dc.ready_state != .connecting) continue;
+                pc.assignStreamId(dc, @intCast(idx)) catch |err| switch (err) {
+                    error.NoAvailableStreamId => {
+                        try pc.events.pushBack(pc.allocator, .{ .data_channel = .{ .close = @intCast(idx) } });
+                        dc.ready_state = .closed;
+                        continue;
+                    },
+                    else => |e| return e,
+                };
+                try pc.sendOpenMessage(dc);
+            },
+            .closed => for (pc.data_channels.items, 0..) |*dc, idx| {
+                if (dc.ready_state == .closed) continue;
+                try pc.events.pushBack(pc.allocator, .{ .data_channel = .{ .close = @intCast(idx) } });
+                dc.ready_state = .closed;
+            },
+            else => {},
         },
-        .data_channel => |dc_event| {
-            try pc.events.pushBack(pc.allocator, .{ .data_channel = dc_event });
+        .buffered_amount_low_threshold => |stream_id| if (pc.sid_to_channel.get(stream_id)) |channel_id| {
+            try pc.events.pushBack(pc.allocator, .{ .data_channel = .{ .buffered_amount_low_threshold = channel_id } });
         },
     };
 }
 
-fn assignStreamId(pc: *PeerConnection, dc: *InternalDataChannel, channel_id: DataChannel.ChannelId) !void {
+fn sendOpenMessage(pc: *PeerConnection, dc: *const InternalDataChannel) std.mem.Allocator.Error!void {
+    const open_msg = dc.writeOpenMessage(pc.int_buffers[packet_size..]) catch unreachable;
+    pc.sctp_transport.handleWrite(open_msg) catch |err| switch (err) {
+        error.AssocNotConnected => unreachable,
+        else => |e| return e,
+    };
+}
+
+fn openDataChannel(pc: *PeerConnection, channel_id: DataChannel.ChannelId) std.mem.Allocator.Error!bool {
+    const dc = pc.getInternalDataChannel(channel_id);
+    switch (dc.ready_state) {
+        .open => return true,
+        .closing, .closed => return false,
+        .connecting => {
+            try pc.events.pushBack(pc.allocator, .{ .data_channel = .{ .open = channel_id } });
+            dc.ready_state = .open;
+            return true;
+        },
+    }
+}
+
+fn assignStreamId(
+    pc: *PeerConnection,
+    dc: *InternalDataChannel,
+    channel_id: DataChannel.ChannelId,
+) error{ NoAvailableStreamId, OutOfMemory }!void {
     try pc.sid_to_channel.ensureUnusedCapacity(pc.allocator, 1);
     const sid = try pc.sctp_transport.nextStreamId(pc.sid_to_channel.keys());
+    try pc.sctp_transport.setDataChannelBufferedAmountLowThreshold(sid, dc.buffered_amount_low_threshold);
     pc.sid_to_channel.putAssumeCapacity(sid, channel_id);
     dc.id = sid;
 }
@@ -1327,6 +1382,7 @@ fn maybeConnectSctpTransport(pc: *PeerConnection) !void {
     if (local_sess.getApplicationMedia()) |local| if (remote_sess.getApplicationMedia()) |remote| {
         if (local.isRejected() or remote.isRejected()) return;
         if (local.sctp_port.? == 0 or remote.sctp_port.? == 0) return;
+        pc.sctp_transport.max_message_size = remote.max_message_size orelse SctpTransport.default_max_message_size;
         try pc.sctp_transport.connect(pc.dtls_transport.getRole() == .server);
     };
 }

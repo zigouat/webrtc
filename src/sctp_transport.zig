@@ -13,9 +13,12 @@ const BINARY_MESSAGE_PPID: u32 = 53;
 const EMPTY_TEXT_MESSAGE_PPID: u32 = 56;
 const EMPTY_BINRAY_MESSAGE_PPID: u32 = 57;
 
-pub const ChannelId = DataChannel.ChannelId;
-
 pub const ConnectionState = enum(u8) { new, connecting, connected, closed };
+
+pub const default_max_message_size = 65536;
+
+pub const ReadError = error{InvalidPacket} || std.mem.Allocator.Error;
+pub const WriteError = error{AssocNotConnected} || std.mem.Allocator.Error;
 
 pub const InitConfig = struct {
     local_port: u16,
@@ -25,7 +28,7 @@ pub const InitConfig = struct {
 
 pub const Event = union(enum) {
     connection_state: ConnectionState,
-    data_channel: DataChannel.Event,
+    buffered_amount_low_threshold: u16,
 };
 
 assoc: sctp.Association,
@@ -46,8 +49,9 @@ pub fn init(allocator: std.mem.Allocator, init_config: InitConfig) SctpTranport 
             .source_port = init_config.local_port,
             .dest_port = init_config.remote_port,
             .random = init_config.random,
+            .receive_buffer_size = 4 * 1024 * 1024,
         }),
-        .max_message_size = 0,
+        .max_message_size = default_max_message_size,
     };
 }
 
@@ -87,39 +91,55 @@ pub fn nextStreamId(sctp_transport: *const SctpTranport, used_sids: []const u16)
     return error.NoAvailableStreamId;
 }
 
-pub fn handleWrite(sctp_transport: *SctpTranport, msg: sctp.message.UserMessage) !void {
-    try sctp_transport.assoc.handleWrite(msg.data, .{
+pub fn bufferedAmount(sctp_transport: *SctpTranport, stream_id: u16) u32 {
+    return sctp_transport.assoc.bufferedAmount(stream_id) orelse 0;
+}
+
+pub fn setDataChannelBufferedAmountLowThreshold(sctp_transport: *SctpTranport, stream_id: u16, threshold: u32) std.mem.Allocator.Error!void {
+    try sctp_transport.assoc.setBufferedAmountLowThreshold(stream_id, threshold);
+}
+
+pub fn handleWrite(sctp_transport: *SctpTranport, msg: sctp.message.UserMessage) WriteError!void {
+    if (sctp_transport.connection_state != .connected) return error.AssocNotConnected;
+
+    sctp_transport.assoc.handleWrite(msg.data, .{
         .ppid = msg.ppid,
         .stream_id = msg.stream_id,
         .unordered = msg.unordered,
-    });
+    }) catch |err| switch (err) {
+        error.InvalidState => return error.AssocNotConnected,
+        else => |e| return e,
+    };
 }
 
-pub fn handleTimeout(sctp_transport: *SctpTranport, now: i64) !void {
+pub fn handleTimeout(sctp_transport: *SctpTranport, now: i64) std.mem.Allocator.Error!void {
     try sctp_transport.assoc.handleTimeout(now);
 }
 
-pub fn handleRead(sctp_transport: *SctpTranport, data: []const u8, now: i64) !?sctp.Association.MessageIterator {
+pub fn handleRead(sctp_transport: *SctpTranport, data: []const u8, now: i64) ReadError!?sctp.Association.MessageIterator {
     switch (sctp_transport.connection_state) {
         .new, .closed => return null,
         else => {},
     }
+    const allocator = sctp_transport.assoc.allocator;
 
-    if (try sctp_transport.assoc.handleRead(data, now)) |it| return it;
-
+    const it = try sctp_transport.assoc.handleRead(data, now);
     while (sctp_transport.assoc.pollEvent()) |event| switch (event) {
         .comm_up => {
             sctp_transport.connection_state = .connected;
-            try sctp_transport.events.pushBack(sctp_transport.assoc.allocator, .{ .connection_state = .connected });
+            try sctp_transport.events.pushBack(allocator, .{ .connection_state = .connected });
         },
         .comm_down => {
             Logger.debug("sctp association down", .{});
             sctp_transport.connection_state = .closed;
-            try sctp_transport.events.pushBack(sctp_transport.assoc.allocator, .{ .connection_state = .closed });
+            try sctp_transport.events.pushBack(allocator, .{ .connection_state = .closed });
+        },
+        .buffered_amount_low_threshold => |stream_id| {
+            try sctp_transport.events.pushBack(allocator, .{ .buffered_amount_low_threshold = stream_id });
         },
     };
 
-    return null;
+    return it;
 }
 
 pub const AppData = union(enum) {
@@ -181,7 +201,7 @@ pub fn pollEvent(sctp_transport: *SctpTranport) ?Event {
     return sctp_transport.events.popFront();
 }
 
-pub fn resetStreams(sctp_transport: *SctpTranport, stream_ids: []const u16, flags: DataChannel.StreamResetFlag) !void {
+pub fn resetStreams(sctp_transport: *SctpTranport, stream_ids: []const u16, flags: DataChannel.StreamResetFlag) void {
     _ = sctp_transport;
     _ = stream_ids;
     _ = flags;
