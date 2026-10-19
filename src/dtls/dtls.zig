@@ -14,6 +14,13 @@ const srtp_profiles = [_]u16{
     m.MBEDTLS_TLS_SRTP_UNSET,
 };
 
+const ciphersuites = [_]c_int{
+    m.MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+    m.MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+    m.MBEDTLS_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+    0,
+};
+
 const max_srtp_keying_material_size = 30;
 
 const dtls_mtu: u16 = 1400;
@@ -141,6 +148,7 @@ pub const Session = struct {
             m.MBEDTLS_SSL_PRESET_DEFAULT,
         ) != 0) return error.SetConfigFailed;
 
+        m.mbedtls_ssl_conf_ciphersuites(&session.ssl_conf, &ciphersuites);
         _ = m.mbedtls_ssl_set_hostname(&session.ssl, null);
         m.mbedtls_ssl_conf_authmode(&session.ssl_conf, m.MBEDTLS_SSL_VERIFY_OPTIONAL);
         m.mbedtls_ssl_conf_dbg(&session.ssl_conf, logDebugMessages, null);
