@@ -33,7 +33,7 @@ pub const RtpSenderID = u32;
 pub const RtpReceiverID = u32;
 
 pub const Error = error{
-    InvalidState,
+    ConnectionClosed,
     /// Returned when an ssrc cannot be
     /// generated for a sender
     SsrcUnavailable,
@@ -313,7 +313,7 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: 
 /// Removes a track from the PeerConnection.
 ///
 /// Removing a track will update the transceiver's direction and stop sending media.
-pub fn removeTrack(pc: *PeerConnection, sender_id: RtpSenderID) error{InvalidState}!void {
+pub fn removeTrack(pc: *PeerConnection, sender_id: RtpSenderID) error{ConnectionClosed}!void {
     try pc.checkNotClosed();
     const tr = &pc.transceivers.items[sender_id];
     tr.removeTrack();
@@ -498,11 +498,12 @@ pub fn writeLocalDescription(pc: *PeerConnection, w: *Io.Writer) !void {
 }
 
 pub const DataChannelError = error{
-    InvalidState,
+    ConnectionClosed,
     LabelTooLong,
     ProtocolTooLong,
     InvalidParameters,
     NoAvailableStreamId,
+    AssocNotConnected,
     WriteFailed,
     OutOfMemory,
 };
@@ -548,7 +549,7 @@ pub fn sendDataChannelMessage(
     try pc.sctp_transport.handleWrite(dc.wrapMessage(message, is_binary));
 }
 
-pub fn closeDataChannel(pc: *PeerConnection, channel_id: DataChannel.ChannelId) !void {
+pub fn closeDataChannel(pc: *PeerConnection, channel_id: DataChannel.ChannelId) std.mem.Allocator.Error!void {
     const dc = pc.getInternalDataChannel(channel_id);
     if (dc.ready_state == .closing or dc.ready_state == .closed) return;
 
@@ -557,7 +558,7 @@ pub fn closeDataChannel(pc: *PeerConnection, channel_id: DataChannel.ChannelId) 
         dc.ready_state = .closed;
         return;
     };
-    try pc.sctp_transport.resetStreams(&.{sid}, .{ .outgoing = true });
+    pc.sctp_transport.resetStreams(&.{sid}, .{ .outgoing = true });
     dc.ready_state = .closing;
 }
 
@@ -622,7 +623,10 @@ pub const SctpMessageIterator = struct {
 
                     const id: DataChannel.ChannelId = @intCast(pc.data_channels.items.len);
                     pc.sctp_transport.handleWrite(dc.writeAckMessage()) catch |err| switch (err) {
-                        error.InvalidState => unreachable,
+                        error.AssocNotConnected => {
+                            dc.deinit(pc.allocator);
+                            break;
+                        },
                         else => |e| return e,
                     };
 
@@ -669,12 +673,9 @@ pub fn handleRead(pc: *PeerConnection, message: webrtc.TransportMessage, now: i6
         .rtp => |data| try pc.handleRtpData(data),
         .rtcp => |data| .{ .rtcp = .init(pc, data) },
         .app_data => |data| blk: {
-            if (try pc.sctp_transport.handleRead(data, now)) |it|
-                break :blk .{ .app_data = .{ .sctp_it = it, .pc = pc } }
-            else {
-                try pc.handleSctpTransportEvents();
-                break :blk .none;
-            }
+            const it = try pc.sctp_transport.handleRead(data, now);
+            try pc.handleSctpTransportEvents();
+            break :blk if (it) |sctp_it| .{ .app_data = .{ .sctp_it = sctp_it, .pc = pc } } else .none;
         },
     };
 }
@@ -810,7 +811,7 @@ fn deinitDescriptions(pc: *PeerConnection, descriptions: []const *?ParsedSession
 }
 
 fn checkNotClosed(pc: *const PeerConnection) !void {
-    if (pc.connection_state == .closed) return error.InvalidState;
+    if (pc.connection_state == .closed) return error.ConnectionClosed;
 }
 
 fn initTransceiverFromTrack(
@@ -1259,8 +1260,8 @@ fn handleSctpTransportEvents(pc: *PeerConnection) !void {
                 try pc.sctp_transport.handleWrite(try dc.writeOpenMessage(&buffer));
             }
         },
-        .data_channel => |dc_event| {
-            try pc.events.pushBack(pc.allocator, .{ .data_channel = dc_event });
+        .buffered_amount_low_threshold => |stream_id| if (pc.sid_to_channel.get(stream_id)) |channel_id| {
+            try pc.events.pushBack(pc.allocator, .{ .data_channel = .{ .buffered_amount_low_threshold = channel_id } });
         },
     };
 }
@@ -1268,6 +1269,7 @@ fn handleSctpTransportEvents(pc: *PeerConnection) !void {
 fn assignStreamId(pc: *PeerConnection, dc: *InternalDataChannel, channel_id: DataChannel.ChannelId) !void {
     try pc.sid_to_channel.ensureUnusedCapacity(pc.allocator, 1);
     const sid = try pc.sctp_transport.nextStreamId(pc.sid_to_channel.keys());
+    try pc.sctp_transport.setDataChannelBufferedAmountLowThreshold(sid, dc.buffered_amount_low_threshold);
     pc.sid_to_channel.putAssumeCapacity(sid, channel_id);
     dc.id = sid;
 }

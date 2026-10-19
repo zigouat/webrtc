@@ -22,6 +22,7 @@ pub const Event = union(enum) {
     new: ChannelId,
     open: ChannelId,
     close: ChannelId,
+    buffered_amount_low_threshold: ChannelId,
 };
 
 pub const MessageType = enum(u8) {
@@ -117,6 +118,7 @@ label_length: u16,
 ordered: bool,
 max_packet_lifetime: u32,
 max_retransmits: u32,
+buffered_amount_low_threshold: u32,
 ready_state: State,
 
 pub fn init(allocator: std.mem.Allocator, label: []const u8, params: Parameters) std.mem.Allocator.Error!InternalDataChannel {
@@ -131,6 +133,7 @@ pub fn init(allocator: std.mem.Allocator, label: []const u8, params: Parameters)
         .ordered = params.ordered,
         .max_packet_lifetime = params.max_packet_lifetime,
         .max_retransmits = params.max_retransmits,
+        .buffered_amount_low_threshold = 0,
         .ready_state = State.connecting,
     };
 }

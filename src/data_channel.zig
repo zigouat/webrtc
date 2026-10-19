@@ -9,18 +9,25 @@ pub const State = InternalDataChannel.State;
 pub const Event = InternalDataChannel.Event;
 pub const UserMessage = InternalDataChannel.UserMessage;
 
+pub const Error = error{
+    ConnectionClosed,
+    DataChannelNotOpen,
+    OutOfMemory,
+    AssocNotConnected,
+};
+
 id: ChannelId,
 pc: *PeerConnection,
 
-pub fn send(dc: DataChannel, data: []const u8) !void {
+pub fn send(dc: DataChannel, data: []const u8) Error!void {
     return dc.pc.sendDataChannelMessage(dc.id, data, true);
 }
 
-pub fn sendText(dc: DataChannel, text: []const u8) !void {
+pub fn sendText(dc: DataChannel, text: []const u8) Error!void {
     return dc.pc.sendDataChannelMessage(dc.id, text, false);
 }
 
-pub fn close(dc: DataChannel) !void {
+pub fn close(dc: DataChannel) error{OutOfMemory}!void {
     return dc.pc.closeDataChannel(dc.id);
 }
 
@@ -30,6 +37,21 @@ pub fn getLabel(dc: DataChannel) []const u8 {
 
 pub fn getProtocol(dc: DataChannel) []const u8 {
     return dc.internal().getProtocol();
+}
+
+pub fn bufferedAmount(dc: DataChannel) u32 {
+    const sid = dc.internal().id orelse return 0;
+    return dc.pc.sctp_transport.bufferedAmount(sid);
+}
+
+pub fn getBufferedAmountLowThreshold(dc: DataChannel) u32 {
+    return dc.internal().buffered_amount_low_threshold;
+}
+
+pub fn setBufferedAmountLowThreshold(dc: DataChannel, threshold: u32) error{OutOfMemory}!void {
+    const internal_dc = dc.internal();
+    if (internal_dc.id) |sid| try dc.pc.sctp_transport.setDataChannelBufferedAmountLowThreshold(sid, threshold);
+    internal_dc.buffered_amount_low_threshold = threshold;
 }
 
 fn internal(dc: DataChannel) *InternalDataChannel {
