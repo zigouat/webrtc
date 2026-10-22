@@ -22,7 +22,6 @@ pub const Event = union(enum) {
     ice_connection_state: ice.ConnectionState,
     ice_candidate: u8,
     end_of_candidates: void,
-    nominated: ice.agent.NominatedPair,
     ice_gathering_state: ice.GatheringState,
     dtls_connection_state: dtls.ConnectionState,
 };
@@ -34,6 +33,7 @@ session: dtls.Session,
 in_srtp_session: ?srtp.Session = null,
 out_srtp_session: ?srtp.Session = null,
 events: std.Deque(Event) = .empty,
+nominated_pair: ?struct { *const Io.net.IpAddress, *const Io.net.IpAddress } = null,
 
 pub const DataEvent = union(enum) {
     rtp: []const u8,
@@ -83,14 +83,13 @@ pub fn deinit(transport: *DtlsTransport) void {
     }
 }
 
-pub fn applyIceAttributes(transport: *DtlsTransport, media: *SDPSession.Media, fingerprint: *const [32]u8) !void {
+pub fn applyIceAttributes(transport: *DtlsTransport, media: *SDPSession.Media, fingerprint: *const [32]u8, now: i64) !void {
     Logger.debug("Apply remote credentials and candidates...", .{});
     const remote_credens = transport.ice_agent.getRemoteCredentials();
     if (remote_credens) |credens| {
         if (!std.mem.eql(u8, media.ice_ufrag, credens.username) or !std.mem.eql(u8, media.ice_pwd, credens.password))
             return error.MismatchedIceCredentials;
     } else {
-        const now = Io.Timestamp.now(transport.io, .awake).toMilliseconds();
         try transport.ice_agent.setRemoteCredentials(
             .{ .username = media.ice_ufrag, .password = media.ice_pwd },
             now,
@@ -186,6 +185,7 @@ pub const Message = union(enum) {
 
 pub fn pollTransmit(transport: *DtlsTransport, buffer: []u8) Message {
     const ice_msg = (transport.ice_agent.pollTransmit(buffer) catch return .none) orelse {
+        if (transport.nominated_pair == null) return .none;
         const dtls_msg = transport.session.pollTransmit(buffer) orelse return .none;
         return .{ .bin = dtls_msg };
     };
@@ -212,7 +212,10 @@ fn drainEvents(transport: *DtlsTransport, now: i64) !void {
             if (state == .complete) try transport.events.pushBack(transport.allocator, .end_of_candidates);
             try transport.events.pushBack(transport.allocator, .{ .ice_gathering_state = state });
         },
-        .nominated => |pair| try transport.events.pushBack(transport.allocator, .{ .nominated = pair }),
+        .nominated => |pair| transport.nominated_pair = .{
+            &transport.ice_agent.candidates[pair.local].base,
+            &transport.ice_agent.remote_candidates[pair.remote].address,
+        },
     };
 
     while (transport.session.pollEvent()) |event| switch (event) {

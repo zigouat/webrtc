@@ -78,7 +78,7 @@ const ConnectionContext = struct {
         const sender_id = try conn.pc.addTrack(.init(.video, conn.prng.random()), &stream);
         try conn.senders.append(allocator, sender_id);
 
-        try conn.pc.setRemoteDescription(offer);
+        try conn.pc.setRemoteDescription(offer, Io.Timestamp.now(conn.io, .awake).toMilliseconds());
         const answer = try conn.pc.createAnswer();
         try conn.pc.setLocalDescription(answer);
 
@@ -91,7 +91,7 @@ const ConnectionContext = struct {
             const tr = &conn.pc.getTransceivers()[sender_id];
             tr.removeTrack();
 
-            try conn.pc.setRemoteDescription(offer);
+            try conn.pc.setRemoteDescription(offer, Io.Timestamp.now(conn.io, .awake).toMilliseconds());
             const answer = try conn.pc.createAnswer();
             try conn.pc.setLocalDescription(answer);
         }

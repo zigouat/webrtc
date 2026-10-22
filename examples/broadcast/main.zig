@@ -338,7 +338,7 @@ pub fn main(init: std.process.Init) !void {
         defer offer.deinit();
 
         _ = try publisher.pc.addTransceiverFromKind(.video, .{ .direction = .recvonly });
-        try publisher.pc.setRemoteDescription(offer.value);
+        try publisher.pc.setRemoteDescription(offer.value, Io.Timestamp.now(io, .awake).toMilliseconds());
 
         const answer = try publisher.pc.createAnswer();
         try publisher.pc.setLocalDescription(answer);
@@ -368,7 +368,7 @@ pub fn main(init: std.process.Init) !void {
         });
         errdefer viewer.deinit();
 
-        try viewer.pc.setRemoteDescription(offer.value);
+        try viewer.pc.setRemoteDescription(offer.value, Io.Timestamp.now(io, .awake).toMilliseconds());
         const answer = try viewer.pc.createAnswer();
         try viewer.pc.setLocalDescription(answer);
 

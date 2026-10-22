@@ -23,8 +23,6 @@ pub const SendError = error{
     MessageTooLarge,
 } || std.mem.Allocator.Error;
 
-pub const CloseError = std.mem.Allocator.Error;
-
 id: ChannelId,
 pc: *PeerConnection,
 
@@ -36,7 +34,7 @@ pub fn sendText(dc: DataChannel, text: []const u8) SendError!void {
     return dc.pc.sendDataChannelMessage(dc.id, text, false);
 }
 
-pub fn close(dc: DataChannel) CloseError!void {
+pub fn close(dc: DataChannel) std.mem.Allocator.Error!void {
     return dc.pc.closeDataChannel(dc.id);
 }
 
@@ -46,6 +44,14 @@ pub fn getLabel(dc: DataChannel) []const u8 {
 
 pub fn getProtocol(dc: DataChannel) []const u8 {
     return dc.internal().getProtocol();
+}
+
+pub fn connect(dc: DataChannel, buffer: []u8) std.mem.Allocator.Error!void {
+    const open_msg = dc.internal().writeOpenMessage(buffer) catch unreachable;
+    dc.pc.sctp_transport.handleWrite(open_msg) catch |err| switch (err) {
+        error.AssocNotConnected => unreachable,
+        else => |e| return e,
+    };
 }
 
 pub fn bufferedAmount(dc: DataChannel) u32 {

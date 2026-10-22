@@ -3,12 +3,13 @@ const sctp = @import("sctp");
 
 const InternalDataChannel = @This();
 
-pub const ChannelId = u32;
+const DCEP_PPID: u32 = 50;
+const TEXT_MESSAGE_PPID: u32 = 51;
+const BINARY_MESSAGE_PPID: u32 = 53;
+const EMPTY_TEXT_MESSAGE_PPID: u32 = 56;
+const EMPTY_BINRAY_MESSAGE_PPID: u32 = 57;
 
-pub const StreamResetFlag = struct {
-    outgoing: bool = false,
-    incoming: bool = false,
-};
+pub const ChannelId = u32;
 
 pub const State = enum { connecting, open, closing, closed };
 
@@ -151,12 +152,6 @@ pub fn getLabel(data_channel: *const InternalDataChannel) []const u8 {
 pub fn getProtocol(data_channel: *const InternalDataChannel) []const u8 {
     return data_channel.slice[data_channel.label_length..];
 }
-
-const DCEP_PPID: u32 = 50;
-const TEXT_MESSAGE_PPID: u32 = 51;
-const BINARY_MESSAGE_PPID: u32 = 53;
-const EMPTY_TEXT_MESSAGE_PPID: u32 = 56;
-const EMPTY_BINRAY_MESSAGE_PPID: u32 = 57;
 
 pub fn writeOpenMessage(data_channel: *const InternalDataChannel, buffer: []u8) std.Io.Writer.Error!sctp.message.UserMessage {
     var w = std.Io.Writer.fixed(buffer);
