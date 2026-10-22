@@ -259,6 +259,48 @@ test "PeerConnection.setRemoteDescription: set offer - data channel media does n
     try std.testing.expectEqual(.video, pc.getTransceivers()[0].kind);
 }
 
+test "PeerConnection.setRemoteDescription: set offer - transceivers created from offer" {
+    var conn = try Connection.init(.{});
+    var pc = &conn.pc;
+    defer conn.deinit();
+
+    const offer =
+        \\v=0
+        \\o=- 1000 1779396395 IN IP4 0.0.0.0
+        \\s=-
+        \\t=0 0
+        \\a=group:BUNDLE 0 1
+        \\a=ice-options:ice2
+        \\a=fingerprint:sha-256 A4:14:A3:5D:02:35:5B:E0:C6:E0:EF:7D:D9:63:3F:30:D4:FD:43:76:50:A8:25:4A:96:25:F1:8A:0A:DC:F4:26
+        \\m=video 9 UDP/TLS/RTP/SAVPF 96
+        \\c=IN IP4 0.0.0.0
+        \\a=rtpmap:96 VP8/90000
+        \\a=setup:actpass
+        \\a=sendrecv
+        \\a=mid:0
+        \\a=rtcp-mux
+        \\a=ice-ufrag:elsfVzJM
+        \\a=ice-pwd:/KLNLMQnQm5TWswZ9MAnalyn
+        \\m=audio 9 UDP/TLS/RTP/SAVPF 111
+        \\c=IN IP4 0.0.0.0
+        \\a=rtpmap:111 opus/48000/2
+        \\a=setup:actpass
+        \\a=sendrecv
+        \\a=mid:1
+        \\a=rtcp-mux
+        \\
+    ;
+
+    try pc.setRemoteDescription(.{ .type = .offer, .sdp = offer }, 0);
+
+    try std.testing.expectEqual(2, pc.getTransceivers().len);
+    for (pc.getTransceivers()) |*tr| try std.testing.expectEqual(pc, tr.pc);
+
+    var receiver_ids: [2]PeerConnection.RtpTransceiverID = undefined;
+    for (&receiver_ids) |*id| id.* = conn.popEvent(.track).?.track.receiver_id;
+    try std.testing.expectEqualSlices(PeerConnection.RtpTransceiverID, &.{ 0, 1 }, &receiver_ids);
+}
+
 test "PeerConnection.setRemoteDescription: invalid state" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;

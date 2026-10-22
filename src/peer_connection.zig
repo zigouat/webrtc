@@ -1111,6 +1111,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     var first_media: ?*SDPSession.Media = null;
     var track_events: std.ArrayList(RtpTransceiver.TrackEventInit) = .empty;
     defer track_events.deinit(pc.allocator);
+    if (session_desc.type == .offer) try pc.transceivers.ensureUnusedCapacity(pc.allocator, remote_sdp.getMedias().len);
     for (remote_sdp.getMedias(), 0..) |*media, idx| {
         if (media.isDataChannel()) {
             if (media.isRejected()) continue;
@@ -1129,10 +1130,9 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
                     if (pc.findTransceiverByMid(media.mid)) |tr| break :blk tr;
                     for (pc.transceivers.items) |*tr| if (tr.canAssociateMedia(media)) break :blk tr;
 
-                    try pc.transceivers.append(
-                        pc.allocator,
-                        RtpTransceiver.initFromSdpMedia(media, pc.random, @intCast(idx)),
-                    );
+                    var tr = RtpTransceiver.initFromSdpMedia(media, pc.random, @intCast(idx));
+                    tr.pc = pc;
+                    pc.transceivers.appendAssumeCapacity(tr);
                     break :blk &pc.transceivers.items[pc.transceivers.items.len - 1];
                 },
                 else => unreachable,
