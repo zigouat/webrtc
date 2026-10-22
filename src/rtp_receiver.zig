@@ -84,8 +84,8 @@ pub fn sendPli(receiver: *RtpReceiver, buffer: []u8) !webrtc.TransportMessage {
 
     return .{
         .data = data,
-        .from = tr.pc.nominated_pair.?.@"0",
-        .to = tr.pc.nominated_pair.?.@"1",
+        .from = tr.pc.dtls_transport.nominated_pair.?.@"0",
+        .to = tr.pc.dtls_transport.nominated_pair.?.@"1",
     };
 }
 

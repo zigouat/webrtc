@@ -154,7 +154,7 @@ pub fn main(init: std.process.Init) !void {
 
     const offer = try common.utils.readSdpFromStdin(io, init.gpa);
     defer offer.deinit();
-    try conn.pc.setRemoteDescription(offer.value);
+    try conn.pc.setRemoteDescription(offer.value, Io.Timestamp.now(io, .awake).toMilliseconds());
 
     const answer = try conn.pc.createAnswer();
     try conn.pc.setLocalDescription(answer);

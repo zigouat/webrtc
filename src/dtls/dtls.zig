@@ -210,7 +210,7 @@ pub const Session = struct {
 
                 switch (ret) {
                     m.MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY => {
-                        Logger.warn("Peer closed connection", .{});
+                        Logger.debug("Peer closed connection", .{});
                         session.setConnectionState(.closed);
                     },
                     m.MBEDTLS_ERR_SSL_WANT_READ => {},

@@ -151,8 +151,8 @@ pub const WriterIterator = struct {
 
         return .{
             .data = to_send,
-            .from = it.tr.pc.nominated_pair.?.@"0",
-            .to = it.tr.pc.nominated_pair.?.@"1",
+            .from = it.tr.pc.dtls_transport.nominated_pair.?.@"0",
+            .to = it.tr.pc.dtls_transport.nominated_pair.?.@"1",
         };
     }
 };
@@ -304,8 +304,8 @@ pub fn handleWrite(sender: *RtpSender, packet: *const rtp.Packet, buffer: []u8, 
 
     return .{
         .data = to_send,
-        .from = tr.pc.nominated_pair.?.@"0",
-        .to = tr.pc.nominated_pair.?.@"1",
+        .from = tr.pc.dtls_transport.nominated_pair.?.@"0",
+        .to = tr.pc.dtls_transport.nominated_pair.?.@"1",
     };
 }
 

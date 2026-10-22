@@ -136,8 +136,8 @@ test "PeerConnection.setLocalDescription: invalid state" {
     try pc.setLocalDescription(.{ .type = .offer, .sdp = sdp });
     try testing.expectError(error.InvalidState, pc.setLocalDescription(.{ .type = .answer, .sdp = sdp }));
 
-    try pc.setRemoteDescription(.{ .type = .answer, .sdp = sdp });
-    try pc.setRemoteDescription(.{ .type = .offer, .sdp = sdp });
+    try pc.setRemoteDescription(.{ .type = .answer, .sdp = sdp }, 0);
+    try pc.setRemoteDescription(.{ .type = .offer, .sdp = sdp }, 0);
     try testing.expectError(error.InvalidState, pc.setLocalDescription(.{ .type = .offer, .sdp = sdp }));
 }
 
@@ -167,10 +167,10 @@ test "PeerConnection.setRemoteDescription: set offer" {
         \\
     ;
 
-    try pc.setRemoteDescription(.{ .type = .offer, .sdp = offer });
+    try pc.setRemoteDescription(.{ .type = .offer, .sdp = offer }, 0);
     try conn.expectEvent(.signaling_state, .have_remote_offer);
 
-    for (0..5) |_| try pc.setRemoteDescription(.{ .type = .offer, .sdp = offer });
+    for (0..5) |_| try pc.setRemoteDescription(.{ .type = .offer, .sdp = offer }, 0);
     try conn.expectNoEvent(.signaling_state);
 }
 
@@ -209,7 +209,7 @@ test "PeerConnection.setRemoteDescription: set offer - do not reject bundle only
         \\
     ;
 
-    try pc.setRemoteDescription(.{ .type = .offer, .sdp = offer });
+    try pc.setRemoteDescription(.{ .type = .offer, .sdp = offer }, 0);
 
     try conn.expectEvent(.signaling_state, .have_remote_offer);
 
@@ -251,7 +251,7 @@ test "PeerConnection.setRemoteDescription: set offer - data channel media does n
         \\
     ;
 
-    try pc.setRemoteDescription(.{ .type = .offer, .sdp = offer });
+    try pc.setRemoteDescription(.{ .type = .offer, .sdp = offer }, 0);
 
     try conn.expectEvent(.signaling_state, .have_remote_offer);
 
@@ -264,20 +264,20 @@ test "PeerConnection.setRemoteDescription: invalid state" {
     var pc = &conn.pc;
     defer conn.deinit();
 
-    try testing.expectError(error.NotImplemented, pc.setRemoteDescription(.{ .type = .pranswer, .sdp = "" }));
-    try testing.expectError(error.NotImplemented, pc.setRemoteDescription(.{ .type = .rollback, .sdp = "" }));
-    try testing.expectError(error.InvalidState, pc.setRemoteDescription(.{ .type = .answer, .sdp = "" }));
+    try testing.expectError(error.NotImplemented, pc.setRemoteDescription(.{ .type = .pranswer, .sdp = "" }, 0));
+    try testing.expectError(error.NotImplemented, pc.setRemoteDescription(.{ .type = .rollback, .sdp = "" }, 0));
+    try testing.expectError(error.InvalidState, pc.setRemoteDescription(.{ .type = .answer, .sdp = "" }, 0));
 
     var sdp = (try pc.createOffer()).sdp;
-    try pc.setRemoteDescription(.{ .type = .offer, .sdp = sdp });
-    try testing.expectError(error.InvalidState, pc.setRemoteDescription(.{ .type = .answer, .sdp = sdp }));
+    try pc.setRemoteDescription(.{ .type = .offer, .sdp = sdp }, 0);
+    try testing.expectError(error.InvalidState, pc.setRemoteDescription(.{ .type = .answer, .sdp = sdp }, 0));
 
     const answer = try pc.createAnswer();
     try pc.setLocalDescription(answer);
 
     sdp = (try pc.createOffer()).sdp;
     try pc.setLocalDescription(.{ .type = .offer, .sdp = sdp });
-    try testing.expectError(error.InvalidState, pc.setRemoteDescription(.{ .type = .offer, .sdp = sdp }));
+    try testing.expectError(error.InvalidState, pc.setRemoteDescription(.{ .type = .offer, .sdp = sdp }, 0));
 }
 
 test "PeerConnection.addTrack" {
@@ -518,7 +518,7 @@ test "PeerConnection.createAnswer: answer to offer" {
 
     const offer = try pc.createOffer();
     try pc.setLocalDescription(offer);
-    try pc2.setRemoteDescription(offer);
+    try pc2.setRemoteDescription(offer, 0);
 
     const answer = try pc2.createAnswer();
     try testing.expectEqual(.answer, answer.type);
@@ -545,7 +545,7 @@ test "PeerConnection.createAnswer: reject media in offer" {
 
     const offer = try pc.createOffer();
     try pc.setLocalDescription(offer);
-    try pc2.setRemoteDescription(offer);
+    try pc2.setRemoteDescription(offer, 0);
 
     pc2.getTransceivers()[1].stop();
 
@@ -707,9 +707,9 @@ test "PeerConnection.close: closes data channels" {
 fn negotiate(pc1: *PeerConnection, pc2: *PeerConnection) !void {
     const offer = try pc1.createOffer();
     try pc1.setLocalDescription(offer);
-    try pc2.setRemoteDescription(offer);
+    try pc2.setRemoteDescription(offer, 0);
 
     const answer = try pc2.createAnswer();
     try pc2.setLocalDescription(answer);
-    try pc1.setRemoteDescription(answer);
+    try pc1.setRemoteDescription(answer, 0);
 }

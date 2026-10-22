@@ -228,7 +228,7 @@ fn doHandleClientConnection(allocator: std.mem.Allocator, conn: *ConnectionConte
         var reader = req.readerExpectNone(&.{});
         try reader.readSliceAll(answer);
         try req.respond(&.{}, .{ .transfer_encoding = .none });
-        try conn.pc.setRemoteDescription(.{ .type = .answer, .sdp = answer });
+        try conn.pc.setRemoteDescription(.{ .type = .answer, .sdp = answer }, Io.Timestamp.now(conn.io, .awake).toMilliseconds());
     }
 }
 
