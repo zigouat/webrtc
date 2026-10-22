@@ -746,6 +746,62 @@ test "PeerConnection.close: closes data channels" {
     try testing.expectError(error.DataChannelNotOpen, dc.sendText("hello"));
 }
 
+test "PeerConnection.setRemoteDescription: answerer is controlled before its answer is applied" {
+    var conn1 = try Connection.init(.{});
+    defer conn1.deinit();
+    var conn2 = try Connection.init(.{});
+    defer conn2.deinit();
+
+    _ = try conn1.pc.addTrack(.init(.video, prng.random()), "stream");
+
+    const offer = try conn1.pc.createOffer();
+    try conn1.pc.setLocalDescription(offer);
+    try conn2.pc.setRemoteDescription(offer, 0);
+    // Connectivity checks start here, they must not be sent as controlling.
+    try testing.expectEqual(.controlled, conn2.pc.dtls_transport.ice_agent.role);
+
+    const answer = try conn2.pc.createAnswer();
+    try conn2.pc.setLocalDescription(answer);
+    try conn1.pc.setRemoteDescription(answer, 0);
+
+    try testing.expectEqual(.controlled, conn2.pc.dtls_transport.ice_agent.role);
+    try testing.expectEqual(.controlling, conn1.pc.dtls_transport.ice_agent.role);
+}
+
+test "PeerConnection.setRemoteDescription: answerer of a data channel only offer is controlled" {
+    var conn1 = try Connection.init(.{});
+    defer conn1.deinit();
+    var conn2 = try Connection.init(.{});
+    defer conn2.deinit();
+
+    _ = try conn1.pc.createDataChannel("chat", .{});
+    try negotiate(&conn1.pc, &conn2.pc);
+
+    try testing.expectEqual(.controlled, conn2.pc.dtls_transport.ice_agent.role);
+    try testing.expectEqual(.controlling, conn1.pc.dtls_transport.ice_agent.role);
+}
+
+test "PeerConnection.setRemoteDescription: answerer of an ice-lite offer is controlling" {
+    var conn1 = try Connection.init(.{});
+    defer conn1.deinit();
+    var conn2 = try Connection.init(.{});
+    defer conn2.deinit();
+
+    _ = try conn1.pc.addTrack(.init(.video, prng.random()), "stream");
+    const offer = try conn1.pc.createOffer();
+
+    const lite_sdp = try std.mem.replaceOwned(u8, allocator, offer.sdp, "t=0 0\n", "t=0 0\na=ice-lite\n");
+    defer allocator.free(lite_sdp);
+    try testing.expect(std.mem.indexOf(u8, lite_sdp, "a=ice-lite\n") != null);
+
+    try conn2.pc.setRemoteDescription(.{ .type = .offer, .sdp = lite_sdp }, 0);
+    try testing.expectEqual(.controlling, conn2.pc.dtls_transport.ice_agent.role);
+
+    const answer = try conn2.pc.createAnswer();
+    try conn2.pc.setLocalDescription(answer);
+    try testing.expectEqual(.controlling, conn2.pc.dtls_transport.ice_agent.role);
+}
+
 fn negotiate(pc1: *PeerConnection, pc2: *PeerConnection) !void {
     const offer = try pc1.createOffer();
     try pc1.setLocalDescription(offer);

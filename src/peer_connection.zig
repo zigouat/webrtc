@@ -1059,14 +1059,9 @@ fn applyLocalOffer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescript
 fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescription) !void {
     if (!std.mem.eql(u8, pc.last_answer.sdp, sess_desc.sdp)) return error.TamperedOffer;
     const sdp_session = pc.last_answer.session;
-    const renegotiation = pc.local_description != null;
 
-    var media_exists: bool = false;
     for (sdp_session.getMedias()) |*media| {
-        if (media.port == 0) continue;
-        media_exists = true;
-
-        if (media.isDataChannel()) continue;
+        if (media.port == 0 or media.isDataChannel()) continue;
         const tr = pc.findTransceiverByMid(media.mid).?;
         try tr.sender.setCodecs(
             pc.allocator,
@@ -1080,11 +1075,6 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
         // TODO: track removal
         tr.current_direction = media.direction;
         tr.fired_direction = media.direction;
-    }
-
-    // if there's no negotiated media, don't start connectivity checks
-    if (media_exists and !renegotiation) {
-        pc.dtls_transport.ice_agent.role = pc.last_answer.getIceRole();
     }
 
     try pc.demuxer.updateMaps(&sdp_session, pc.transceivers.items);
@@ -1179,6 +1169,12 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     }
 
     if (first_media) |media| {
+        const ice_agent = &pc.dtls_transport.ice_agent;
+        // Set role on first remote offer.
+        if (session_desc.type == .offer and ice_agent.getRemoteCredentials() == null) {
+            ice_agent.role = if (remote_sdp.ice_lite) .controlling else .controlled;
+        }
+
         try pc.dtls_transport.applyIceAttributes(media, &remote_sdp.fingerprint, now);
     }
 
