@@ -42,7 +42,7 @@ pub fn setCodecs(receiver: *InternalRtpReceiver, codecs: []const webrtc.RtpCodec
     }
 }
 
-pub fn handleRtpPacket(receiver: *InternalRtpReceiver, packet: *rtp.Packet) !bool {
+pub fn handleRtpPacket(receiver: *InternalRtpReceiver, packet: *rtp.Packet) bool {
     const stream_info = receiver.stream_infos[packet.header.payload_type] orelse return false;
     if (stream_info.packet_type == .rtx) {
         @branchHint(.unlikely);
@@ -177,19 +177,19 @@ test "InternalRtpReceiver.handleRtpPacket: handle rtx packets" {
 
     // Ignore rtx packets when ssrc is not yet known (no rtp packet is received yet)
     var rtx_packet = testPacket(97);
-    try testing.expect(!(try receiver.handleRtpPacket(&rtx_packet)));
+    try testing.expect(!receiver.handleRtpPacket(&rtx_packet));
 
     var packet = testPacket(96);
     packet.header.sequence_number = 1000;
     packet.header.ssrc = 0xDEADDEAD;
-    try testing.expect(try receiver.handleRtpPacket(&packet));
+    try testing.expect(receiver.handleRtpPacket(&packet));
 
     var payload: [10]u8 = undefined;
     std.mem.writeInt(u16, payload[0..2], 1001, .big);
     @memcpy(payload[2..], "ZIGLANG-");
     rtx_packet.payload = payload[0..];
     rtx_packet.header.sequence_number = 2;
-    try testing.expect(try receiver.handleRtpPacket(&rtx_packet));
+    try testing.expect(receiver.handleRtpPacket(&rtx_packet));
 
     try testing.expectEqual(96, rtx_packet.header.payload_type);
     try testing.expectEqual(0xDEADDEAD, rtx_packet.header.ssrc);
@@ -216,5 +216,5 @@ test "InternalRtpReceiver.handleRtpPacket: ignore packets with unknown payload t
     receiver.stream_infos[96] = .{ .packet_type = .media, .apt = 0 };
 
     var packet = testPacket(104);
-    try testing.expect(!(try receiver.handleRtpPacket(&packet)));
+    try testing.expect(!receiver.handleRtpPacket(&packet));
 }

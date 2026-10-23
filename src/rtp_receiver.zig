@@ -2,11 +2,14 @@ const std = @import("std");
 const webrtc = @import("webrtc.zig");
 
 const PeerConnection = @import("peer_connection.zig");
+const DtlsTransport = @import("dtls_transport.zig");
 const InternalRtpReceiver = @import("pc/internal_rtp_receiver.zig");
 
 const RtpReceiver = @This();
 
 pub const ReceiverID = u32;
+
+pub const SendPliError = DtlsTransport.WriteRtcpError;
 
 id: ReceiverID,
 pc: *PeerConnection,
@@ -17,7 +20,7 @@ pub fn getTrack(rtp_receiver: RtpReceiver) webrtc.MediaStreamTrack {
 }
 
 /// Sends a Picture Loss Indication (PLI) RTCP packet to the remote peer.
-pub fn sendPli(rtp_receiver: RtpReceiver, buffer: []u8) !webrtc.TransportMessage {
+pub fn sendPli(rtp_receiver: RtpReceiver, buffer: []u8) SendPliError!webrtc.TransportMessage {
     const data = rtp_receiver.internal().writePli(buffer);
     return try rtp_receiver.pc.dtls_transport.writeRtcp(buffer, data.len);
 }

@@ -221,7 +221,11 @@ const SenderReportIterator = struct {
     }
 };
 
-pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !PeerConnection {
+pub const InitError = NackConfig.Error || DtlsTransport.InitError;
+
+pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) InitError!PeerConnection {
+    try config.nack_config.validate();
+
     const buffers = try allocator.create([2 * packet_size]u8);
     buffers.* = @splat(0);
     errdefer allocator.destroy(buffers);
@@ -1304,7 +1308,7 @@ fn handleRtpData(pc: *PeerConnection, data: []const u8) !ReadResult {
     };
 
     const tr = &pc.transceivers.items[id];
-    if (try tr.receiver.handleRtpPacket(&packet)) {
+    if (tr.receiver.handleRtpPacket(&packet)) {
         if (tr.receiver.nack) if (pc.nack_generator) |*nack_generator| try nack_generator.handleRead(&packet);
         return .{ .rtp = .{ pc.getRtpReceiver(id), packet } };
     }

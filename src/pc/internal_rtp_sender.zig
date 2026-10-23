@@ -13,6 +13,10 @@ const RtpTransceiver = @import("../rtp_transceiver.zig");
 const Mid = @import("../mid.zig");
 
 pub const AllocError = std.mem.Allocator.Error;
+/// The sender has no negotiated track or the transceiver cannot send.
+pub const StateError = error{ NoAssociatedTrack, InvalidDirection };
+pub const WriteError = StateError || Io.Writer.Error;
+pub const PacketizeError = Io.Writer.Error || Io.Reader.Error;
 
 const RtpHeaderExtensions = struct {
     mid: u16 = 0,
@@ -139,7 +143,7 @@ pub fn reset(sender: *InternalRtpSender, allocator: std.mem.Allocator) void {
     }
 }
 
-pub fn replaceTrack(sender: *InternalRtpSender, new_track: MediaStreamTrack) !void {
+pub fn replaceTrack(sender: *InternalRtpSender, new_track: MediaStreamTrack) void {
     sender.track = new_track;
 }
 
@@ -153,7 +157,7 @@ pub fn setCodecs(
     r: std.Random,
     codecs: []const webrtc.RtpCodecParameters,
     send_buffer_size: u16,
-) !void {
+) AllocError!void {
     const curr_codecs = sender.codecs;
     sender.codecs = codecs;
 
@@ -216,7 +220,7 @@ pub const SamplePacketizerIterator = struct {
         opus: rtp.packetizer.Opus.Iterator,
     };
 
-    pub fn init(sender: *InternalRtpSender, media_packet: *const MediaPacket) !SamplePacketizerIterator {
+    pub fn init(sender: *InternalRtpSender, media_packet: *const MediaPacket) StateError!SamplePacketizerIterator {
         const tr = try sender.checkAndGetTransceiver();
 
         const packet_it = switch (sender.packetizer) {
@@ -233,7 +237,7 @@ pub const SamplePacketizerIterator = struct {
         };
     }
 
-    pub fn next(it: *SamplePacketizerIterator, buffer: []u8, now_us: i64) !?[]const u8 {
+    pub fn next(it: *SamplePacketizerIterator, buffer: []u8, now_us: i64) PacketizeError!?[]const u8 {
         const header_size = constants.rtp_default_header_size + try it.rtp_sender.writeHeaderExtensions(
             it.mid,
             buffer[constants.rtp_default_header_size..],
@@ -255,11 +259,11 @@ pub const SamplePacketizerIterator = struct {
     }
 };
 
-pub fn handleMediaPacketWrite(sender: *InternalRtpSender, sample: *const MediaPacket) !SamplePacketizerIterator {
+pub fn handleMediaPacketWrite(sender: *InternalRtpSender, sample: *const MediaPacket) StateError!SamplePacketizerIterator {
     return try SamplePacketizerIterator.init(sender, sample);
 }
 
-pub fn handleWrite(sender: *InternalRtpSender, packet: *const rtp.Packet, buffer: []u8, now_us: i64) ![]const u8 {
+pub fn handleWrite(sender: *InternalRtpSender, packet: *const rtp.Packet, buffer: []u8, now_us: i64) WriteError![]const u8 {
     const tr = try checkAndGetTransceiver(sender);
 
     const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(
@@ -330,7 +334,7 @@ pub fn handleRtcpNack(sender: *InternalRtpSender, allocator: std.mem.Allocator, 
     return true;
 }
 
-pub fn nextNack(sender: *InternalRtpSender, buffer: []u8) (AllocError || error{WriteFailed})!?[]const u8 {
+pub fn nextNack(sender: *InternalRtpSender, buffer: []u8) (AllocError || Io.Writer.Error)!?[]const u8 {
     const send_buffer = if (sender.send_buffer) |*sb| sb else return null;
     const is_rtx = sender.rtx_config != null;
     const tr = checkAndGetTransceiver(sender) catch return null;
@@ -365,7 +369,7 @@ pub fn nextNack(sender: *InternalRtpSender, buffer: []u8) (AllocError || error{W
     }
 }
 
-fn checkAndGetTransceiver(sender: *InternalRtpSender) !*RtpTransceiver {
+fn checkAndGetTransceiver(sender: *InternalRtpSender) StateError!*RtpTransceiver {
     if (sender.track == null or sender.codec == null) {
         @branchHint(.cold);
         return error.NoAssociatedTrack;

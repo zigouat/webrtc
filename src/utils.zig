@@ -4,7 +4,7 @@ const webrtc = @import("webrtc.zig");
 const RtpCodec = webrtc.RtpCodecParameters;
 const RtpHeaderExtension = webrtc.RtpHeaderExtensionParameter;
 
-pub fn generateP256KeyPairDer(io: std.Io, buffer: []u8) ![]const u8 {
+pub fn generateP256KeyPairDer(io: std.Io, buffer: []u8) (std.crypto.errors.IdentityElementError || std.Io.Writer.Error)![]const u8 {
     const P256 = std.crypto.ecc.P256;
 
     const priv_key = P256.scalar.random(io, .big);
