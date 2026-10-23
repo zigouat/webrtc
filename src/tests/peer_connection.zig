@@ -391,12 +391,13 @@ test "PeerConnection.addTransceiver" {
         var media_engine = try testMediaEngine(false);
         defer media_engine.deinit(testing.allocator);
 
-        var failing_alloc = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 6 });
+        var failing_alloc = std.testing.FailingAllocator.init(testing.allocator, .{});
         var pc = try PeerConnection.init(testing.io, failing_alloc.allocator(), .{
             .media_engine = &media_engine,
             .random = prng.random(),
         });
         defer pc.deinit();
+        failing_alloc.fail_index = failing_alloc.alloc_index;
 
         try std.testing.expectError(error.OutOfMemory, pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly }));
     }

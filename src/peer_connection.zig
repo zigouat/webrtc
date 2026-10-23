@@ -99,6 +99,8 @@ pub const Config = struct {
     rtc_configuration: RTCConfiguration = .{},
     /// The media engine used to advertise and negotiate codecs. Owned by the caller.
     media_engine: *webrtc.MediaEngine,
+    /// Must be a cryptographically secure generator (e.g. `std.Random.DefaultCsprng` seeded from
+    /// `Io.randomSecure`); it is used for ICE credentials, DTLS, SCTP and RTP identifiers.
     random: std.Random,
     /// NACK configuration. This is used to configure the NACK generator/responder for the PeerConnection.
     nack_config: NackConfig = .{},
@@ -727,18 +729,9 @@ pub fn pollEvent(pc: *PeerConnection) ?Event {
 
 pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) !?webrtc.TransportMessage {
     const buffer2 = pc.int_buffers[packet_size .. 2 * packet_size];
+    if (pc.dtls_transport.pollTransmit(buffer)) |msg| return msg;
 
     const data = blk: {
-        switch (pc.dtls_transport.pollTransmit(buffer)) {
-            .none => {},
-            .ice => |msg| return .{
-                .data = msg.data,
-                .from = msg.from,
-                .to = msg.to,
-            },
-            .bin => |data| break :blk data,
-        }
-
         if (try pc.sctp_transport.pollTransmit(buffer2, now)) |sctp_data| {
             break :blk pc.dtls_transport.handleWrite(sctp_data, buffer);
         }

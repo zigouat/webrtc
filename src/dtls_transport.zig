@@ -26,7 +26,6 @@ pub const Event = union(enum) {
     dtls_connection_state: dtls.ConnectionState,
 };
 
-io: Io,
 allocator: std.mem.Allocator,
 ice_agent: IceAgent,
 session: dtls.Session,
@@ -46,11 +45,15 @@ pub const Config = struct {
 };
 
 pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !DtlsTransport {
-    var credens = try ice.Credentials.generate(io, allocator);
-    defer credens.deinit(allocator);
+    var ice_user: [8]u8 = undefined;
+    var ice_pwd: [24]u8 = undefined;
 
+    utils.randString(config.random, &ice_user);
+    utils.randPassword(config.random, &ice_pwd);
+
+    // Ice credentials are copied into the agent
     var ice_agent = IceAgent.init(allocator, .{
-        .credentials = credens,
+        .credentials = .{ .username = ice_user[0..], .password = ice_pwd[0..] },
         .role = .controlling,
         .random = config.random,
     }) catch return error.OutOfMemory;
@@ -60,7 +63,6 @@ pub fn init(io: Io, allocator: std.mem.Allocator, config: Config) !DtlsTransport
     const certificate = try utils.generateP256KeyPairDer(io, &der_buffer);
 
     return .{
-        .io = io,
         .allocator = allocator,
         .ice_agent = ice_agent,
         .session = try dtls.Session.init(config.random, .{ .key_pair = certificate }),
@@ -73,12 +75,12 @@ pub fn deinit(transport: *DtlsTransport) void {
     transport.events.deinit(transport.allocator);
 
     if (transport.in_srtp_session) |*srtp_sess| {
-        srtp_sess.deinit();
+        srtp_sess.deinit(transport.allocator);
         transport.in_srtp_session = null;
     }
 
     if (transport.out_srtp_session) |*srtp_sess| {
-        srtp_sess.deinit();
+        srtp_sess.deinit(transport.allocator);
         transport.out_srtp_session = null;
     }
 }
@@ -141,9 +143,9 @@ pub fn addIceTurnServer(
 
 pub fn handleMediaWrite(transport: *DtlsTransport, buffer: []u8, payload_len: usize, comptime is_rtp: bool) ![]const u8 {
     return if (is_rtp)
-        try transport.out_srtp_session.?.encryptRtp(buffer[0..payload_len], buffer)
+        try transport.out_srtp_session.?.encryptRtp(transport.allocator, buffer[0..payload_len], buffer)
     else
-        try transport.out_srtp_session.?.encryptRtcp(buffer[0..payload_len], buffer);
+        try transport.out_srtp_session.?.encryptRtcp(transport.allocator, buffer[0..payload_len], buffer);
 }
 
 pub fn handleWrite(transport: *DtlsTransport, data: []const u8, buffer: []u8) []const u8 {
@@ -177,20 +179,14 @@ pub fn pollEvent(transport: *DtlsTransport) ?Event {
     return transport.events.popFront();
 }
 
-pub const Message = union(enum) {
-    ice: stun.TransportMessage,
-    bin: []const u8,
-    none,
-};
-
-pub fn pollTransmit(transport: *DtlsTransport, buffer: []u8) Message {
-    const ice_msg = (transport.ice_agent.pollTransmit(buffer) catch return .none) orelse {
-        if (transport.nominated_pair == null) return .none;
-        const dtls_msg = transport.session.pollTransmit(buffer) orelse return .none;
-        return .{ .bin = dtls_msg };
+pub fn pollTransmit(transport: *DtlsTransport, buffer: []u8) ?webrtc.TransportMessage {
+    const ice_msg = (transport.ice_agent.pollTransmit(buffer) catch return null) orelse {
+        const from, const to = transport.nominated_pair orelse return null;
+        const dtls_msg = transport.session.pollTransmit(buffer) orelse return null;
+        return .{ .data = dtls_msg, .from = from, .to = to };
     };
 
-    return .{ .ice = ice_msg };
+    return .{ .data = ice_msg.data, .from = ice_msg.from, .to = ice_msg.to };
 }
 
 pub fn pollTimeout(transport: *DtlsTransport) ?i64 {
@@ -227,13 +223,13 @@ fn drainEvents(transport: *DtlsTransport, now: i64) !void {
                 else => unreachable,
             };
 
-            transport.in_srtp_session = try srtp.Session.init(transport.io, transport.allocator, &keying.remote_keying_material, profile);
+            transport.in_srtp_session = try srtp.Session.init(&keying.remote_keying_material, profile);
             errdefer {
-                transport.in_srtp_session.?.deinit();
+                transport.in_srtp_session.?.deinit(transport.allocator);
                 transport.in_srtp_session = null;
             }
 
-            transport.out_srtp_session = try srtp.Session.init(transport.io, transport.allocator, &keying.local_keying_material, profile);
+            transport.out_srtp_session = try srtp.Session.init(&keying.local_keying_material, profile);
         },
     };
 }
@@ -248,12 +244,12 @@ fn handleIceData(transport: *DtlsTransport, now: i64, data: []const u8, buffer: 
         },
         .rtp => if (transport.in_srtp_session) |*srtp_session| {
             const buffer2 = @constCast(data.ptr[0..max_message_size]);
-            const rtp_packet = try srtp_session.decryptRtp(data, buffer2);
+            const rtp_packet = try srtp_session.decryptRtp(transport.allocator, data, buffer2);
             return .{ .rtp = rtp_packet };
         },
         .rtcp => if (transport.in_srtp_session) |*srtp_session| {
             const buffer2 = @constCast(data.ptr[0..max_message_size]);
-            const rtcp_packet = try srtp_session.decryptRtcp(data, buffer2);
+            const rtcp_packet = try srtp_session.decryptRtcp(transport.allocator, data, buffer2);
             return .{ .rtcp = rtcp_packet };
         },
         .unknown => Logger.debug("Received unknown packet", .{}),
