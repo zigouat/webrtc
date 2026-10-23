@@ -9,7 +9,7 @@ const Io = std.Io;
 const InternalRtpSender = @This();
 const MediaStreamTrack = webrtc.MediaStreamTrack;
 const MediaPacket = @import("media").Packet;
-const RtpTransceiver = @import("../rtp_transceiver.zig");
+const InternalRtpTransceiver = @import("internal_rtp_transceiver.zig");
 const Mid = @import("../mid.zig");
 
 pub const AllocError = std.mem.Allocator.Error;
@@ -175,7 +175,7 @@ pub fn setCodecs(
     // In the future we'll add callback to notify the application that the negotiated codec has changed
     // and let it decide what to do.
     if (curr_codecs.len != 0) return;
-    const tr: *webrtc.RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
+    const tr: *InternalRtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
 
     const chosen_codec = sender.codecs[0];
     const rtx_codec = webrtc.RtpCodecParameters.findRtx(codecs, chosen_codec.payload_type);
@@ -369,13 +369,13 @@ pub fn nextNack(sender: *InternalRtpSender, buffer: []u8) (AllocError || Io.Writ
     }
 }
 
-fn checkAndGetTransceiver(sender: *InternalRtpSender) StateError!*RtpTransceiver {
+fn checkAndGetTransceiver(sender: *InternalRtpSender) StateError!*InternalRtpTransceiver {
     if (sender.track == null or sender.codec == null) {
         @branchHint(.cold);
         return error.NoAssociatedTrack;
     }
 
-    const tr: *RtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
+    const tr: *InternalRtpTransceiver = @alignCast(@fieldParentPtr("sender", sender));
     if (!tr.canSend()) {
         @branchHint(.unlikely);
         return error.InvalidDirection;
@@ -404,7 +404,7 @@ const testing = std.testing;
 
 var prng = std.Random.DefaultPrng.init(0xdeadbeef);
 
-fn testTransceiver(current_direction: ?RtpTransceiver.Direction) RtpTransceiver {
+fn testTransceiver(current_direction: ?InternalRtpTransceiver.Direction) InternalRtpTransceiver {
     return .{
         .sender = InternalRtpSender.init(null),
         .receiver = undefined,

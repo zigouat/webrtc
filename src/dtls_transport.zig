@@ -129,18 +129,8 @@ pub fn addIceLocalAddrs(transport: *DtlsTransport, addrs: []const Io.net.IpAddre
     try transport.drainEvents(now);
 }
 
-pub fn addIceStunServer(transport: *DtlsTransport, addr: Io.net.IpAddress, stun_server: Io.net.IpAddress) !void {
-    try transport.ice_agent.addStunServer(addr, stun_server);
-}
-
-pub fn addIceTurnServer(
-    transport: *DtlsTransport,
-    addr: Io.net.IpAddress,
-    turn_server: Io.net.IpAddress,
-    username: []const u8,
-    password: []const u8,
-) !void {
-    try transport.ice_agent.addTurnServer(addr, turn_server, username, password);
+pub fn addIceServer(transport: *DtlsTransport, addr: Io.net.IpAddress, server: ice.agent.Server, now: i64) !void {
+    try transport.ice_agent.addServer(addr, server, now);
 }
 
 pub const WriteRtpError = srtp.EncryptError;

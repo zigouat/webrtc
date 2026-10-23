@@ -39,6 +39,7 @@ const ConnectionContext = struct {
 
         const now = Io.Timestamp.now(io, .awake).toMilliseconds();
         try conn.pc.addLocalCandidates(&.{socket.address}, now);
+        try conn.pc.addLocalCandidates(&.{}, now);
 
         conn.io = io;
         conn.socket = socket;

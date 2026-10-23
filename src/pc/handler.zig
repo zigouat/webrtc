@@ -4,7 +4,6 @@ const std = @import("std");
 const webrtc = @import("../webrtc.zig");
 const ice = @import("ice");
 const PeerConnection = @import("../peer_connection.zig");
-const RtpTransceiver = @import("../webrtc.zig").RtpTransceiver;
 
 const Handler = @This();
 
@@ -21,7 +20,7 @@ const VTable = struct {
     /// Called when the ICE gathering state of the PeerConnection changes.
     onGatheringStateChange: *const fn (?*anyopaque, PeerConnection.GatheringState) void = onGatheringStateChange,
     /// Called when a new remote track is added to the PeerConnection.
-    onTrack: *const fn (?*anyopaque, RtpTransceiver.TrackEventInit) void = onTrack,
+    onTrack: *const fn (?*anyopaque, PeerConnection.TrackEventInit) void = onTrack,
     /// Called when a new ICE candidate is found.
     onIceCandidate: *const fn (?*anyopaque, ?ice.Candidate) void = onIceCandidate,
     /// Called when a new remote data channel is created.
@@ -47,7 +46,7 @@ fn onGatheringStateChange(userdata: ?*anyopaque, state: PeerConnection.Gathering
     _ = state;
 }
 
-fn onTrack(userdata: ?*anyopaque, event: RtpTransceiver.TrackEventInit) void {
+fn onTrack(userdata: ?*anyopaque, event: PeerConnection.TrackEventInit) void {
     _ = userdata;
     _ = event;
 }

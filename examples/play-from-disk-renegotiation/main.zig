@@ -53,6 +53,7 @@ const ConnectionContext = struct {
 
         const now = Io.Timestamp.now(io, .awake).toMilliseconds();
         try conn.pc.addLocalCandidates(&.{socket.address}, now);
+        try conn.pc.addLocalCandidates(&.{}, now);
 
         conn.io = io;
         conn.socket = socket;
@@ -88,8 +89,7 @@ const ConnectionContext = struct {
     fn removeTrack(conn: *ConnectionContext, offer: webrtc.SessionDescription) !void {
         if (conn.senders.items.len == 0) return;
         if (conn.senders.pop()) |sender| {
-            const tr = &conn.pc.getTransceivers()[sender.id];
-            tr.removeTrack();
+            try conn.pc.removeTrack(sender.id);
 
             try conn.pc.setRemoteDescription(offer, Io.Timestamp.now(conn.io, .awake).toMilliseconds());
             const answer = try conn.pc.createAnswer();
