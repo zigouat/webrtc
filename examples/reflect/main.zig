@@ -39,6 +39,7 @@ const ConnectionContext = struct {
 
         const now = Io.Timestamp.now(io, .awake).toMilliseconds();
         try conn.pc.addLocalCandidates(&.{socket.address}, now);
+        try conn.pc.addLocalCandidates(&.{}, now);
 
         conn.video_sender = try conn.pc.addTrack(.initWithId("video", .video), "my-stream");
         conn.audio_sender = try conn.pc.addTrack(.initWithId("audio", .audio), "my-stream");

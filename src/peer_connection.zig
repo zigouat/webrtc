@@ -15,6 +15,7 @@ const SctpTransport = @import("sctp_transport.zig");
 const SDPSession = @import("sdp_session.zig");
 const Demuxer = @import("pc/demuxer.zig");
 const RtpTransceiver = @import("rtp_transceiver.zig");
+const InternalRtpTransceiver = @import("pc/internal_rtp_transceiver.zig");
 const RtpSender = @import("rtp_sender.zig");
 const InternalRtpSender = @import("pc/internal_rtp_sender.zig");
 const RtpReceiver = @import("rtp_receiver.zig");
@@ -30,7 +31,7 @@ const Logger = std.log.scoped(.pc);
 
 const packet_size = constants.max_packet_size;
 
-pub const RtpTransceiverID = u32;
+pub const RtpTransceiverID = RtpTransceiver.TransceiverID;
 pub const RtpSenderID = RtpSender.SenderID;
 pub const RtpReceiverID = RtpReceiver.ReceiverID;
 
@@ -143,7 +144,7 @@ media_engine: *webrtc.MediaEngine,
 random: std.Random,
 
 streams: std.ArrayList(webrtc.MediaStream) = .empty,
-transceivers: std.ArrayList(RtpTransceiver),
+transceivers: std.ArrayList(InternalRtpTransceiver),
 data_channels: std.ArrayList(InternalDataChannel),
 
 events: std.Deque(Event),
@@ -209,7 +210,7 @@ const SenderReportIterator = struct {
     timestamp: i64,
 
     fn next(it: *SenderReportIterator, pc: *PeerConnection, buffer: []u8) ?[]const u8 {
-        const transceivers = pc.getTransceivers();
+        const transceivers = pc.transceivers.items;
         while (it.index < transceivers.len) {
             const tr = &transceivers[it.index];
             it.index += 1;
@@ -325,10 +326,6 @@ pub fn removeTrack(pc: *PeerConnection, sender_id: RtpSenderID) error{Connection
     pc.checkNegotiationNeeded();
 }
 
-pub fn getTransceivers(pc: *const PeerConnection) []RtpTransceiver {
-    return pc.transceivers.items;
-}
-
 pub fn getRtpSender(pc: *PeerConnection, id: RtpSenderID) RtpSender {
     std.debug.assert(id < pc.transceivers.items.len);
     return .{ .id = id, .pc = pc };
@@ -339,21 +336,26 @@ pub fn getRtpReceiver(pc: *PeerConnection, id: RtpReceiverID) RtpReceiver {
     return .{ .id = id, .pc = pc };
 }
 
+pub fn getRtpTransceiver(pc: *PeerConnection, id: RtpTransceiverID) RtpTransceiver {
+    std.debug.assert(id < pc.transceivers.items.len);
+    return .{ .id = id, .pc = pc };
+}
+
 /// Creates a new transceiver to the PeerConnection from an existing track.
-pub fn addTransceiverFromTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, init_config: RtpTransceiver.Init) Error!RtpTransceiverID {
+pub fn addTransceiverFromTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, init_config: RtpTransceiver.Init) Error!RtpTransceiver {
     const tr = try pc.initTransceiverFromTrack(track, init_config.stream_id, false);
     pc.transceivers.items[tr].direction = init_config.direction;
     pc.checkNegotiationNeeded();
-    return tr;
+    return pc.getRtpTransceiver(tr);
 }
 
 /// Creates a new transceiver to the PeerConnection from a specified kind of media (audio or video).
 ///
 /// The transceive will initialize a sender without a track. Pair this with `addTrack` to add a track to the sender later.
-pub fn addTransceiverFromKind(pc: *PeerConnection, kind: webrtc.TrackKind, init_config: RtpTransceiver.Init) Error!RtpTransceiverID {
+pub fn addTransceiverFromKind(pc: *PeerConnection, kind: webrtc.TrackKind, init_config: RtpTransceiver.Init) Error!RtpTransceiver {
     try pc.transceivers.ensureUnusedCapacity(pc.allocator, 1);
 
-    var tr = RtpTransceiver{
+    var tr = InternalRtpTransceiver{
         .kind = kind,
         .direction = init_config.direction,
         .sender = .init(null),
@@ -368,16 +370,7 @@ pub fn addTransceiverFromKind(pc: *PeerConnection, kind: webrtc.TrackKind, init_
 
     pc.transceivers.appendAssumeCapacity(tr);
     pc.checkNegotiationNeeded();
-    return @intCast(pc.transceivers.items.len - 1);
-}
-
-/// Stops the transceiver.
-///
-/// Prefer calling this instead of `RtpTransceiver.stop()` directly, as this will also check if negotiation is needed.
-pub fn stopTransceiver(pc: *PeerConnection, transceiver: *RtpTransceiver) Error!void {
-    try pc.checkNotClosed();
-    transceiver.stop();
-    pc.checkNegotiationNeeded();
+    return pc.getRtpTransceiver(@intCast(pc.transceivers.items.len - 1));
 }
 
 /// Creates a new offer.
@@ -781,22 +774,16 @@ pub fn pollTimeout(pc: *PeerConnection) ?i64 {
     return if (deadline == std.math.maxInt(i64)) null else deadline;
 }
 
+/// Adds local host addresses. The first call starts ICE gathering.
+///
+/// Gathering only completes once this is called with an empty list, so call
+/// `addLocalCandidates(&.{}, now)` after all addresses and ICE servers are added.
 pub fn addLocalCandidates(pc: *PeerConnection, addrs: []const Io.net.IpAddress, now: i64) !void {
     try pc.dtls_transport.addIceLocalAddrs(addrs, now);
 }
 
-pub fn addStunServer(pc: *PeerConnection, local_addr: Io.net.IpAddress, stun_server: Io.net.IpAddress) !void {
-    try pc.dtls_transport.addIceStunServer(local_addr, stun_server);
-}
-
-pub fn addTurnServer(
-    pc: *PeerConnection,
-    local_addr: Io.net.IpAddress,
-    turn_server: Io.net.IpAddress,
-    username: []const u8,
-    password: []const u8,
-) !void {
-    try pc.dtls_transport.addIceTurnServer(local_addr, turn_server, username, password);
+pub fn addIceServer(pc: *PeerConnection, local_addr: Io.net.IpAddress, server: ice.agent.Server, now: i64) !void {
+    try pc.dtls_transport.addIceServer(local_addr, server, now);
 }
 
 fn deinitDescriptions(pc: *PeerConnection, descriptions: []const *?ParsedSessionDescription) void {
@@ -815,7 +802,7 @@ fn initTransceiverFromTrack(
 ) !RtpTransceiverID {
     try pc.transceivers.ensureUnusedCapacity(pc.allocator, 1);
 
-    var tr = RtpTransceiver{
+    var tr = InternalRtpTransceiver{
         .kind = track.kind,
         .direction = .sendrecv,
         .sender = .init(track),
@@ -956,7 +943,7 @@ fn initDataChannelMedia(pc: *PeerConnection, media: *SDPSession.Media) !void {
     pc.mid +%= 1;
 }
 
-fn checkNegotiationNeeded(pc: *PeerConnection) void {
+pub fn checkNegotiationNeeded(pc: *PeerConnection) void {
     if (pc.signaling_state != .stable) return;
 
     if (pc.isNegotiationNeeded()) {
@@ -972,7 +959,7 @@ fn isNegotiationNeeded(pc: *const PeerConnection) bool {
     // TODO: Check ice restart
     const local_desc = pc.local_description orelse return false;
     const remote_desc = pc.remote_description orelse return false;
-    for (pc.getTransceivers()) |tr| {
+    for (pc.transceivers.items) |tr| {
         if (tr.stopping and !tr.stopped) return true;
         if (!tr.isStopped()) {
             if (tr.sdp_mline_index == null) return true;
@@ -1097,7 +1084,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     }
 
     var first_media: ?*SDPSession.Media = null;
-    var track_events: std.ArrayList(RtpTransceiver.TrackEventInit) = .empty;
+    var track_events: std.ArrayList(InternalRtpTransceiver.TrackEventInit) = .empty;
     defer track_events.deinit(pc.allocator);
     if (session_desc.type == .offer) try pc.transceivers.ensureUnusedCapacity(pc.allocator, remote_sdp.getMedias().len);
     for (remote_sdp.getMedias(), 0..) |*media, idx| {
@@ -1118,7 +1105,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
                     if (pc.findTransceiverByMid(media.mid)) |tr| break :blk tr;
                     for (pc.transceivers.items) |*tr| if (tr.canAssociateMedia(media)) break :blk tr;
 
-                    const tr = RtpTransceiver.initFromSdpMedia(media, pc.random, @intCast(idx));
+                    const tr = InternalRtpTransceiver.initFromSdpMedia(media, pc.random, @intCast(idx));
                     pc.transceivers.appendAssumeCapacity(tr);
                     break :blk &pc.transceivers.items[pc.transceivers.items.len - 1];
                 },
@@ -1224,12 +1211,12 @@ fn updateSignalingStateToStable(pc: *PeerConnection) void {
     pc.checkNegotiationNeeded();
 }
 
-fn findTransceiverByMediaIndex(pc: *PeerConnection, index: usize) ?*RtpTransceiver {
+fn findTransceiverByMediaIndex(pc: *PeerConnection, index: usize) ?*InternalRtpTransceiver {
     for (pc.transceivers.items) |*tr| if (tr.sdp_mline_index) |tr_index| if (tr_index == index) return tr;
     return null;
 }
 
-fn findTransceiverByMid(pc: *PeerConnection, mid: Mid.Int) ?*RtpTransceiver {
+fn findTransceiverByMid(pc: *PeerConnection, mid: Mid.Int) ?*InternalRtpTransceiver {
     for (pc.transceivers.items) |*tr| {
         if (tr.mid) |tr_mid| if (tr_mid == mid) return tr;
     }
@@ -1354,7 +1341,7 @@ fn maybeConnectSctpTransport(pc: *PeerConnection) !void {
 fn startRtpRtcpInterceptors(pc: *PeerConnection) !void {
     // Nack generators
     var nack = false;
-    for (pc.getTransceivers()) |tr| {
+    for (pc.transceivers.items) |tr| {
         if (tr.canReceive() and tr.receiver.nack) {
             nack = true;
             if (pc.nack_generator == null) {
@@ -1389,6 +1376,7 @@ test {
     _ = @import("pc/demuxer.zig");
     _ = @import("pc/internal_rtp_sender.zig");
     _ = @import("pc/internal_rtp_receiver.zig");
+    _ = @import("pc/internal_rtp_transceiver.zig");
     _ = @import("nack/send_buffer.zig");
     _ = @import("nack/receive_log.zig");
     _ = @import("nack/generator.zig");

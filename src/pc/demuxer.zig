@@ -3,7 +3,7 @@ const SDPSession = @import("../sdp_session.zig");
 const rtp = @import("rtp");
 const Mid = @import("../mid.zig");
 const webrtc = @import("../webrtc.zig");
-const RtpTransceiver = @import("../rtp_transceiver.zig");
+const InternalRtpTransceiver = @import("internal_rtp_transceiver.zig");
 
 const Demuxer = @This();
 
@@ -34,7 +34,7 @@ pub fn deinit(demuxer: *Demuxer) void {
     demuxer.ssrc_to_transceiver.deinit();
 }
 
-pub fn updateMaps(demuxer: *Demuxer, sdp_session: *const SDPSession, transceivers: []const RtpTransceiver) !void {
+pub fn updateMaps(demuxer: *Demuxer, sdp_session: *const SDPSession, transceivers: []const InternalRtpTransceiver) !void {
     for (sdp_session.getMedias()) |*media| {
         if (demuxer.mid_id == null) for (media.rtp_header_extensions) |ext| if (std.mem.eql(u8, ext.uri, webrtc.mid_extension_uri)) {
             demuxer.mid_id = ext.id;
@@ -91,7 +91,7 @@ fn getMidFromPacket(packet: *const rtp.Packet, mid_id: u16) !?[]const u8 {
     return null;
 }
 
-fn findTransceiverByMid(transceivers: []const RtpTransceiver, mid: Mid.Int) ?u32 {
+fn findTransceiverByMid(transceivers: []const InternalRtpTransceiver, mid: Mid.Int) ?u32 {
     for (transceivers, 0..) |*tr, idx| if (tr.mid) |tr_mid| if (tr_mid == mid) return @intCast(idx);
     return null;
 }
@@ -163,7 +163,7 @@ fn testPacket(ssrc: u32) rtp.Packet {
     };
 }
 
-fn testTransceiver(mid: Mid.Int) RtpTransceiver {
+fn testTransceiver(mid: Mid.Int) InternalRtpTransceiver {
     return .{
         .sender = .init(null),
         .receiver = .init(.initWithId("track", .video)),
@@ -185,7 +185,7 @@ test "Demuxer.updateMaps" {
     const tr1 = testTransceiver(mid_1);
     const tr2 = testTransceiver(mid_2);
     const tr3 = testTransceiver(mid_3);
-    const transceivers = [_]RtpTransceiver{ tr1, tr2, tr3 };
+    const transceivers = [_]InternalRtpTransceiver{ tr1, tr2, tr3 };
 
     try demuxer.updateMaps(&session, &transceivers);
 
@@ -230,7 +230,7 @@ test "Demuxer.getTransceiver" {
     const tr1 = testTransceiver(mid_1);
     const tr2 = testTransceiver(mid_2);
     const tr3 = testTransceiver(mid_3);
-    const transceivers = [_]RtpTransceiver{ tr1, tr2, tr3 };
+    const transceivers = [_]InternalRtpTransceiver{ tr1, tr2, tr3 };
 
     try demuxer.updateMaps(&session, &transceivers);
 
@@ -278,7 +278,7 @@ test "Demuxer.getTransceiver: falls back to the mid header extension when ssrc i
     const tr1 = testTransceiver(mid_1);
     const tr2 = testTransceiver(mid_2);
     const tr3 = testTransceiver(mid_3);
-    const transceivers = [_]RtpTransceiver{ tr1, tr2, tr3 };
+    const transceivers = [_]InternalRtpTransceiver{ tr1, tr2, tr3 };
 
     try demuxer.updateMaps(&session, &transceivers);
     try std.testing.expectEqual(mid_ext_id, demuxer.mid_id.?);

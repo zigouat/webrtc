@@ -213,8 +213,8 @@ test "PeerConnection.setRemoteDescription: set offer - do not reject bundle only
 
     try conn.expectEvent(.signaling_state, .have_remote_offer);
 
-    try std.testing.expectEqual(2, pc.getTransceivers().len);
-    for (pc.getTransceivers()) |tr| {
+    try std.testing.expectEqual(2, pc.transceivers.items.len);
+    for (pc.transceivers.items) |tr| {
         try std.testing.expectEqual(.video, tr.kind);
         try std.testing.expect(!tr.isStopped());
     }
@@ -255,8 +255,8 @@ test "PeerConnection.setRemoteDescription: set offer - data channel media does n
 
     try conn.expectEvent(.signaling_state, .have_remote_offer);
 
-    try std.testing.expectEqual(1, pc.getTransceivers().len);
-    try std.testing.expectEqual(.video, pc.getTransceivers()[0].kind);
+    try std.testing.expectEqual(1, pc.transceivers.items.len);
+    try std.testing.expectEqual(.video, pc.transceivers.items[0].kind);
 }
 
 test "PeerConnection.setRemoteDescription: set offer - transceivers created from offer" {
@@ -293,7 +293,7 @@ test "PeerConnection.setRemoteDescription: set offer - transceivers created from
 
     try pc.setRemoteDescription(.{ .type = .offer, .sdp = offer }, 0);
 
-    try std.testing.expectEqual(2, pc.getTransceivers().len);
+    try std.testing.expectEqual(2, pc.transceivers.items.len);
 
     var receiver_ids: [2]PeerConnection.RtpTransceiverID = undefined;
     for (&receiver_ids) |*id| id.* = conn.popEvent(.track).?.track.receiver.id;
@@ -331,12 +331,12 @@ test "PeerConnection.addTrack" {
     _ = try pc.addTrack(track, null);
     try std.testing.expectEqual(1, pc.transceivers.items.len);
 
-    const trasceiver_id = try pc.addTransceiverFromKind(.video, .{ .direction = .recvonly });
-    const tr = &pc.getTransceivers()[trasceiver_id];
+    const transceiver = try pc.addTransceiverFromKind(.video, .{ .direction = .recvonly });
+    const tr = &pc.transceivers.items[transceiver.id];
     try std.testing.expect(tr.sender.track == null);
 
     const sender = try pc.addTrack(.initWithId("track2", .video), null);
-    try std.testing.expectEqual(trasceiver_id, sender.id);
+    try std.testing.expectEqual(transceiver.id, sender.id);
     try std.testing.expectEqual(2, pc.transceivers.items.len);
     try std.testing.expect(tr.sender.track != null);
     try std.testing.expectEqualStrings("track2", tr.sender.track.?.getId());
@@ -350,7 +350,7 @@ test "PeerConnection.removeTrack" {
     const sender = try pc.addTrack(.initWithId("track1", .video), null);
     try pc.removeTrack(sender.id);
 
-    const tr = &pc.getTransceivers()[sender.id];
+    const tr = &pc.transceivers.items[sender.id];
     try testing.expect(tr.sender.track == null);
     try testing.expectEqual(.recvonly, tr.direction);
 }
@@ -363,11 +363,11 @@ test "PeerConnection.addTransceiver" {
 
         const track: webrtc.MediaStreamTrack = .initWithId("track1", .video);
 
-        const transceiver_id = try pc.addTransceiverFromTrack(track, .{
+        const transceiver = try pc.addTransceiverFromTrack(track, .{
             .direction = .sendrecv,
             .stream_id = "stream-1",
         });
-        const tr = &pc.getTransceivers()[transceiver_id];
+        const tr = &pc.transceivers.items[transceiver.id];
         try std.testing.expectEqual(1, pc.transceivers.items.len);
         try std.testing.expectEqual(.sendrecv, tr.direction);
         try std.testing.expectEqualStrings(&track.id, &tr.sender.track.?.id);
@@ -376,8 +376,8 @@ test "PeerConnection.addTransceiver" {
         const sender_track = tr.sender.track.?;
         try std.testing.expectEqualStrings("stream-1", sender_track.stream_id.?);
 
-        const tr2_id = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
-        const tr2 = &pc.getTransceivers()[tr2_id];
+        const transceiver2 = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
+        const tr2 = &pc.transceivers.items[transceiver2.id];
         try std.testing.expectEqual(2, pc.transceivers.items.len);
         try std.testing.expectEqual(.recvonly, tr2.direction);
         try std.testing.expect(tr2.sender.track == null);
@@ -402,16 +402,15 @@ test "PeerConnection.addTransceiver" {
     }
 }
 
-test "PeerConnection.stopTransceiver" {
+test "RtpTransceiver.stop" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;
     defer conn.deinit();
 
-    const tr_id = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
-    const tr = &pc.getTransceivers()[tr_id];
+    const tr = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
     try std.testing.expect(!tr.isStopped());
 
-    tr.stop();
+    try tr.stop();
     try std.testing.expect(tr.isStopped());
 }
 
@@ -443,7 +442,7 @@ test "PeerConnection.createOffer: m-lines created for each transceiver" {
     defer sdp_session.deinit(testing.allocator);
 
     try testing.expectEqual(3, sdp_session.getMedias().len);
-    const transceivers = pc.getTransceivers();
+    const transceivers = pc.transceivers.items;
     const medias = sdp_session.getMedias();
     for (transceivers, medias, 0..) |tr, media, idx| {
         try testing.expectEqual(media.getKind(), tr.kind);
@@ -499,9 +498,8 @@ test "PeerConnection.createOffer: stopped non-associted transceiver is ignored" 
     var pc = &conn.pc;
     defer conn.deinit();
 
-    const tr_id = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
-    const tr = &pc.getTransceivers()[tr_id];
-    tr.stop();
+    const tr = try pc.addTransceiverFromKind(.audio, .{ .direction = .recvonly });
+    try tr.stop();
 
     _ = try pc.addTrack(.initWithId("video", .video), null);
 
@@ -524,7 +522,7 @@ test "PeerConnection.createOffer: multiple offers" {
 
     var offer = try pc.createOffer();
     try pc.setLocalDescription(offer);
-    pc.getTransceivers()[1].stop();
+    try pc.getRtpTransceiver(1).stop();
 
     offer = try pc.createOffer();
     var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
@@ -589,7 +587,7 @@ test "PeerConnection.createAnswer: reject media in offer" {
     try pc.setLocalDescription(offer);
     try pc2.setRemoteDescription(offer, 0);
 
-    pc2.getTransceivers()[1].stop();
+    try pc2.getRtpTransceiver(1).stop();
 
     const answer = try pc2.createAnswer();
     try testing.expectEqual(.answer, answer.type);
@@ -608,18 +606,18 @@ test "PeerConnection.negotiation between peers" {
     defer conn1.deinit();
 
     var conn2 = try Connection.init(.{});
-    var pc2 = &conn2.pc;
+    const pc2 = &conn2.pc;
     defer conn2.deinit();
 
     const sender1_id = (try pc1.addTrack(.initWithId("track-1", .video), "stream-1")).id;
     const sender2_id = (try pc1.addTrack(.init(.video, prng.random()), "stream-2")).id;
 
-    const sender1 = &pc1.getTransceivers()[sender1_id].sender;
-    const sender2 = &pc1.getTransceivers()[sender2_id].sender;
+    const sender1 = &pc1.transceivers.items[sender1_id].sender;
+    const sender2 = &pc1.transceivers.items[sender2_id].sender;
 
     try negotiate(pc1, pc2);
 
-    const transceivers = pc2.getTransceivers();
+    const transceivers = pc2.transceivers.items;
     try testing.expectEqual(2, transceivers.len);
     var track = transceivers[0].receiver.track;
     try testing.expectEqualStrings(sender1.track.?.getId(), track.getId());
@@ -685,8 +683,8 @@ test "PeerConnection.negotiation between peers: add/remove tracks" {
         const screen2 = try pc2.addTrack(.initWithId("screenshare", .video), null);
         try negotiate(pc1, pc2);
 
-        try testing.expectEqual(3, pc1.getTransceivers().len);
-        try testing.expectEqual(3, pc2.getTransceivers().len);
+        try testing.expectEqual(3, pc1.transceivers.items.len);
+        try testing.expectEqual(3, pc2.transceivers.items.len);
 
         event = conn1.popEvent(.track);
         try testing.expect(event != null);

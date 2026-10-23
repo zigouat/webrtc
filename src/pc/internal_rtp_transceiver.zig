@@ -1,0 +1,673 @@
+const std = @import("std");
+const ice = @import("ice");
+const constants = @import("../constants.zig");
+const webrtc = @import("../webrtc.zig");
+const utils = @import("../utils.zig");
+const SDPSession = @import("../sdp_session.zig");
+const InternalRtpSender = @import("internal_rtp_sender.zig");
+const InternalRtpReceiver = @import("internal_rtp_receiver.zig");
+const Mid = @import("../mid.zig");
+
+const InternalRtpTransceiver = @This();
+const MediaStream = webrtc.MediaStream;
+const MediaStreamTrack = webrtc.MediaStreamTrack;
+const TrackKind = webrtc.TrackKind;
+
+/// A struct describing the possible direction of transceivers.
+pub const Direction = enum {
+    /// Used to indicate send and receive capabilities.
+    sendrecv,
+    /// Used to indicate send-only capabilities.
+    sendonly,
+    /// Used to indicate receive-only capabilities.
+    recvonly,
+    /// Used to indicate that the transceiver is neither sending nor receiving media.
+    inactive,
+
+    /// Returns the reverse of the given direction.
+    pub fn reverse(direction: Direction) Direction {
+        return switch (direction) {
+            .sendonly => .recvonly,
+            .recvonly => .sendonly,
+            .inactive, .sendrecv => |d| d,
+        };
+    }
+
+    /// Returns the intersection of two directions.
+    pub fn intersect(a: Direction, b: Direction) Direction {
+        if (a == b) return a;
+        if (a == .inactive or b == .inactive) return .inactive;
+        if (a == .sendrecv) return b;
+        if (b == .sendrecv) return a;
+        return .inactive;
+    }
+
+    test "reverse" {
+        try testing.expectEqual(.recvonly, Direction.reverse(.sendonly));
+        try testing.expectEqual(.sendonly, Direction.reverse(.recvonly));
+        try testing.expectEqual(.inactive, Direction.reverse(.inactive));
+        try testing.expectEqual(.sendrecv, Direction.reverse(.sendrecv));
+    }
+
+    test "intersect" {
+        try testing.expectEqual(.sendrecv, Direction.intersect(.sendrecv, .sendrecv));
+        try testing.expectEqual(.inactive, Direction.intersect(.sendonly, .recvonly));
+        try testing.expectEqual(.inactive, Direction.intersect(.inactive, .sendonly));
+        try testing.expectEqual(.inactive, Direction.intersect(.recvonly, .inactive));
+        try testing.expectEqual(.sendonly, Direction.intersect(.sendonly, .sendrecv));
+        try testing.expectEqual(.recvonly, Direction.intersect(.sendrecv, .recvonly));
+    }
+};
+
+pub const Init = struct {
+    direction: Direction,
+    stream_id: ?[]const u8 = null,
+};
+
+pub const TrackEventInit = struct {
+    receiver: *InternalRtpReceiver,
+    track: MediaStreamTrack,
+    transceiver: *InternalRtpTransceiver,
+};
+
+sender: InternalRtpSender,
+receiver: InternalRtpReceiver,
+kind: TrackKind,
+direction: Direction,
+current_direction: ?Direction = null,
+fired_direction: ?Direction = null,
+mid: ?Mid.Int = null,
+sdp_mline_index: ?u8 = null,
+stopping: bool = false,
+stopped: bool = false,
+added_by_add_track: bool = false,
+
+pub fn initFromSdpMedia(sdp_media: *const SDPSession.Media, r: std.Random, index: u8) InternalRtpTransceiver {
+    const track = if (sdp_media.track_id) |track_id|
+        MediaStreamTrack.initWithId(track_id, sdp_media.getKind())
+    else
+        MediaStreamTrack.init(sdp_media.getKind(), r);
+
+    return InternalRtpTransceiver{
+        .direction = .recvonly,
+        .kind = sdp_media.getKind(),
+        .receiver = InternalRtpReceiver.init(track),
+        .sender = InternalRtpSender.init(null),
+        .mid = sdp_media.mid,
+        .sdp_mline_index = index,
+    };
+}
+
+pub fn deinit(tr: *InternalRtpTransceiver, allocator: std.mem.Allocator) void {
+    tr.sender.deinit(allocator);
+}
+
+/// Creates an SDP media description from the transceiver.
+///
+/// Called when creating offers.
+pub fn toSdpMedia(
+    tr: *const InternalRtpTransceiver,
+    allocator: std.mem.Allocator,
+    media_engine: *const webrtc.MediaEngine,
+    ice_credentials: ice.Credentials,
+) std.mem.Allocator.Error!SDPSession.Media {
+    var media: SDPSession.Media = .empty;
+
+    media.setKind(tr.kind);
+    media.port = if (tr.stopping) constants.sdp_rejected_port else constants.sdp_default_port;
+    media.direction = tr.direction;
+    media.rtp_codec_parameters = try allocator.dupe(webrtc.RtpCodecParameters, media_engine.getCodecs(tr.kind));
+    media.rtp_header_extensions = try allocator.dupe(
+        webrtc.RtpHeaderExtensionParameter,
+        webrtc.getHeaderExtensionCapabilities(tr.kind),
+    );
+    media.rtcp_mux = true;
+    media.rtcp_rsize = false;
+    media.setIceCredentials(ice_credentials);
+
+    try tr.addSenderFields(allocator, &media);
+    if (tr.mid) |mid| media.mid = mid;
+
+    return media;
+}
+
+/// Creates an answer SDP media description from the transceiver.
+pub fn toSdpMediaAnswer(
+    tr: *const InternalRtpTransceiver,
+    allocator: std.mem.Allocator,
+    media: *const SDPSession.Media,
+    media_engine: *const webrtc.MediaEngine,
+    ice_credentials: ice.Credentials,
+) std.mem.Allocator.Error!SDPSession.Media {
+    var answer: SDPSession.Media = .empty;
+    errdefer answer.deinit(allocator);
+
+    const codecs = try utils.getCodecIntersection(
+        allocator,
+        media_engine.getCodecs(tr.kind),
+        media.rtp_codec_parameters,
+    );
+    defer if (answer.port == 0) allocator.free(codecs);
+
+    const rejected = codecs.len == 0 or tr.isStopped() or media.isRejected();
+
+    answer.setKind(tr.kind);
+    answer.port = if (rejected) constants.sdp_rejected_port else constants.sdp_default_port;
+    answer.rtcp_mux = true;
+    answer.rtcp_rsize = false;
+    answer.mid = tr.mid.?;
+    answer.setup = switch (media.setup) {
+        .active => .passive,
+        else => .active,
+    };
+    answer.direction = media.direction.reverse().intersect(tr.direction);
+    answer.rtp_codec_parameters = if (answer.port == 0)
+        try allocator.dupe(webrtc.RtpCodecParameters, media.rtp_codec_parameters)
+    else
+        codecs;
+    answer.rtp_header_extensions = if (!rejected) try allocator.dupe(
+        webrtc.RtpHeaderExtensionParameter,
+        utils.intersectHeaderExtensions(
+            media.rtp_header_extensions,
+            webrtc.getHeaderExtensionCapabilities(tr.kind),
+        ),
+    ) else &.{};
+
+    if (!rejected) {
+        answer.setIceCredentials(ice_credentials);
+        try tr.addSenderFields(allocator, &answer);
+    }
+
+    return answer;
+}
+
+/// Check if a track of kind `kind` can be associated with this transceiver.
+pub fn canAssociateTrack(tr: *const InternalRtpTransceiver, kind: TrackKind) bool {
+    return tr.sender.track == null and
+        tr.kind == kind and
+        !tr.stopping and
+        tr.direction != .sendonly and
+        tr.direction != .sendrecv;
+}
+
+/// Check if a remote media description can be associated with this transceiver.
+pub fn canAssociateMedia(tr: *const InternalRtpTransceiver, media: *const SDPSession.Media) bool {
+    return (media.direction == .sendrecv or media.direction == .recvonly) and
+        tr.kind == media.getKind() and
+        tr.mid == null and
+        !tr.stopping;
+}
+
+pub fn setSenderTrack(tr: *InternalRtpTransceiver, track: MediaStreamTrack) void {
+    std.debug.assert(tr.sender.track == null);
+    tr.sender.track = track;
+    tr.direction = switch (tr.direction) {
+        .recvonly => .sendrecv,
+        .inactive => .sendonly,
+        else => |direction| direction,
+    };
+}
+
+pub fn stop(tr: *InternalRtpTransceiver) void {
+    if (!tr.stopping) {
+        tr.stopping = true;
+        tr.direction = .inactive;
+    }
+    // TODO: stop sender and receiver
+    tr.stopped = true;
+    tr.current_direction = null;
+}
+
+pub fn isStopped(tr: *const InternalRtpTransceiver) bool {
+    return tr.stopping or tr.stopped;
+}
+
+/// Removes the track from transceiver.
+pub fn removeTrack(tr: *InternalRtpTransceiver) void {
+    if (tr.stopping or tr.sender.track == null) return;
+
+    tr.sender.track = null;
+    switch (tr.direction) {
+        .sendrecv => tr.direction = .recvonly,
+        .sendonly => tr.direction = .inactive,
+        else => {},
+    }
+}
+
+pub fn canSend(tr: *const InternalRtpTransceiver) bool {
+    if (tr.isStopped()) return false;
+    if (tr.current_direction) |direction| return direction == .sendrecv or direction == .sendonly;
+    return false;
+}
+
+pub fn canReceive(tr: *const InternalRtpTransceiver) bool {
+    if (tr.isStopped()) return false;
+    if (tr.current_direction) |direction| return direction == .sendrecv or direction == .recvonly;
+    return false;
+}
+
+pub fn processRemoteTrack(tr: *InternalRtpTransceiver, direction: Direction, msid: ?MediaStream) ?TrackEventInit {
+    tr.receiver.track.stream_id = if (msid) |m| m.id else null;
+
+    // It's safe to set default value to inactive
+    // Since it's not included in the clauses that mute tracks and it's included
+    // in the clauses that create init track event.
+    const fired_direction = tr.fired_direction orelse .inactive;
+    tr.fired_direction = direction;
+
+    switch (direction) {
+        .sendonly, .inactive => switch (fired_direction) {
+            .sendrecv, .recvonly => tr.receiver.track.muted = true,
+            else => {},
+        },
+        .sendrecv, .recvonly => switch (fired_direction) {
+            .sendrecv, .recvonly => {},
+            else => return TrackEventInit{
+                .receiver = &tr.receiver,
+                .track = tr.receiver.track,
+                .transceiver = tr,
+            },
+        },
+    }
+
+    return null;
+}
+
+/// Get rtcp report of the transceiver.
+///
+/// For now it only gets sender report
+pub fn getRtcpReport(tr: *InternalRtpTransceiver, timestamp: i64, buffer: []u8) []const u8 {
+    return switch (tr.direction) {
+        .sendrecv, .sendonly => tr.sender.writeRtcpSenderReport(timestamp, buffer),
+        else => &.{},
+    };
+}
+
+fn addSenderFields(tr: *const InternalRtpTransceiver, allocator: std.mem.Allocator, media: *SDPSession.Media) !void {
+    switch (tr.direction) {
+        .sendonly, .sendrecv => {
+            const track = &tr.sender.track.?;
+            if (track.stream_id) |stream_id| media.msid = .{ .id = stream_id };
+            media.track_id = try allocator.dupe(u8, track.getId());
+            media.ssrc = tr.sender.ssrc;
+            for (media.rtp_codec_parameters) |codec| if (codec.isRtx()) {
+                media.rtx_ssrc = tr.sender.rtx_ssrc;
+                break;
+            };
+        },
+        else => {},
+    }
+}
+
+fn newTestRtpTransceiver() InternalRtpTransceiver {
+    return .{
+        .sender = InternalRtpSender.init(.init(.video, prng.random())),
+        .receiver = InternalRtpReceiver.init(.init(.video, prng.random())),
+        .direction = .sendrecv,
+        .kind = .video,
+    };
+}
+
+const testing = std.testing;
+const rtcp = @import("rtcp");
+var prng = std.Random.DefaultPrng.init(0xdeadbeef);
+
+const test_ice_credentials: ice.Credentials = .{ .username = "ufrag", .password = "password" };
+
+fn testMediaEngine(enable_rtx: bool) !webrtc.MediaEngine {
+    var engine: webrtc.MediaEngine = .init(.{ .enable_rtx = enable_rtx });
+    try engine.registerDefaultCodecs(testing.allocator);
+    return engine;
+}
+
+test "initFromSdpMedia" {
+    var sdp_media = SDPSession.Media.empty;
+    sdp_media.mid = 1;
+
+    var tr = InternalRtpTransceiver.initFromSdpMedia(&sdp_media, prng.random(), 0);
+    defer tr.deinit(testing.allocator);
+
+    try testing.expectEqual(.video, tr.kind);
+    try testing.expectEqual(.recvonly, tr.direction);
+    try testing.expectEqual(1, tr.mid);
+    try testing.expectEqual(0, tr.sdp_mline_index.?);
+    try testing.expect(tr.sender.track == null);
+    try testing.expect(!std.mem.eql(u8, &.{}, tr.receiver.track.getId()));
+
+    sdp_media.track_id = "track1";
+    var tr2 = InternalRtpTransceiver.initFromSdpMedia(&sdp_media, prng.random(), 1);
+    defer tr2.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("track1", tr2.receiver.track.getId());
+}
+
+test "toSdpMedia" {
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
+
+    var media_engine_rtx = try testMediaEngine(true);
+    defer media_engine_rtx.deinit(testing.allocator);
+
+    var media = try tr.toSdpMedia(testing.allocator, &media_engine_rtx, test_ice_credentials);
+
+    try testing.expectEqual(.video, media.kind);
+    try testing.expectEqual(constants.sdp_default_port, media.port);
+    try testing.expectEqual(.sendrecv, media.direction);
+    try testing.expect(media.mid == 0);
+    try testing.expect(media.rtp_codec_parameters.len > 0);
+    try testing.expect(media.track_id != null);
+    try testing.expectEqualStrings(media.track_id.?, tr.sender.track.?.getId());
+    try testing.expectEqualStrings(test_ice_credentials.username, media.ice_ufrag);
+    try testing.expectEqualStrings(test_ice_credentials.password, media.ice_pwd);
+
+    tr.direction = .recvonly;
+    tr.sender.track = null;
+
+    media.deinit(testing.allocator);
+
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    media = try tr.toSdpMedia(testing.allocator, &media_engine, test_ice_credentials);
+    defer media.deinit(testing.allocator);
+
+    try testing.expectEqual(.recvonly, media.direction);
+    try testing.expect(media.track_id == null);
+}
+
+test "toSdpMedia: includes rtx_ssrc when enable_rtx synthesizes an rtx codec" {
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
+    tr.sender.rtx_ssrc = 424242;
+
+    var media_engine = try testMediaEngine(true);
+    defer media_engine.deinit(testing.allocator);
+
+    var media = try tr.toSdpMedia(testing.allocator, &media_engine, test_ice_credentials);
+    defer media.deinit(testing.allocator);
+
+    try testing.expectEqual(424242, media.rtx_ssrc);
+
+    var saw_rtx = false;
+    for (media.rtp_codec_parameters) |codec| {
+        if (codec.isRtx()) saw_rtx = true else try testing.expect(codec.rtp_codec.rtcp_feedbacks.nack);
+    }
+    try testing.expect(saw_rtx);
+}
+
+test "toSdpMedia: leaves rtx_ssrc unset for audio, which has no rtx codec, even with enable_rtx" {
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
+    tr.kind = .audio;
+    tr.sender.track = .init(.audio, prng.random());
+    tr.sender.rtx_ssrc = 424242;
+
+    var media_engine = try testMediaEngine(true);
+    defer media_engine.deinit(testing.allocator);
+
+    var media = try tr.toSdpMedia(testing.allocator, &media_engine, test_ice_credentials);
+    defer media.deinit(testing.allocator);
+
+    try testing.expectEqual(null, media.rtx_ssrc);
+}
+
+test "toSdpMediaAnswer: answer to offer" {
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
+    tr.mid = 0x30;
+
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var offer_media = SDPSession.Media.empty;
+    offer_media.kind = .video;
+    offer_media.direction = .sendrecv;
+    offer_media.port = constants.sdp_default_port;
+    offer_media.rtp_codec_parameters = try testing.allocator.dupe(webrtc.RtpCodecParameters, webrtc.MediaEngine.supported_video_codecs);
+    defer offer_media.deinit(testing.allocator);
+
+    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, &media_engine, test_ice_credentials);
+    defer answer_media.deinit(testing.allocator);
+
+    try testing.expectEqual(.video, answer_media.kind);
+    try testing.expectEqual(constants.sdp_default_port, answer_media.port);
+    try testing.expectEqual(.sendrecv, answer_media.direction);
+    try testing.expectEqual(0x30, answer_media.mid);
+    try testing.expect(answer_media.rtp_codec_parameters.len == offer_media.rtp_codec_parameters.len);
+
+    for (answer_media.rtp_codec_parameters) |codec| {
+        try testing.expect(codec.rtp_codec.rtcp_feedbacks == webrtc.RtcpFeedbacks{ .nack = true, .nack_pli = true });
+    }
+
+    try testing.expectEqualStrings(test_ice_credentials.username, answer_media.ice_ufrag);
+    try testing.expectEqualStrings(test_ice_credentials.password, answer_media.ice_pwd);
+}
+
+test "toSdpMediaAnswer: includes rtx_ssrc when the negotiated codecs include rtx" {
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
+    tr.mid = 0x30;
+    tr.sender.rtx_ssrc = 424242;
+
+    var remote_engine = try testMediaEngine(true);
+    defer remote_engine.deinit(testing.allocator);
+
+    var offer_media = SDPSession.Media.empty;
+    offer_media.kind = .video;
+    offer_media.direction = .sendrecv;
+    offer_media.port = constants.sdp_default_port;
+    offer_media.rtp_codec_parameters = try testing.allocator.dupe(webrtc.RtpCodecParameters, remote_engine.getCodecs(.video));
+    defer offer_media.deinit(testing.allocator);
+
+    var media_engine = try testMediaEngine(true);
+    defer media_engine.deinit(testing.allocator);
+
+    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, &media_engine, test_ice_credentials);
+    defer answer_media.deinit(testing.allocator);
+
+    try testing.expectEqual(424242, answer_media.rtx_ssrc);
+}
+
+test "toSdpMediaAnswer: enable_rtx=false ignores an rtx-capable offer" {
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
+    tr.mid = 0x30;
+    tr.sender.rtx_ssrc = 424242;
+
+    var remote_engine = try testMediaEngine(true);
+    defer remote_engine.deinit(testing.allocator);
+
+    var offer_media = SDPSession.Media.empty;
+    offer_media.kind = .video;
+    offer_media.direction = .sendrecv;
+    offer_media.port = constants.sdp_default_port;
+    offer_media.rtp_codec_parameters = try testing.allocator.dupe(webrtc.RtpCodecParameters, remote_engine.getCodecs(.video));
+    defer offer_media.deinit(testing.allocator);
+
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, &media_engine, test_ice_credentials);
+    defer answer_media.deinit(testing.allocator);
+
+    for (answer_media.rtp_codec_parameters) |codec| try testing.expect(!codec.isRtx());
+    try testing.expectEqual(null, answer_media.rtx_ssrc);
+}
+
+test "toSdpMediaAnswer: negotiates header extensions, keeping the offerer's id" {
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
+    tr.mid = 0x30;
+
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var offer_media = SDPSession.Media.empty;
+    offer_media.kind = .video;
+    offer_media.direction = .sendrecv;
+    offer_media.port = 9;
+    offer_media.rtp_codec_parameters = try testing.allocator.dupe(webrtc.RtpCodecParameters, webrtc.MediaEngine.supported_video_codecs);
+    defer offer_media.deinit(testing.allocator);
+
+    offer_media.rtp_header_extensions = try testing.allocator.dupe(webrtc.RtpHeaderExtensionParameter, &.{
+        .{ .id = 7, .uri = webrtc.mid_extension_uri },
+        .{ .id = 9, .uri = "some-unsupported-uri" },
+    });
+
+    var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, &media_engine, test_ice_credentials);
+    defer answer_media.deinit(testing.allocator);
+
+    try testing.expectEqual(1, answer_media.rtp_header_extensions.len);
+    try testing.expectEqual(7, answer_media.rtp_header_extensions[0].id);
+    try testing.expectEqualStrings(webrtc.mid_extension_uri, answer_media.rtp_header_extensions[0].uri);
+}
+
+test "toSdpMediaAnswer: reject offer" {
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
+    tr.mid = 0x30;
+
+    var media_engine = try testMediaEngine(false);
+    defer media_engine.deinit(testing.allocator);
+
+    var offer_media = SDPSession.Media.empty;
+
+    // Offer port == 0
+    {
+        offer_media.port = 0;
+        var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, &media_engine, test_ice_credentials);
+        defer answer_media.deinit(testing.allocator);
+        try testing.expectEqual(.video, answer_media.kind);
+        try testing.expectEqual(0, answer_media.port);
+        try testing.expectEqual(0, answer_media.rtp_header_extensions.len);
+        try testing.expect(answer_media.ice_pwd.len == 0);
+        try testing.expect(answer_media.ice_ufrag.len == 0);
+    }
+
+    // No common codecs
+    {
+        offer_media.port = constants.sdp_default_port;
+        offer_media.rtp_codec_parameters = &.{};
+
+        var answer_media = try tr.toSdpMediaAnswer(testing.allocator, &offer_media, &media_engine, test_ice_credentials);
+        defer answer_media.deinit(testing.allocator);
+        try testing.expectEqual(.video, answer_media.kind);
+        try testing.expectEqual(0, answer_media.port);
+        try testing.expectEqual(0, answer_media.rtp_header_extensions.len);
+        try testing.expect(answer_media.ice_pwd.len == 0);
+        try testing.expect(answer_media.ice_ufrag.len == 0);
+    }
+}
+
+test "canAssociateTrack" {
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
+    tr.direction = .recvonly;
+    tr.sender.track = null;
+
+    try testing.expect(tr.canAssociateTrack(.video));
+
+    tr.kind = .audio;
+    try testing.expect(!tr.canAssociateTrack(.video));
+
+    tr.kind = .video;
+    tr.sender.track = .init(.video, prng.random());
+    try testing.expect(!tr.canAssociateTrack(.video));
+
+    tr.sender.track = null;
+    tr.stopping = true;
+    try testing.expect(!tr.canAssociateTrack(.video));
+}
+
+test "setSenderTrack" {
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
+    tr.direction = .recvonly;
+    tr.sender.track = null;
+
+    const track = MediaStreamTrack.init(.video, prng.random());
+    tr.setSenderTrack(track);
+
+    try testing.expectEqualStrings(track.getId(), tr.sender.track.?.getId());
+    try testing.expectEqual(.sendrecv, tr.direction);
+}
+
+test "stop" {
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
+    tr.direction = .sendrecv;
+    tr.sender.track = .init(.video, prng.random());
+
+    tr.stop();
+
+    try testing.expect(tr.isStopped());
+    try testing.expectEqual(.inactive, tr.direction);
+}
+
+test "removeTrack" {
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
+
+    tr.removeTrack();
+
+    try testing.expect(tr.sender.track == null);
+    try testing.expectEqual(.recvonly, tr.direction);
+
+    tr.stop();
+    try testing.expectEqual(.inactive, tr.direction);
+
+    tr.removeTrack();
+    try testing.expectEqual(.inactive, tr.direction);
+}
+
+test "getRtcpReport" {
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(testing.allocator);
+
+    try tr.sender.setCodecs(
+        testing.allocator,
+        prng.random(),
+        webrtc.MediaEngine.supported_video_codecs,
+        16,
+    );
+    var buffer: [64]u8 = @splat(0);
+
+    tr.sender.report = .{
+        .last_sequence_number = 0,
+        .rtp_timestamp = 8700,
+        .timestamp = 1782239529800000,
+        .octet_count = 10000,
+        .packet_count = 100,
+    };
+
+    const data = tr.getRtcpReport(1782239530300000, &buffer);
+    const packet = try rtcp.Packet.decode(data);
+    try testing.expectEqual(.sender_report, packet.header.payload_type);
+    try testing.expectEqual(tr.sender.ssrc, packet.payload.sr.ssrc);
+    try testing.expectEqual(53700, packet.payload.sr.rtp_timestamp);
+    try testing.expectEqual(17142195148218995680, packet.payload.sr.ntp_timestamp);
+    try testing.expectEqual(10000, packet.payload.sr.octet_count);
+    try testing.expectEqual(100, packet.payload.sr.packet_count);
+}
+
+test "processRemoteTrack" {
+    const allocator = testing.allocator;
+
+    var tr = newTestRtpTransceiver();
+    defer tr.deinit(allocator);
+
+    var maybe_event = tr.processRemoteTrack(.sendrecv, null);
+    try testing.expect(maybe_event != null);
+    try testing.expect(maybe_event.?.transceiver == &tr);
+    try testing.expect(tr.fired_direction == .sendrecv);
+
+    maybe_event = tr.processRemoteTrack(.recvonly, null);
+    try testing.expect(maybe_event == null);
+
+    maybe_event = tr.processRemoteTrack(.inactive, null);
+    try testing.expect(maybe_event == null);
+    try testing.expect(tr.receiver.track.muted);
+
+    maybe_event = tr.processRemoteTrack(.recvonly, null);
+    try testing.expect(maybe_event != null);
+}

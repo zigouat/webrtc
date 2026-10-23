@@ -54,6 +54,7 @@ const PublisherConnection = struct {
 
         const now = Io.Timestamp.now(io, .awake).toMilliseconds();
         try conn.pc.addLocalCandidates(&.{socket.address}, now);
+        try conn.pc.addLocalCandidates(&.{}, now);
 
         conn.io = io;
         conn.socket = socket;
@@ -198,6 +199,7 @@ const ViewerConnection = struct {
 
         const now = Io.Timestamp.now(io, .awake).toMilliseconds();
         try conn.pc.addLocalCandidates(&.{socket.address}, now);
+        try conn.pc.addLocalCandidates(&.{}, now);
 
         conn.sender = try conn.pc.addTrack(.init(.video, conn.prng.random()), "stream");
 
