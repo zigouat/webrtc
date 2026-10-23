@@ -296,7 +296,7 @@ test "PeerConnection.setRemoteDescription: set offer - transceivers created from
     try std.testing.expectEqual(2, pc.getTransceivers().len);
 
     var receiver_ids: [2]PeerConnection.RtpTransceiverID = undefined;
-    for (&receiver_ids) |*id| id.* = conn.popEvent(.track).?.track.receiver_id;
+    for (&receiver_ids) |*id| id.* = conn.popEvent(.track).?.track.receiver.id;
     try std.testing.expectEqualSlices(PeerConnection.RtpTransceiverID, &.{ 0, 1 }, &receiver_ids);
 }
 

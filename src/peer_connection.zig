@@ -17,6 +17,7 @@ const Demuxer = @import("pc/demuxer.zig");
 const RtpTransceiver = @import("rtp_transceiver.zig");
 const RtpSender = @import("rtp_sender.zig");
 const InternalRtpSender = @import("pc/internal_rtp_sender.zig");
+const RtpReceiver = @import("rtp_receiver.zig");
 const Mid = @import("mid.zig");
 const NackConfig = @import("pc/nack_config.zig");
 const NackGenerator = @import("nack/generator.zig");
@@ -31,7 +32,7 @@ const packet_size = constants.max_packet_size;
 
 pub const RtpTransceiverID = u32;
 pub const RtpSenderID = RtpSender.SenderID;
-pub const RtpReceiverID = u32;
+pub const RtpReceiverID = RtpReceiver.ReceiverID;
 
 pub const Error = error{
     ConnectionClosed,
@@ -108,7 +109,7 @@ pub const Config = struct {
 };
 
 pub const TrackEventInit = struct {
-    receiver_id: RtpReceiverID,
+    receiver: RtpReceiver,
     track: webrtc.MediaStreamTrack,
 };
 
@@ -342,7 +343,7 @@ pub fn addTransceiverFromKind(pc: *PeerConnection, kind: webrtc.TrackKind, init_
         .kind = kind,
         .direction = init_config.direction,
         .sender = .init(null),
-        .receiver = webrtc.RtpReceiver.init(.init(kind, pc.random)),
+        .receiver = .init(.init(kind, pc.random)),
     };
 
     if (init_config.stream_id) |stream_id| {
@@ -814,7 +815,7 @@ fn initTransceiverFromTrack(
         .kind = track.kind,
         .direction = .sendrecv,
         .sender = .init(track),
-        .receiver = webrtc.RtpReceiver.init(track),
+        .receiver = .init(track),
         .added_by_add_track = added_by_add_track,
     };
 
@@ -1189,13 +1190,13 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
 
     try pc.events.ensureUnusedCapacity(pc.allocator, track_events.items.len);
     for (track_events.items) |event| {
-        const receiver_id: RtpTransceiverID = blk: {
+        const receiver_id: RtpReceiverID = blk: {
             for (pc.transceivers.items, 0..) |*tr, idx| if (tr == event.transceiver) break :blk @intCast(idx);
             unreachable;
         };
 
         pc.events.pushBackAssumeCapacity(.{ .track = .{
-            .receiver_id = receiver_id,
+            .receiver = .{ .id = receiver_id, .pc = pc },
             .track = event.track,
         } });
     }
@@ -1383,6 +1384,7 @@ test {
     _ = @import("tests/peer_connection.zig");
     _ = @import("pc/demuxer.zig");
     _ = @import("pc/internal_rtp_sender.zig");
+    _ = @import("pc/internal_rtp_receiver.zig");
     _ = @import("nack/send_buffer.zig");
     _ = @import("nack/receive_log.zig");
     _ = @import("nack/generator.zig");

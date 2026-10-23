@@ -5,7 +5,7 @@ const webrtc = @import("webrtc.zig");
 const utils = @import("utils.zig");
 const SDPSession = @import("sdp_session.zig");
 const RtpSender = @import("pc/internal_rtp_sender.zig");
-const RtpReceiver = @import("rtp_receiver.zig");
+const RtpReceiver = @import("pc/internal_rtp_receiver.zig");
 const Mid = @import("mid.zig");
 
 const RtpTransceiver = @This();
