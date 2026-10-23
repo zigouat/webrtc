@@ -33,8 +33,9 @@ entries: []Entry,
 highest_seq_number: u16,
 started: bool,
 
-pub fn init(allocator: std.mem.Allocator, size: u16, max_rtp_payload: u16) !SendBuffer {
-    if (!std.math.isPowerOfTwo(size)) return error.InvalidSize;
+/// `size` must be a power of two.
+pub fn init(allocator: std.mem.Allocator, size: u16, max_rtp_payload: u16) std.mem.Allocator.Error!SendBuffer {
+    std.debug.assert(std.math.isPowerOfTwo(size));
 
     const buffer_size = @as(usize, size) * max_rtp_payload;
     const buffer = try allocator.alloc(u8, buffer_size);
@@ -123,10 +124,6 @@ fn testPacket(seq: u16, payload: []const u8) rtp.Packet {
         },
         .payload = payload,
     };
-}
-
-test "init: rejects non power-of-two size" {
-    try testing.expectError(error.InvalidSize, SendBuffer.init(testing.allocator, 3, 16));
 }
 
 test "add and get: roundtrips a single packet" {

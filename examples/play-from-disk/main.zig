@@ -101,15 +101,14 @@ const ConnectionContext = struct {
         }
     }
 
-    fn send(conn: *ConnectionContext, sender_id: webrtc.PeerConnection.RtpSenderID, sample: *const media.Packet) !void {
+    fn send(conn: *ConnectionContext, sender: webrtc.RtpSender, sample: *const media.Packet) !void {
         var buffer: [1500]u8 = undefined;
         const now = Io.Timestamp.now(conn.io, .awake).toMicroseconds();
 
         try conn.mutex.lock(conn.io);
         defer conn.mutex.unlock(conn.io);
 
-        const sender = &conn.pc.transceivers.items[sender_id].sender;
-        var it = try sender.handleMediaPacketWrite(sample);
+        var it = try sender.sendSample(sample);
         while (try it.next(&buffer, now)) |message| {
             try conn.socket.send(conn.io, message.to, message.data);
         }
@@ -155,12 +154,12 @@ pub fn main(init: std.process.Init) !void {
     try conn.init(io, allocator, &media_engine);
     defer conn.deinit();
 
-    const sender_id = try conn.pc.addTrack(.initWithId("video-track", .video), "video-stream");
+    const sender = try conn.pc.addTrack(.initWithId("video-track", .video), "video-stream");
 
     try grp.concurrent(io, startHttpServer, .{ allocator, &conn });
     try grp.concurrent(io, ConnectionContext.receive, .{&conn});
     try grp.concurrent(io, ConnectionContext.onTimeout, .{&conn});
-    try grp.concurrent(io, sendMediaData, .{ allocator, &ivf_reader, &conn, sender_id });
+    try grp.concurrent(io, sendMediaData, .{ allocator, &ivf_reader, &conn, sender });
 
     try conn.done.wait(io);
     std.log.warn("Peer disconnected, exiting...", .{});
@@ -236,7 +235,7 @@ fn sendMediaData(
     allocator: std.mem.Allocator,
     ivf_reader: *IvfReader,
     conn: *ConnectionContext,
-    sender_id: webrtc.PeerConnection.RtpSenderID,
+    sender: webrtc.RtpSender,
 ) !void {
     try conn.connected.wait(conn.io);
 
@@ -251,7 +250,7 @@ fn sendMediaData(
 
             if (maybe_packet) |*packet| {
                 defer packet.deinit(allocator);
-                conn.send(sender_id, packet) catch |err| switch (err) {
+                conn.send(sender, packet) catch |err| switch (err) {
                     error.Canceled => return error.Canceled,
                     else => return,
                 };

@@ -16,8 +16,8 @@ const ConnectionContext = struct {
     recv_buffer: [1500]u8,
     mutex: Io.Mutex,
     prng: std.Random.DefaultCsprng,
-    audio_sender_id: u32,
-    video_sender_id: u32,
+    audio_sender: webrtc.RtpSender,
+    video_sender: webrtc.RtpSender,
 
     fn init(conn: *ConnectionContext, io: std.Io, allocator: std.mem.Allocator, media_engine: *webrtc.MediaEngine) !void {
         var if_it = try ice.IfIterator.init(allocator, .{});
@@ -40,8 +40,8 @@ const ConnectionContext = struct {
         const now = Io.Timestamp.now(io, .awake).toMilliseconds();
         try conn.pc.addLocalCandidates(&.{socket.address}, now);
 
-        conn.video_sender_id = try conn.pc.addTrack(.initWithId("video", .video), "my-stream");
-        conn.audio_sender_id = try conn.pc.addTrack(.initWithId("audio", .audio), "my-stream");
+        conn.video_sender = try conn.pc.addTrack(.initWithId("video", .video), "my-stream");
+        conn.audio_sender = try conn.pc.addTrack(.initWithId("audio", .audio), "my-stream");
 
         conn.io = io;
         conn.socket = socket;
@@ -75,14 +75,11 @@ const ConnectionContext = struct {
 
             switch (read_result) {
                 .rtp => |received| {
-                    const receiver = &conn.pc.getTransceivers()[received.@"0"].receiver;
-                    const sender = if (receiver.track.kind == .video)
-                        &conn.pc.getTransceivers()[conn.video_sender_id].sender
-                    else
-                        &conn.pc.getTransceivers()[conn.audio_sender_id].sender;
+                    const receiver = received.@"0";
+                    const sender = if (receiver.getTrack().kind == .video) conn.video_sender else conn.audio_sender;
 
                     const now_us = Io.Timestamp.now(conn.io, .awake).toMicroseconds();
-                    const msg = sender.handleWrite(
+                    const msg = sender.sendRtp(
                         &received.@"1",
                         &conn.send_buffer,
                         now_us,

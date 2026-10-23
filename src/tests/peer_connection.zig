@@ -294,10 +294,9 @@ test "PeerConnection.setRemoteDescription: set offer - transceivers created from
     try pc.setRemoteDescription(.{ .type = .offer, .sdp = offer }, 0);
 
     try std.testing.expectEqual(2, pc.getTransceivers().len);
-    for (pc.getTransceivers()) |*tr| try std.testing.expectEqual(pc, tr.pc);
 
     var receiver_ids: [2]PeerConnection.RtpTransceiverID = undefined;
-    for (&receiver_ids) |*id| id.* = conn.popEvent(.track).?.track.receiver_id;
+    for (&receiver_ids) |*id| id.* = conn.popEvent(.track).?.track.receiver.id;
     try std.testing.expectEqualSlices(PeerConnection.RtpTransceiverID, &.{ 0, 1 }, &receiver_ids);
 }
 
@@ -336,8 +335,8 @@ test "PeerConnection.addTrack" {
     const tr = &pc.getTransceivers()[trasceiver_id];
     try std.testing.expect(tr.sender.track == null);
 
-    const sender_id = try pc.addTrack(.initWithId("track2", .video), null);
-    try std.testing.expectEqual(sender_id, trasceiver_id);
+    const sender = try pc.addTrack(.initWithId("track2", .video), null);
+    try std.testing.expectEqual(trasceiver_id, sender.id);
     try std.testing.expectEqual(2, pc.transceivers.items.len);
     try std.testing.expect(tr.sender.track != null);
     try std.testing.expectEqualStrings("track2", tr.sender.track.?.getId());
@@ -348,10 +347,10 @@ test "PeerConnection.removeTrack" {
     var pc = &conn.pc;
     defer conn.deinit();
 
-    const sender_id = try pc.addTrack(.initWithId("track1", .video), null);
-    try pc.removeTrack(sender_id);
+    const sender = try pc.addTrack(.initWithId("track1", .video), null);
+    try pc.removeTrack(sender.id);
 
-    const tr = &pc.getTransceivers()[sender_id];
+    const tr = &pc.getTransceivers()[sender.id];
     try testing.expect(tr.sender.track == null);
     try testing.expectEqual(.recvonly, tr.direction);
 }
@@ -612,8 +611,8 @@ test "PeerConnection.negotiation between peers" {
     var pc2 = &conn2.pc;
     defer conn2.deinit();
 
-    const sender1_id = try pc1.addTrack(.initWithId("track-1", .video), "stream-1");
-    const sender2_id = try pc1.addTrack(.init(.video, prng.random()), "stream-2");
+    const sender1_id = (try pc1.addTrack(.initWithId("track-1", .video), "stream-1")).id;
+    const sender2_id = (try pc1.addTrack(.init(.video, prng.random()), "stream-2")).id;
 
     const sender1 = &pc1.getTransceivers()[sender1_id].sender;
     const sender2 = &pc1.getTransceivers()[sender2_id].sender;
@@ -693,8 +692,8 @@ test "PeerConnection.negotiation between peers: add/remove tracks" {
         try testing.expect(event != null);
         try testing.expectEqualStrings(&track1.id, &event.?.track.track.id);
 
-        try pc1.removeTrack(screen1);
-        try pc2.removeTrack(screen2);
+        try pc1.removeTrack(screen1.id);
+        try pc2.removeTrack(screen2.id);
         try negotiate(pc1, pc2);
     }
 

@@ -56,6 +56,8 @@ pub const Session = struct {
         srtp_keying_material: SrtpProfile,
     };
 
+    pub const InitError = error{ FailedParsePrivateKey, CryptoInitFailed, ParseCertificateFailed };
+
     pub const HandshakeError = error{
         /// The handshake failed due to a retransmission timeout.
         Timeout,
@@ -97,7 +99,7 @@ pub const Session = struct {
     close_pending: bool,
     setup: bool = false,
 
-    pub fn init(random: std.Random, session_config: Config) !Self {
+    pub fn init(random: std.Random, session_config: Config) InitError!Self {
         var session: Self = undefined;
 
         session.random = random;
@@ -309,7 +311,7 @@ pub const Session = struct {
         };
     }
 
-    fn createCertificate(session: *Self) !void {
+    fn createCertificate(session: *Self) error{ CryptoInitFailed, ParseCertificateFailed }!void {
         if (m.psa_crypto_init() != m.PSA_SUCCESS) return error.CryptoInitFailed;
 
         var cert: m.mbedtls_x509write_cert = undefined;
@@ -529,7 +531,7 @@ pub const Session = struct {
         }
     }
 
-    fn checkError(ret: i32) !void {
+    fn checkError(ret: i32) error{ParseCertificateFailed}!void {
         if (ret < 0) {
             var buffer: [1024]u8 = @splat(0);
             m.mbedtls_strerror(ret, buffer[0..].ptr, buffer.len);

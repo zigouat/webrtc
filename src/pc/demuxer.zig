@@ -170,7 +170,6 @@ fn testTransceiver(mid: Mid.Int) RtpTransceiver {
         .kind = .video,
         .direction = .sendrecv,
         .mid = mid,
-        .pc = undefined,
     };
 }
 

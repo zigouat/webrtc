@@ -75,7 +75,7 @@ const PublisherConnection = struct {
         try conn.mutex.lock(conn.io);
         defer conn.mutex.unlock(conn.io);
 
-        const receiver = &conn.pc.transceivers.items[0].receiver;
+        const receiver = conn.pc.getRtpReceiver(0);
         const msg = try receiver.sendPli(&conn.send_buffer);
         try conn.socket.send(conn.io, msg.to, msg.data);
     }
@@ -111,7 +111,7 @@ const PublisherConnection = struct {
                 .rtcp => {
                     var it = read_result.rtcp;
                     while (it.next() catch continue) |packet| {
-                        std.debug.print("[{}]: {s}", .{ packet.@"0", @tagName(packet.@"1".header.payload_type) });
+                        std.debug.print("[{}]: {s}", .{ packet.@"0".id, @tagName(packet.@"1".header.payload_type) });
                     }
                 },
                 else => {},
@@ -171,7 +171,7 @@ const ViewerConnection = struct {
     recv_buffer: [1500]u8,
     mutex: Io.Mutex,
     prng: std.Random.DefaultCsprng,
-    sender_id: u32,
+    sender: webrtc.RtpSender,
 
     const Config = struct {
         media_engine: *webrtc.MediaEngine,
@@ -199,7 +199,7 @@ const ViewerConnection = struct {
         const now = Io.Timestamp.now(io, .awake).toMilliseconds();
         try conn.pc.addLocalCandidates(&.{socket.address}, now);
 
-        conn.sender_id = try conn.pc.addTrack(.init(.video, conn.prng.random()), "stream");
+        conn.sender = try conn.pc.addTrack(.init(.video, conn.prng.random()), "stream");
 
         conn.io = io;
         conn.socket = socket;
@@ -276,9 +276,8 @@ const ViewerConnection = struct {
         try conn.mutex.lock(conn.io);
         defer conn.mutex.unlock(conn.io);
 
-        const sender = &conn.pc.transceivers.items[conn.sender_id].sender;
         const now = Io.Timestamp.now(conn.io, .awake).toMicroseconds();
-        const msg = try sender.handleWrite(rtp_packet, &conn.send_buffer, now);
+        const msg = try conn.sender.sendRtp(rtp_packet, &conn.send_buffer, now);
         try conn.socket.send(conn.io, msg.to, msg.data);
     }
 
