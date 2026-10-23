@@ -202,6 +202,20 @@ test "RtpReceiver.handleRtpPacket: handle rtx packets" {
     try testing.expectEqualStrings("ZIGLANG-", rtx_packet.payload);
 }
 
+test "RtpReceiver.writePli: writes a pli for the receiver ssrc" {
+    var receiver = RtpReceiver.init(.init(.video, prng.random()));
+    receiver.ssrc = 0xDEADBEEF;
+
+    var buffer: [64]u8 = @splat(0);
+    const data = receiver.writePli(&buffer);
+    try testing.expectEqual(12, data.len);
+
+    const packet = try rtcp.Packet.decode(data);
+    try testing.expectEqual(.ps_fb, packet.header.payload_type);
+    try testing.expectEqual(0, packet.payload.pli.sender_ssrc);
+    try testing.expectEqual(0xDEADBEEF, packet.payload.pli.media_ssrc);
+}
+
 test "RtpReceiver.handleRtpPacket: ignore packets with unknown payload type" {
     var receiver = RtpReceiver.init(.init(.video, prng.random()));
     receiver.stream_infos[96] = .{ .packet_type = .media, .apt = 0 };

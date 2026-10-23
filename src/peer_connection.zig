@@ -308,7 +308,7 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: 
 
     const tr_id = transceived_id orelse try pc.initTransceiverFromTrack(track, stream_id, true);
     pc.checkNegotiationNeeded();
-    return .{ .id = tr_id, .pc = pc };
+    return pc.getRtpSender(tr_id);
 }
 
 /// Removes a track from the PeerConnection.
@@ -323,6 +323,16 @@ pub fn removeTrack(pc: *PeerConnection, sender_id: RtpSenderID) error{Connection
 
 pub fn getTransceivers(pc: *const PeerConnection) []RtpTransceiver {
     return pc.transceivers.items;
+}
+
+pub fn getRtpSender(pc: *PeerConnection, id: RtpSenderID) RtpSender {
+    std.debug.assert(id < pc.transceivers.items.len);
+    return .{ .id = id, .pc = pc };
+}
+
+pub fn getRtpReceiver(pc: *PeerConnection, id: RtpReceiverID) RtpReceiver {
+    std.debug.assert(id < pc.transceivers.items.len);
+    return .{ .id = id, .pc = pc };
 }
 
 /// Creates a new transceiver to the PeerConnection from an existing track.
@@ -1196,7 +1206,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
         };
 
         pc.events.pushBackAssumeCapacity(.{ .track = .{
-            .receiver = .{ .id = receiver_id, .pc = pc },
+            .receiver = pc.getRtpReceiver(receiver_id),
             .track = event.track,
         } });
     }

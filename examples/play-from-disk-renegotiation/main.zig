@@ -24,7 +24,7 @@ const ConnectionContext = struct {
     recv_buffer: [1500]u8,
     mutex: Io.Mutex,
     prng: std.Random.DefaultCsprng,
-    senders: std.ArrayList(u32),
+    senders: std.ArrayList(webrtc.RtpSender),
     file_path: []const u8,
 
     fn init(
@@ -75,20 +75,20 @@ const ConnectionContext = struct {
         var stream: [16]u8 = @splat(0);
         common.utils.randString(conn.io, &stream);
 
-        const sender_id = try conn.pc.addTrack(.init(.video, conn.prng.random()), &stream);
-        try conn.senders.append(allocator, sender_id);
+        const sender = try conn.pc.addTrack(.init(.video, conn.prng.random()), &stream);
+        try conn.senders.append(allocator, sender);
 
         try conn.pc.setRemoteDescription(offer, Io.Timestamp.now(conn.io, .awake).toMilliseconds());
         const answer = try conn.pc.createAnswer();
         try conn.pc.setLocalDescription(answer);
 
-        try grp.concurrent(conn.io, sendMediaData, .{ conn.pc.allocator, conn.file_path, conn, sender_id });
+        try grp.concurrent(conn.io, sendMediaData, .{ conn.pc.allocator, conn.file_path, conn, sender });
     }
 
     fn removeTrack(conn: *ConnectionContext, offer: webrtc.SessionDescription) !void {
         if (conn.senders.items.len == 0) return;
-        if (conn.senders.pop()) |sender_id| {
-            const tr = &conn.pc.getTransceivers()[sender_id];
+        if (conn.senders.pop()) |sender| {
+            const tr = &conn.pc.getTransceivers()[sender.id];
             tr.removeTrack();
 
             try conn.pc.setRemoteDescription(offer, Io.Timestamp.now(conn.io, .awake).toMilliseconds());
@@ -141,15 +141,14 @@ const ConnectionContext = struct {
         }
     }
 
-    fn send(conn: *ConnectionContext, sender_id: webrtc.PeerConnection.RtpSenderID, sample: *const media.Packet) !void {
+    fn send(conn: *ConnectionContext, sender: webrtc.RtpSender, sample: *const media.Packet) !void {
         var buffer: [1500]u8 = undefined;
         const now = Io.Timestamp.now(conn.io, .awake).toMicroseconds();
 
         try conn.mutex.lock(conn.io);
         defer conn.mutex.unlock(conn.io);
 
-        const sender = &conn.pc.transceivers.items[sender_id].sender;
-        var it = try sender.handleMediaPacketWrite(sample);
+        var it = try sender.sendSample(sample);
         while (try it.next(&buffer, now)) |message| {
             try conn.socket.send(conn.io, message.to, message.data);
         }
@@ -297,7 +296,7 @@ fn sendMediaData(
     allocator: std.mem.Allocator,
     path: []const u8,
     conn: *ConnectionContext,
-    sender_id: webrtc.PeerConnection.RtpSenderID,
+    sender: webrtc.RtpSender,
 ) !void {
     try conn.connected.wait(conn.io);
 
@@ -319,7 +318,7 @@ fn sendMediaData(
 
             if (maybe_packet) |*packet| {
                 defer packet.deinit(allocator);
-                conn.send(sender_id, packet) catch |err| switch (err) {
+                conn.send(sender, packet) catch |err| switch (err) {
                     error.Canceled => return error.Canceled,
                     else => return,
                 };
