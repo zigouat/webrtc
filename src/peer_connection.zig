@@ -16,6 +16,7 @@ const SDPSession = @import("sdp_session.zig");
 const Demuxer = @import("pc/demuxer.zig");
 const RtpTransceiver = @import("rtp_transceiver.zig");
 const RtpSender = @import("rtp_sender.zig");
+const InternalRtpSender = @import("pc/internal_rtp_sender.zig");
 const Mid = @import("mid.zig");
 const NackConfig = @import("pc/nack_config.zig");
 const NackGenerator = @import("nack/generator.zig");
@@ -29,7 +30,7 @@ const Logger = std.log.scoped(.pc);
 const packet_size = constants.max_packet_size;
 
 pub const RtpTransceiverID = u32;
-pub const RtpSenderID = u32;
+pub const RtpSenderID = RtpSender.SenderID;
 pub const RtpReceiverID = u32;
 
 pub const Error = error{
@@ -282,7 +283,7 @@ pub fn deinit(pc: *PeerConnection) void {
 }
 
 /// Adds a new track to the PeerConnection and optionally associates it with a stream.
-pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: ?[]const u8) Error!RtpSenderID {
+pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: ?[]const u8) Error!RtpSender {
     try pc.checkNotClosed();
 
     const transceived_id: ?u32 = blk: {
@@ -306,7 +307,7 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: 
 
     const tr_id = transceived_id orelse try pc.initTransceiverFromTrack(track, stream_id, true);
     pc.checkNegotiationNeeded();
-    return tr_id;
+    return .{ .id = tr_id, .pc = pc };
 }
 
 /// Removes a track from the PeerConnection.
@@ -342,7 +343,6 @@ pub fn addTransceiverFromKind(pc: *PeerConnection, kind: webrtc.TrackKind, init_
         .direction = init_config.direction,
         .sender = .init(null),
         .receiver = webrtc.RtpReceiver.init(.init(kind, pc.random)),
-        .pc = pc,
     };
 
     if (init_config.stream_id) |stream_id| {
@@ -414,7 +414,7 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
             break :blk cloned;
         } else blk: {
             const tr = pc.findTransceiverByMid(media.mid) orelse return error.UnknownTransceiver;
-            break :blk try pc.toSdpMediaAnswer(tr, media);
+            break :blk try tr.toSdpMediaAnswer(pc.allocator, media, pc.media_engine, pc.dtls_transport.ice_agent.getLocalCredentials());
         };
     }
 
@@ -751,10 +751,11 @@ pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) !?webrtc.Transp
             if (pc.transmits.front()) |entry| switch (entry) {
                 .nack => |sender_id| {
                     const sender = &pc.transceivers.items[sender_id].sender;
-                    break :blk try sender.nextNack(buffer) orelse {
+                    const data = try sender.nextNack(buffer) orelse {
                         _ = pc.transmits.popFront();
                         continue;
                     };
+                    break :blk try pc.dtls_transport.handleMediaWrite(buffer, data.len, true);
                 },
             };
             break;
@@ -815,7 +816,6 @@ fn initTransceiverFromTrack(
         .sender = .init(track),
         .receiver = webrtc.RtpReceiver.init(track),
         .added_by_add_track = added_by_add_track,
-        .pc = pc,
     };
 
     if (stream_id) |sid| {
@@ -853,7 +853,7 @@ fn createFirstOffer(pc: *PeerConnection) !webrtc.SessionDescription {
         if (tr.stopping and tr.mid == null) continue;
         const media = medias.addOneAssumeCapacity();
         media.* = .empty;
-        media.* = try pc.toSdpMedia(tr);
+        media.* = try tr.toSdpMedia(pc.allocator, pc.media_engine, pc.dtls_transport.ice_agent.getLocalCredentials());
         media.mid = try Mid.fromInt(mid);
 
         tr.sdp_mline_index = @intCast(medias.items.len - 1);
@@ -914,7 +914,7 @@ fn createSubsequentOffer(pc: *PeerConnection) !webrtc.SessionDescription {
             tr.sdp_mline_index = @intCast(sdp_session.medias.items.len - 1);
             break :blk media;
         };
-        media.* = try pc.toSdpMedia(tr);
+        media.* = try tr.toSdpMedia(pc.allocator, pc.media_engine, pc.dtls_transport.ice_agent.getLocalCredentials());
         media.mid = try Mid.fromInt(pc.mid);
         pc.mid +%= 1;
     };
@@ -1113,8 +1113,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
                     if (pc.findTransceiverByMid(media.mid)) |tr| break :blk tr;
                     for (pc.transceivers.items) |*tr| if (tr.canAssociateMedia(media)) break :blk tr;
 
-                    var tr = RtpTransceiver.initFromSdpMedia(media, pc.random, @intCast(idx));
-                    tr.pc = pc;
+                    const tr = RtpTransceiver.initFromSdpMedia(media, pc.random, @intCast(idx));
                     pc.transceivers.appendAssumeCapacity(tr);
                     break :blk &pc.transceivers.items[pc.transceivers.items.len - 1];
                 },
@@ -1368,87 +1367,7 @@ fn startRtpRtcpInterceptors(pc: *PeerConnection) !void {
     };
 }
 
-fn toSdpMedia(pc: *PeerConnection, tr: *RtpTransceiver) std.mem.Allocator.Error!SDPSession.Media {
-    var media: SDPSession.Media = .empty;
-
-    media.setKind(tr.kind);
-    media.port = if (tr.stopping) constants.sdp_rejected_port else constants.sdp_default_port;
-    media.direction = tr.direction;
-    media.rtp_codec_parameters = try pc.allocator.dupe(webrtc.RtpCodecParameters, pc.media_engine.getCodecs(tr.kind));
-    media.rtp_header_extensions = try pc.allocator.dupe(
-        webrtc.RtpHeaderExtensionParameter,
-        webrtc.getHeaderExtensionCapabilities(tr.kind),
-    );
-    media.rtcp_mux = true;
-    media.rtcp_rsize = false;
-    media.setIceCredentials(pc.dtls_transport.ice_agent.getLocalCredentials());
-
-    try addSenderFields(pc.allocator, &media, tr);
-    if (tr.mid) |mid| media.mid = mid;
-
-    return media;
-}
-
-fn toSdpMediaAnswer(pc: *const PeerConnection, tr: *const RtpTransceiver, media: *const SDPSession.Media) std.mem.Allocator.Error!SDPSession.Media {
-    var answer: SDPSession.Media = .empty;
-    errdefer answer.deinit(pc.allocator);
-
-    const codecs = try utils.getCodecIntersection(
-        pc.allocator,
-        pc.media_engine.getCodecs(tr.kind),
-        media.rtp_codec_parameters,
-    );
-    defer if (answer.port == 0) pc.allocator.free(codecs);
-
-    const rejected = codecs.len == 0 or tr.isStopped() or media.isRejected();
-
-    answer.setKind(tr.kind);
-    answer.port = if (rejected) constants.sdp_rejected_port else constants.sdp_default_port;
-    answer.rtcp_mux = true;
-    answer.rtcp_rsize = false;
-    answer.mid = tr.mid.?;
-    answer.setup = switch (media.setup) {
-        .active => .passive,
-        else => .active,
-    };
-    answer.direction = media.direction.reverse().intersect(tr.direction);
-    answer.rtp_codec_parameters = if (answer.port == 0)
-        try pc.allocator.dupe(webrtc.RtpCodecParameters, media.rtp_codec_parameters)
-    else
-        codecs;
-    answer.rtp_header_extensions = if (!rejected) try pc.allocator.dupe(
-        webrtc.RtpHeaderExtensionParameter,
-        utils.intersectHeaderExtensions(
-            media.rtp_header_extensions,
-            webrtc.getHeaderExtensionCapabilities(tr.kind),
-        ),
-    ) else &.{};
-
-    if (!rejected) {
-        answer.setIceCredentials(pc.dtls_transport.ice_agent.getLocalCredentials());
-    }
-
-    if (!rejected) try addSenderFields(pc.allocator, &answer, tr);
-    return answer;
-}
-
-fn addSenderFields(allocator: std.mem.Allocator, media: *SDPSession.Media, tr: *const RtpTransceiver) !void {
-    switch (tr.direction) {
-        .sendonly, .sendrecv => {
-            const track = &tr.sender.track.?;
-            if (track.stream_id) |stream_id| media.msid = .{ .id = stream_id };
-            media.track_id = try allocator.dupe(u8, track.getId());
-            media.ssrc = tr.sender.ssrc;
-            for (media.rtp_codec_parameters) |codec| if (codec.isRtx()) {
-                media.rtx_ssrc = tr.sender.rtx_ssrc;
-                break;
-            };
-        },
-        else => {},
-    }
-}
-
-fn generateSsrc(pc: *PeerConnection, sender: *RtpSender) !void {
+fn generateSsrc(pc: *PeerConnection, sender: *InternalRtpSender) !void {
     sender.ssrc = try pc.demuxer.registerRandomSsrc(pc.random);
     sender.rtx_ssrc = try pc.demuxer.registerRandomSsrc(pc.random);
 }
@@ -1463,6 +1382,7 @@ fn hasDataChannels(pc: *PeerConnection) bool {
 test {
     _ = @import("tests/peer_connection.zig");
     _ = @import("pc/demuxer.zig");
+    _ = @import("pc/internal_rtp_sender.zig");
     _ = @import("nack/send_buffer.zig");
     _ = @import("nack/receive_log.zig");
     _ = @import("nack/generator.zig");
