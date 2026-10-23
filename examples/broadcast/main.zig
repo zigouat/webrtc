@@ -111,7 +111,7 @@ const PublisherConnection = struct {
                 .rtcp => {
                     var it = read_result.rtcp;
                     while (it.next() catch continue) |packet| {
-                        std.debug.print("[{}]: {s}", .{ packet.@"0", @tagName(packet.@"1".header.payload_type) });
+                        std.debug.print("[{}]: {s}", .{ packet.@"0".id, @tagName(packet.@"1".header.payload_type) });
                     }
                 },
                 else => {},

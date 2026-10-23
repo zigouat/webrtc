@@ -141,16 +141,26 @@ pub fn addIceTurnServer(
     try transport.ice_agent.addTurnServer(addr, turn_server, username, password);
 }
 
-pub fn handleMediaWrite(transport: *DtlsTransport, buffer: []u8, payload_len: usize, comptime is_rtp: bool) ![]const u8 {
-    return if (is_rtp)
-        try transport.out_srtp_session.?.encryptRtp(transport.allocator, buffer[0..payload_len], buffer)
-    else
-        try transport.out_srtp_session.?.encryptRtcp(transport.allocator, buffer[0..payload_len], buffer);
+/// Encrypts the RTP packet in `buffer[0..len]` in place.
+pub fn writeRtp(transport: *DtlsTransport, buffer: []u8, len: usize) !webrtc.TransportMessage {
+    const data = try transport.out_srtp_session.?.encryptRtp(transport.allocator, buffer[0..len], buffer);
+    return transport.toTransportMessage(data);
 }
 
-pub fn handleWrite(transport: *DtlsTransport, data: []const u8, buffer: []u8) []const u8 {
+/// Encrypts the RTCP packet in `buffer[0..len]` in place.
+pub fn writeRtcp(transport: *DtlsTransport, buffer: []u8, len: usize) !webrtc.TransportMessage {
+    const data = try transport.out_srtp_session.?.encryptRtcp(transport.allocator, buffer[0..len], buffer);
+    return transport.toTransportMessage(data);
+}
+
+pub fn writeAppData(transport: *DtlsTransport, data: []const u8, buffer: []u8) webrtc.TransportMessage {
     const size = transport.session.handleWrite(data, buffer);
-    return buffer[0..size];
+    return transport.toTransportMessage(buffer[0..size]);
+}
+
+fn toTransportMessage(transport: *const DtlsTransport, data: []const u8) webrtc.TransportMessage {
+    const from, const to = transport.nominated_pair.?;
+    return .{ .data = data, .from = from, .to = to };
 }
 
 pub fn handleRead(transport: *DtlsTransport, message: webrtc.TransportMessage, now: i64, buffer: []u8) !?DataEvent {

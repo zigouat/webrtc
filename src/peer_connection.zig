@@ -586,7 +586,7 @@ fn closeDataChannels(pc: *PeerConnection) void {
 }
 
 pub const ReadResult = union(enum) {
-    rtp: struct { RtpReceiverID, rtp.Packet },
+    rtp: struct { RtpReceiver, rtp.Packet },
     rtcp: RtcpIterator,
     app_data: SctpMessageIterator,
     none,
@@ -600,14 +600,14 @@ pub const RtcpIterator = struct {
         return .{ .it = rtcp.CompoundPacketIterator.init(data), .pc = pc };
     }
 
-    pub fn next(self: *RtcpIterator) !?struct { RtpTransceiverID, rtcp.Packet } {
+    pub fn next(self: *RtcpIterator) !?struct { RtpSender, rtcp.Packet } {
         while (try self.it.next()) |packet| switch (packet.payload) {
             .nack => |nack| if (self.pc.findSenderBySsrc(nack.media_ssrc)) |sender_id| {
                 try self.pc.transmits.pushBack(self.pc.allocator, .{ .nack = sender_id });
                 _ = try self.pc.transceivers.items[sender_id].sender.handleRtcpNack(self.pc.allocator, nack);
-                return .{ sender_id, packet };
+                return .{ self.pc.getRtpSender(sender_id), packet };
             },
-            .pli => |pli| if (self.pc.findSenderBySsrc(pli.media_ssrc)) |sender_id| return .{ sender_id, packet },
+            .pli => |pli| if (self.pc.findSenderBySsrc(pli.media_ssrc)) |sender_id| return .{ self.pc.getRtpSender(sender_id), packet },
             else => |payload_type| Logger.debug("Received rtcp: {s}", .{@tagName(payload_type)}),
         };
 
@@ -742,41 +742,31 @@ pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) !?webrtc.Transp
     const buffer2 = pc.int_buffers[packet_size .. 2 * packet_size];
     if (pc.dtls_transport.pollTransmit(buffer)) |msg| return msg;
 
-    const data = blk: {
-        if (try pc.sctp_transport.pollTransmit(buffer2, now)) |sctp_data| {
-            break :blk pc.dtls_transport.handleWrite(sctp_data, buffer);
-        }
+    if (try pc.sctp_transport.pollTransmit(buffer2, now)) |sctp_data| {
+        return pc.dtls_transport.writeAppData(sctp_data, buffer);
+    }
 
-        if (pc.sender_report_it) |*it| {
-            if (it.next(pc, buffer)) |data| {
-                break :blk try pc.dtls_transport.handleMediaWrite(buffer, data.len, false);
-            }
-            pc.sender_report_it = null;
-        }
+    if (pc.sender_report_it) |*it| {
+        if (it.next(pc, buffer)) |data| return try pc.dtls_transport.writeRtcp(buffer, data.len);
+        pc.sender_report_it = null;
+    }
 
-        if (pc.nack_generator) |*ng| if (try ng.pollTransmit(buffer[0..1200])) |data| {
-            break :blk try pc.dtls_transport.handleMediaWrite(buffer, data.len, false);
-        };
-
-        while (true) {
-            if (pc.transmits.front()) |entry| switch (entry) {
-                .nack => |sender_id| {
-                    const sender = &pc.transceivers.items[sender_id].sender;
-                    const data = try sender.nextNack(buffer) orelse {
-                        _ = pc.transmits.popFront();
-                        continue;
-                    };
-                    break :blk try pc.dtls_transport.handleMediaWrite(buffer, data.len, true);
-                },
-            };
-            break;
-        }
-
-        return null;
+    if (pc.nack_generator) |*ng| if (try ng.pollTransmit(buffer[0..1200])) |data| {
+        return try pc.dtls_transport.writeRtcp(buffer, data.len);
     };
 
-    const from, const to = pc.dtls_transport.nominated_pair.?;
-    return .{ .data = data, .from = from, .to = to };
+    while (pc.transmits.front()) |entry| switch (entry) {
+        .nack => |sender_id| {
+            const sender = &pc.transceivers.items[sender_id].sender;
+            const data = try sender.nextNack(buffer) orelse {
+                _ = pc.transmits.popFront();
+                continue;
+            };
+            return try pc.dtls_transport.writeRtp(buffer, data.len);
+        },
+    };
+
+    return null;
 }
 
 pub fn pollTimeout(pc: *PeerConnection) ?i64 {
@@ -1316,7 +1306,7 @@ fn handleRtpData(pc: *PeerConnection, data: []const u8) !ReadResult {
     const tr = &pc.transceivers.items[id];
     if (try tr.receiver.handleRtpPacket(&packet)) {
         if (tr.receiver.nack) if (pc.nack_generator) |*nack_generator| try nack_generator.handleRead(&packet);
-        return .{ .rtp = .{ id, packet } };
+        return .{ .rtp = .{ pc.getRtpReceiver(id), packet } };
     }
 
     return .none;

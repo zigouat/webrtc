@@ -4,8 +4,8 @@ const constants = @import("constants.zig");
 const webrtc = @import("webrtc.zig");
 const utils = @import("utils.zig");
 const SDPSession = @import("sdp_session.zig");
-const RtpSender = @import("pc/internal_rtp_sender.zig");
-const RtpReceiver = @import("pc/internal_rtp_receiver.zig");
+const InternalRtpSender = @import("pc/internal_rtp_sender.zig");
+const InternalRtpReceiver = @import("pc/internal_rtp_receiver.zig");
 const Mid = @import("mid.zig");
 
 const RtpTransceiver = @This();
@@ -65,13 +65,13 @@ pub const Init = struct {
 };
 
 pub const TrackEventInit = struct {
-    receiver: *RtpReceiver,
+    receiver: *InternalRtpReceiver,
     track: MediaStreamTrack,
     transceiver: *RtpTransceiver,
 };
 
-sender: RtpSender,
-receiver: RtpReceiver,
+sender: InternalRtpSender,
+receiver: InternalRtpReceiver,
 kind: TrackKind,
 direction: Direction,
 current_direction: ?Direction = null,
@@ -91,8 +91,8 @@ pub fn initFromSdpMedia(sdp_media: *const SDPSession.Media, r: std.Random, index
     return RtpTransceiver{
         .direction = .recvonly,
         .kind = sdp_media.getKind(),
-        .receiver = RtpReceiver.init(track),
-        .sender = RtpSender.init(null),
+        .receiver = InternalRtpReceiver.init(track),
+        .sender = InternalRtpSender.init(null),
         .mid = sdp_media.mid,
         .sdp_mline_index = index,
     };
@@ -304,8 +304,8 @@ fn addSenderFields(tr: *const RtpTransceiver, allocator: std.mem.Allocator, medi
 
 fn newTestRtpTransceiver() RtpTransceiver {
     return .{
-        .sender = RtpSender.init(.init(.video, prng.random())),
-        .receiver = RtpReceiver.init(.init(.video, prng.random())),
+        .sender = InternalRtpSender.init(.init(.video, prng.random())),
+        .receiver = InternalRtpReceiver.init(.init(.video, prng.random())),
         .direction = .sendrecv,
         .kind = .video,
     };

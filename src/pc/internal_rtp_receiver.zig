@@ -3,12 +3,7 @@ const webrtc = @import("../webrtc.zig");
 const rtp = @import("rtp");
 const rtcp = @import("rtcp");
 
-const RtpReceiver = @This();
-
-/// TrackEvent represents events related to a remote track.
-pub const TrackEvent = union(enum) {
-    rtp: rtp.Packet,
-};
+const InternalRtpReceiver = @This();
 
 const StreamInfo = packed struct {
     packet_type: enum(u1) { media, rtx },
@@ -23,7 +18,7 @@ ssrc: ?u32,
 //Whether nack is configured for this receiver.
 nack: bool,
 
-pub fn init(track: webrtc.MediaStreamTrack) RtpReceiver {
+pub fn init(track: webrtc.MediaStreamTrack) InternalRtpReceiver {
     return .{
         .track = track,
         .ssrc = null,
@@ -32,7 +27,7 @@ pub fn init(track: webrtc.MediaStreamTrack) RtpReceiver {
     };
 }
 
-pub fn setCodecs(receiver: *RtpReceiver, codecs: []const webrtc.RtpCodecParameters) void {
+pub fn setCodecs(receiver: *InternalRtpReceiver, codecs: []const webrtc.RtpCodecParameters) void {
     receiver.codecs = codecs;
 
     receiver.stream_infos = @splat(null);
@@ -47,7 +42,7 @@ pub fn setCodecs(receiver: *RtpReceiver, codecs: []const webrtc.RtpCodecParamete
     }
 }
 
-pub fn handleRtpPacket(receiver: *RtpReceiver, packet: *rtp.Packet) !bool {
+pub fn handleRtpPacket(receiver: *InternalRtpReceiver, packet: *rtp.Packet) !bool {
     const stream_info = receiver.stream_infos[packet.header.payload_type] orelse return false;
     if (stream_info.packet_type == .rtx) {
         @branchHint(.unlikely);
@@ -73,7 +68,7 @@ pub fn handleRtpPacket(receiver: *RtpReceiver, packet: *rtp.Packet) !bool {
 }
 
 /// Writes a Picture Loss Indication (PLI) RTCP packet.
-pub fn writePli(receiver: *const RtpReceiver, buffer: []u8) []const u8 {
+pub fn writePli(receiver: *const InternalRtpReceiver, buffer: []u8) []const u8 {
     // 4 bytes header + PLI size is 8 bytes
     const header: rtcp.Header = .{ .rc = 1, .payload_type = .ps_fb, .length = 2, .padding = false };
     std.mem.writeInt(u32, buffer[0..4], @bitCast(header), .big);
@@ -100,8 +95,8 @@ fn testPacket(pt: u7) rtp.Packet {
 
 var prng = std.Random.DefaultPrng.init(0xDEADBEEF);
 
-test "RtpReceiver.setCodecs: fill stream infos" {
-    var receiver = RtpReceiver.init(.init(.video, prng.random()));
+test "InternalRtpReceiver.setCodecs: fill stream infos" {
+    var receiver = InternalRtpReceiver.init(.init(.video, prng.random()));
 
     const codecs = [_]webrtc.RtpCodecParameters{
         .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90000 } },
@@ -140,8 +135,8 @@ test "RtpReceiver.setCodecs: fill stream infos" {
     }
 }
 
-test "RtpReceiver.setCodecs: clear stream infos before filling" {
-    var receiver = RtpReceiver.init(.init(.video, prng.random()));
+test "InternalRtpReceiver.setCodecs: clear stream infos before filling" {
+    var receiver = InternalRtpReceiver.init(.init(.video, prng.random()));
 
     const codecs = [_]webrtc.RtpCodecParameters{
         .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90000 } },
@@ -174,8 +169,8 @@ test "RtpReceiver.setCodecs: clear stream infos before filling" {
     }
 }
 
-test "RtpReceiver.handleRtpPacket: handle rtx packets" {
-    var receiver = RtpReceiver.init(.init(.video, prng.random()));
+test "InternalRtpReceiver.handleRtpPacket: handle rtx packets" {
+    var receiver = InternalRtpReceiver.init(.init(.video, prng.random()));
 
     receiver.stream_infos[96] = .{ .packet_type = .media, .apt = 0 };
     receiver.stream_infos[97] = .{ .packet_type = .rtx, .apt = 96 };
@@ -202,8 +197,8 @@ test "RtpReceiver.handleRtpPacket: handle rtx packets" {
     try testing.expectEqualStrings("ZIGLANG-", rtx_packet.payload);
 }
 
-test "RtpReceiver.writePli: writes a pli for the receiver ssrc" {
-    var receiver = RtpReceiver.init(.init(.video, prng.random()));
+test "InternalRtpReceiver.writePli: writes a pli for the receiver ssrc" {
+    var receiver = InternalRtpReceiver.init(.init(.video, prng.random()));
     receiver.ssrc = 0xDEADBEEF;
 
     var buffer: [64]u8 = @splat(0);
@@ -216,8 +211,8 @@ test "RtpReceiver.writePli: writes a pli for the receiver ssrc" {
     try testing.expectEqual(0xDEADBEEF, packet.payload.pli.media_ssrc);
 }
 
-test "RtpReceiver.handleRtpPacket: ignore packets with unknown payload type" {
-    var receiver = RtpReceiver.init(.init(.video, prng.random()));
+test "InternalRtpReceiver.handleRtpPacket: ignore packets with unknown payload type" {
+    var receiver = InternalRtpReceiver.init(.init(.video, prng.random()));
     receiver.stream_infos[96] = .{ .packet_type = .media, .apt = 0 };
 
     var packet = testPacket(104);

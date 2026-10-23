@@ -75,8 +75,8 @@ const ConnectionContext = struct {
 
             switch (read_result) {
                 .rtp => |received| {
-                    const receiver = &conn.pc.getTransceivers()[received.@"0"].receiver;
-                    const sender = if (receiver.track.kind == .video) &conn.video_sender else &conn.audio_sender;
+                    const receiver = received.@"0";
+                    const sender = if (receiver.getTrack().kind == .video) conn.video_sender else conn.audio_sender;
 
                     const now_us = Io.Timestamp.now(conn.io, .awake).toMicroseconds();
                     const msg = sender.sendRtp(

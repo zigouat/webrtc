@@ -1,45 +1,54 @@
 const std = @import("std");
 const webrtc = @import("webrtc.zig");
-const constants = @import("constants.zig");
 const rtp = @import("rtp");
 const media = @import("media");
 
 const PeerConnection = @import("peer_connection.zig");
 const InternalRtpSender = @import("pc/internal_rtp_sender.zig");
 
+/// A handle to the sender of a transceiver.
+///
+/// The handle identifies the transceiver, not the track. After `PeerConnection.removeTrack`
+/// the handle is invalid: a later `addTrack` may reuse the same transceiver, and the old
+/// handle would then send on the new track. It's up to the application to drop handles
+/// of removed tracks.
 const RtpSender = @This();
 
 pub const SenderID = u32;
 
+/// Packetizes and encrypts a media sample.
+///
+/// Holds a pointer into the peer connection's transceivers. Adding transceivers (`addTrack`,
+/// `addTransceiver*`, applying a remote description) invalidates it; finish iterating
+/// before making any such call.
 pub const MediaPacketWriterIterator = struct {
-    rtp_sender: RtpSender,
+    pc: *PeerConnection,
     writer: InternalRtpSender.SamplePacketizerIterator,
 
     pub fn init(sender: RtpSender, media_packet: *const media.Packet) !MediaPacketWriterIterator {
-        const sender_internal = sender.internal();
-        return MediaPacketWriterIterator{
-            .rtp_sender = sender,
-            .writer = try sender_internal.handleMediaPacketWrite(media_packet),
+        return .{
+            .pc = sender.pc,
+            .writer = try sender.internal().handleMediaPacketWrite(media_packet),
         };
     }
 
     pub fn next(it: *MediaPacketWriterIterator, buffer: []u8, now_us: i64) !?webrtc.TransportMessage {
         const packet = try it.writer.next(buffer, now_us) orelse return null;
-        return toTransportMessage(it.rtp_sender.pc, try it.rtp_sender.pc.dtls_transport.handleMediaWrite(
-            buffer,
-            packet.len,
-            true,
-        ));
+        return try it.pc.dtls_transport.writeRtp(buffer, packet.len);
     }
 };
 
 id: SenderID,
 pc: *PeerConnection,
 
-pub fn sendRtp(rtp_sender: *RtpSender, packet: *const rtp.Packet, buffer: []u8, now_micro: i64) !webrtc.TransportMessage {
+/// Returns the track currently attached to the sender, if any.
+pub fn getTrack(rtp_sender: RtpSender) ?webrtc.MediaStreamTrack {
+    return rtp_sender.internal().track;
+}
+
+pub fn sendRtp(rtp_sender: RtpSender, packet: *const rtp.Packet, buffer: []u8, now_micro: i64) !webrtc.TransportMessage {
     const data = try rtp_sender.internal().handleWrite(packet, buffer, now_micro);
-    const to_send = try rtp_sender.pc.dtls_transport.handleMediaWrite(buffer, data.len, true);
-    return toTransportMessage(rtp_sender.pc, to_send);
+    return try rtp_sender.pc.dtls_transport.writeRtp(buffer, data.len);
 }
 
 pub fn sendSample(rtp_sender: RtpSender, sample: *const media.Packet) !MediaPacketWriterIterator {
@@ -48,9 +57,4 @@ pub fn sendSample(rtp_sender: RtpSender, sample: *const media.Packet) !MediaPack
 
 fn internal(self: RtpSender) *InternalRtpSender {
     return &self.pc.transceivers.items[self.id].sender;
-}
-
-fn toTransportMessage(pc: *PeerConnection, data: []const u8) webrtc.TransportMessage {
-    const from, const to = pc.dtls_transport.nominated_pair.?;
-    return .{ .data = data, .from = from, .to = to };
 }
