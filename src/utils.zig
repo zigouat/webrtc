@@ -28,6 +28,14 @@ pub fn randString(r: std.Random, buffer: []u8) void {
     }
 }
 
+pub fn randPassword(r: std.Random, buffer: []u8) void {
+    const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/";
+
+    for (buffer) |*c| {
+        c.* = charset[r.uintLessThan(usize, charset.len)];
+    }
+}
+
 /// Returns the codecs from `a` that are also present in `b` (matched by `RtpCodecParameters.eql`),
 /// including any associated RTX codecs. Result follows `b`'s order and is owned by the caller.
 /// Used when building an answer, where inputs are `const` and a fresh owned slice is needed.
