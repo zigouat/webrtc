@@ -13,7 +13,6 @@ const Io = std.Io;
 const Logger = std.log.scoped(.dtls_transport);
 const IceAgent = ice.agent.Agent(.{});
 
-const max_message_size = 1500;
 const PacketType = enum { rtp, rtcp, dtls, unknown };
 
 pub const SendError = srtp.EncryptError || std.Io.net.Socket.SendError || error{ WriteFailed, UnknownAttribute };
@@ -32,7 +31,7 @@ session: dtls.Session,
 in_srtp_session: ?srtp.Session = null,
 out_srtp_session: ?srtp.Session = null,
 events: std.Deque(Event) = .empty,
-nominated_pair: ?struct { *const Io.net.IpAddress, *const Io.net.IpAddress } = null,
+frame_offset: u32 = 0,
 
 pub const DataEvent = union(enum) {
     rtp: []const u8,
@@ -133,29 +132,43 @@ pub fn addIceServer(transport: *DtlsTransport, addr: Io.net.IpAddress, server: i
     try transport.ice_agent.addServer(addr, server, now);
 }
 
-pub const WriteRtpError = srtp.EncryptError;
-pub const WriteRtcpError = std.mem.Allocator.Error;
+pub const WriteRtpError = srtp.EncryptError || error{WriteFailed};
+pub const WriteRtcpError = std.mem.Allocator.Error || error{WriteFailed};
+pub const WriteAppDataError = error{WriteFailed};
 
-/// Encrypts the RTP packet in `buffer[0..len]` in place.
+/// Minimum size of the buffers passed to the write functions. STUN messages are not subject to it.
+///
+/// Largest packet is a DTLS record at the 1237 bytes DTLS MTU (1200 bytes SCTP packet with AES-GCM
+/// expansion; RTP is at most 1232 bytes: 12 header + 8 mid extension + 2 RTX + 1200 payload + 10
+/// SRTP tag, RTCP 1214), plus 48 bytes for an IPv6 TURN send indication header and 3 bytes of
+/// padding.
+pub const min_write_buffer_size = 1288;
+
+/// Returns the part of `buffer` packets must be written to, after the TURN header when the
+/// nominated pair is relayed.
+pub fn payloadBuffer(transport: *const DtlsTransport, buffer: []u8) error{WriteFailed}![]u8 {
+    if (buffer.len < min_write_buffer_size) return error.WriteFailed;
+    return buffer[transport.frame_offset..];
+}
+
+/// Encrypts the RTP packet written to `payloadBuffer(buffer)[0..len]` in place.
 pub fn writeRtp(transport: *DtlsTransport, buffer: []u8, len: usize) WriteRtpError!webrtc.TransportMessage {
-    const data = try transport.out_srtp_session.?.encryptRtp(transport.allocator, buffer[0..len], buffer);
-    return transport.toTransportMessage(data);
+    const payload = try transport.payloadBuffer(buffer);
+    const data = try transport.out_srtp_session.?.encryptRtp(transport.allocator, payload[0..len], payload);
+    return transport.frame(buffer, data);
 }
 
-/// Encrypts the RTCP packet in `buffer[0..len]` in place.
+/// Encrypts the RTCP packet written to `payloadBuffer(buffer)[0..len]` in place.
 pub fn writeRtcp(transport: *DtlsTransport, buffer: []u8, len: usize) WriteRtcpError!webrtc.TransportMessage {
-    const data = try transport.out_srtp_session.?.encryptRtcp(transport.allocator, buffer[0..len], buffer);
-    return transport.toTransportMessage(data);
+    const payload = try transport.payloadBuffer(buffer);
+    const data = try transport.out_srtp_session.?.encryptRtcp(transport.allocator, payload[0..len], payload);
+    return transport.frame(buffer, data);
 }
 
-pub fn writeAppData(transport: *DtlsTransport, data: []const u8, buffer: []u8) webrtc.TransportMessage {
-    const size = transport.session.handleWrite(data, buffer);
-    return transport.toTransportMessage(buffer[0..size]);
-}
-
-fn toTransportMessage(transport: *const DtlsTransport, data: []const u8) webrtc.TransportMessage {
-    const from, const to = transport.nominated_pair.?;
-    return .{ .data = data, .from = from, .to = to };
+pub fn writeAppData(transport: *DtlsTransport, data: []const u8, buffer: []u8) WriteAppDataError!webrtc.TransportMessage {
+    const payload = try transport.payloadBuffer(buffer);
+    const size = transport.session.handleWrite(data, payload);
+    return transport.frame(buffer, payload[0..size]);
 }
 
 pub fn handleRead(transport: *DtlsTransport, message: webrtc.TransportMessage, now: i64, buffer: []u8) !?DataEvent {
@@ -165,7 +178,11 @@ pub fn handleRead(transport: *DtlsTransport, message: webrtc.TransportMessage, n
     );
 
     const event = switch (result) {
-        .app_data => |app_data| try transport.handleIceData(now, app_data, buffer),
+        .app_data => |app_data| blk: {
+            const offset = @intFromPtr(app_data.ptr) - @intFromPtr(message.data.ptr);
+            const packet = @constCast(message.data)[offset..][0..app_data.len];
+            break :blk try transport.handleIceData(now, packet, buffer);
+        },
         .consumed => null,
     };
 
@@ -184,11 +201,11 @@ pub fn pollEvent(transport: *DtlsTransport) ?Event {
     return transport.events.popFront();
 }
 
-pub fn pollTransmit(transport: *DtlsTransport, buffer: []u8) ?webrtc.TransportMessage {
+pub fn pollTransmit(transport: *DtlsTransport, buffer: []u8) error{WriteFailed}!?webrtc.TransportMessage {
     const ice_msg = (transport.ice_agent.pollTransmit(buffer) catch return null) orelse {
-        const from, const to = transport.nominated_pair orelse return null;
-        const dtls_msg = transport.session.pollTransmit(buffer) orelse return null;
-        return .{ .data = dtls_msg, .from = from, .to = to };
+        if (transport.ice_agent.nominated_pair == null) return null;
+        const dtls_msg = transport.session.pollTransmit(try transport.payloadBuffer(buffer)) orelse return null;
+        return try transport.frame(buffer, dtls_msg);
     };
 
     return .{ .data = ice_msg.data, .from = ice_msg.from, .to = ice_msg.to };
@@ -198,6 +215,13 @@ pub fn pollTimeout(transport: *DtlsTransport) ?i64 {
     const ice_deadline = transport.ice_agent.pollTimeout() orelse return transport.session.pollTimeout();
     const dtls_deadline = transport.session.pollTimeout() orelse return ice_deadline;
     return @min(ice_deadline, dtls_deadline);
+}
+
+// Write TURN header if the nominated pair is relayed, otherwise return the payload as is.
+fn frame(transport: *DtlsTransport, buffer: []u8, payload: []const u8) error{WriteFailed}!webrtc.TransportMessage {
+    std.debug.assert(payload.ptr == buffer[transport.frame_offset..].ptr);
+    const msg = try transport.ice_agent.handleWrite(buffer, payload.len);
+    return .{ .data = msg.data, .from = msg.from, .to = msg.to };
 }
 
 fn drainEvents(transport: *DtlsTransport, now: i64) !void {
@@ -213,9 +237,8 @@ fn drainEvents(transport: *DtlsTransport, now: i64) !void {
             if (state == .complete) try transport.events.pushBack(transport.allocator, .end_of_candidates);
             try transport.events.pushBack(transport.allocator, .{ .ice_gathering_state = state });
         },
-        .nominated => |pair| transport.nominated_pair = .{
-            &transport.ice_agent.candidates[pair.local].base,
-            &transport.ice_agent.remote_candidates[pair.remote].address,
+        .nominated => {
+            transport.frame_offset, _ = transport.ice_agent.getDataFrameSize(0);
         },
     };
 
@@ -239,7 +262,7 @@ fn drainEvents(transport: *DtlsTransport, now: i64) !void {
     };
 }
 
-fn handleIceData(transport: *DtlsTransport, now: i64, data: []const u8, buffer: []u8) !?DataEvent {
+fn handleIceData(transport: *DtlsTransport, now: i64, data: []u8, buffer: []u8) !?DataEvent {
     switch (getPacketType(data)) {
         .dtls => {
             switch (try transport.session.handleRead(data, now, buffer)) {
@@ -248,13 +271,11 @@ fn handleIceData(transport: *DtlsTransport, now: i64, data: []const u8, buffer: 
             }
         },
         .rtp => if (transport.in_srtp_session) |*srtp_session| {
-            const buffer2 = @constCast(data.ptr[0..max_message_size]);
-            const rtp_packet = try srtp_session.decryptRtp(transport.allocator, data, buffer2);
+            const rtp_packet = try srtp_session.decryptRtp(transport.allocator, data, data);
             return .{ .rtp = rtp_packet };
         },
         .rtcp => if (transport.in_srtp_session) |*srtp_session| {
-            const buffer2 = @constCast(data.ptr[0..max_message_size]);
-            const rtcp_packet = try srtp_session.decryptRtcp(transport.allocator, data, buffer2);
+            const rtcp_packet = try srtp_session.decryptRtcp(transport.allocator, data, data);
             return .{ .rtcp = rtcp_packet };
         },
         .unknown => Logger.debug("Received unknown packet", .{}),

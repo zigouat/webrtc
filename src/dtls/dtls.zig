@@ -23,7 +23,8 @@ const ciphersuites = [_]c_int{
 
 const max_srtp_keying_material_size = 30;
 
-const dtls_mtu: u16 = 1400;
+// Fits a `max_write_size` record with AES-GCM expansion (13 header + 8 explicit nonce + 16 tag).
+const dtls_mtu: u16 = 1237;
 pub const max_write_size = 1200;
 
 pub const ConnectionState = enum { new, connecting, connected, failed, closed };

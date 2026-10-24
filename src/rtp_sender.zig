@@ -40,7 +40,7 @@ pub const MediaPacketWriterIterator = struct {
     }
 
     pub fn next(it: *MediaPacketWriterIterator, buffer: []u8, now_us: i64) NextError!?webrtc.TransportMessage {
-        const packet = try it.writer.next(buffer, now_us) orelse return null;
+        const packet = try it.writer.next(try it.pc.dtls_transport.payloadBuffer(buffer), now_us) orelse return null;
         return try it.pc.dtls_transport.writeRtp(buffer, packet.len);
     }
 };
@@ -54,7 +54,7 @@ pub fn getTrack(rtp_sender: RtpSender) ?webrtc.MediaStreamTrack {
 }
 
 pub fn sendRtp(rtp_sender: RtpSender, packet: *const rtp.Packet, buffer: []u8, now_micro: i64) SendRtpError!webrtc.TransportMessage {
-    const data = try rtp_sender.internal().handleWrite(packet, buffer, now_micro);
+    const data = try rtp_sender.internal().handleWrite(packet, try rtp_sender.pc.dtls_transport.payloadBuffer(buffer), now_micro);
     return try rtp_sender.pc.dtls_transport.writeRtp(buffer, data.len);
 }
 
