@@ -737,25 +737,27 @@ pub fn pollEvent(pc: *PeerConnection) ?Event {
 
 pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) !?webrtc.TransportMessage {
     const buffer2 = pc.int_buffers[packet_size .. 2 * packet_size];
-    if (pc.dtls_transport.pollTransmit(buffer)) |msg| return msg;
+    if (try pc.dtls_transport.pollTransmit(buffer)) |msg| return msg;
 
     if (try pc.sctp_transport.pollTransmit(buffer2, now)) |sctp_data| {
-        return pc.dtls_transport.writeAppData(sctp_data, buffer);
+        return try pc.dtls_transport.writeAppData(sctp_data, buffer);
     }
 
+    const payload = try pc.dtls_transport.payloadBuffer(buffer);
+
     if (pc.sender_report_it) |*it| {
-        if (it.next(pc, buffer)) |data| return try pc.dtls_transport.writeRtcp(buffer, data.len);
+        if (it.next(pc, payload)) |data| return try pc.dtls_transport.writeRtcp(buffer, data.len);
         pc.sender_report_it = null;
     }
 
-    if (pc.nack_generator) |*ng| if (try ng.pollTransmit(buffer[0..1200])) |data| {
+    if (pc.nack_generator) |*ng| if (try ng.pollTransmit(payload[0..1200])) |data| {
         return try pc.dtls_transport.writeRtcp(buffer, data.len);
     };
 
     while (pc.transmits.front()) |entry| switch (entry) {
         .nack => |sender_id| {
             const sender = &pc.transceivers.items[sender_id].sender;
-            const data = try sender.nextNack(buffer) orelse {
+            const data = try sender.nextNack(payload) orelse {
                 _ = pc.transmits.popFront();
                 continue;
             };
