@@ -116,7 +116,9 @@ fn mbedtls_config(b: *std.Build) *std.Build.Step.ConfigHeader {
         .MBEDTLS_SSL_EXTENDED_MASTER_SECRET = {},
         .MBEDTLS_SSL_KEYING_MATERIAL_EXPORT = {},
         .MBEDTLS_SSL_RENEGOTIATION = {},
-        .MBEDTLS_SSL_MAX_FRAGMENT_LENGTH = {},
+        // Only our own handshake messages (~300 B certificate); outgoing
+        // records are bounded by the DTLS MTU anyway.
+        .MBEDTLS_SSL_OUT_CONTENT_LEN = 2048,
 
         .MBEDTLS_SSL_PROTO_TLS1_2 = {},
 

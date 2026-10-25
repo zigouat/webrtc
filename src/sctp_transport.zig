@@ -193,6 +193,7 @@ pub fn handleWrite(sctp_transport: *SctpTranport, msg: sctp.message.UserMessage)
         .unordered = msg.unordered,
     }) catch |err| switch (err) {
         error.InvalidState => return error.AssocNotConnected,
+        error.InvalidStream => unreachable,
         else => |e| return e,
     };
 }
@@ -243,6 +244,7 @@ pub fn handleRead(sctp_transport: *SctpTranport, data: []const u8, now: i64) Rea
         } else {
             Logger.debug("Ignoring reset of all streams", .{});
         },
+        .send_failed => {}, // should not happen
     };
 
     const sctp_it = it orelse {

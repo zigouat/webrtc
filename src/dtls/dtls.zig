@@ -336,7 +336,7 @@ pub const Session = struct {
         ret = m.mbedtls_x509write_crt_set_issuer_name(&cert, "CN=Zig WebRTC");
         try checkError(ret);
 
-        var buffer: [4096]u8 = @splat(0);
+        var buffer: [1024]u8 = @splat(0);
         ret = m.mbedtls_x509write_crt_der(&cert, buffer[0..].ptr, buffer.len, mbedtlsRandom, &session.random);
         try checkError(ret);
 
@@ -402,7 +402,12 @@ pub const Session = struct {
 
         const session: *Self = @ptrCast(@alignCast(ctx.?));
         if (session.received_data) |data| {
-            std.debug.assert(data.len <= len);
+            if (data.len > len) {
+                // Larger than the record buffer: DTLS discards it.
+                Logger.debug("Dropping oversized datagram ({} > {} bytes)", .{ data.len, len });
+                session.received_data = null;
+                return m.MBEDTLS_ERR_SSL_WANT_READ;
+            }
             @memcpy(buf[0..data.len], data);
             session.received_data = null;
             return @intCast(data.len);
