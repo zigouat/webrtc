@@ -49,7 +49,7 @@ exe.root_module.addImport("webrtc", webrtc.module("webrtc"));
 Check the [examples](./examples) folder.
 
 ### Note For Windows Users
-Currently the examples are not working on Windows because `std.Io.net.Socket.receiveTimeout` is not implemented. You can still run 
+Some of the examples may not work on Windows because `std.Io.net.Socket.receiveTimeout` is not implemented. You can still run 
 the examples by depending on third party package like [zio](https://github.com/lalinsky/zio).
 
 ## Other related projects
