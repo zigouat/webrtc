@@ -146,7 +146,7 @@ pub const SessionDescription = struct {
     type: SessionDescriptionType,
     sdp: []const u8,
 
-    pub fn deinit(sess_desc: *SessionDescription, allocator: std.mem.Allocator) void {
+    pub fn deinit(sess_desc: *const SessionDescription, allocator: std.mem.Allocator) void {
         allocator.free(sess_desc.sdp);
     }
 };
