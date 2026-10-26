@@ -41,6 +41,10 @@ pub fn build(b: *std.Build) void {
             .name = "data_channels",
             .root_source_file = b.path("data-channels/main.zig"),
         },
+        .{
+            .name = "data_channels_flow_control",
+            .root_source_file = b.path("data-channels-flow-control/main.zig"),
+        },
     };
 
     const build_step = b.step("all", "Build all apps");
@@ -72,6 +76,9 @@ pub fn build(b: *std.Build) void {
         if (b.args) |args| {
             run_cmd.addArgs(args);
         }
+
+        const install_step = b.step("install-" ++ app.name, "Install the app");
+        install_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
 
         build_step.dependOn(&exe.step);
     }
