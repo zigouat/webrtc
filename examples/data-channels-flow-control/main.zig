@@ -73,22 +73,16 @@ const ConnectionContext = struct {
 
             const deadline = conn.pc.pollTimeout();
             var datagram: ?Io.net.IncomingMessage = null;
-            if (deadline) |d| {
-                const timeout = Io.Timeout{ .deadline = .{
-                    .raw = .fromNanoseconds(d * std.time.ns_per_ms),
-                    .clock = .awake,
-                } };
-                datagram = conn.socket.receiveTimeout(conn.io, conn.buffers[0..max_datagram_size], timeout) catch |err| switch (err) {
-                    error.Canceled => return error.Canceled,
-                    error.Timeout => null,
-                    else => return,
-                };
-            } else {
-                datagram = conn.socket.receive(conn.io, conn.buffers[0..max_datagram_size]) catch |err| switch (err) {
-                    error.Canceled => return error.Canceled,
-                    else => return,
-                };
-            }
+            const timeout = if (deadline) |d| Io.Timeout{ .deadline = .{
+                .raw = .fromNanoseconds(d * std.time.ns_per_ms),
+                .clock = .awake,
+            } } else Io.Timeout{ .none = {} };
+
+            datagram = conn.socket.receiveTimeout(conn.io, conn.buffers[0..max_datagram_size], timeout) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                error.Timeout => null,
+                else => return,
+            };
 
             now = Io.Timestamp.now(conn.io, .awake).toMilliseconds();
             if (datagram) |inc| {
