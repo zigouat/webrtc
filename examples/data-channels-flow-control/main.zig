@@ -72,15 +72,20 @@ const ConnectionContext = struct {
             };
 
             const deadline = conn.pc.pollTimeout();
+            // The poll timeout is truncated to whole milliseconds, wait one more millisecond so
+            // the receive doesn't time out before the deadline and spin until it's reached.
             const timeout = if (deadline) |d| Io.Timeout{ .deadline = .{
-                .raw = .fromNanoseconds(d * std.time.ns_per_ms),
+                .raw = .fromNanoseconds((d + 1) * std.time.ns_per_ms),
                 .clock = .awake,
             } } else Io.Timeout{ .none = {} };
 
             const datagram = conn.socket.receiveTimeout(conn.io, conn.buffers[0..max_datagram_size], timeout) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 error.Timeout => null,
-                else => return,
+                else => {
+                    std.log.err("Failed to receive datagram: {}", .{err});
+                    return;
+                },
             };
 
             now = Io.Timestamp.now(conn.io, .awake).toMilliseconds();
@@ -119,20 +124,25 @@ const ConnectionContext = struct {
     fn handle(conn: *ConnectionContext, now: i64) !void {
         while (conn.pc.pollEvent()) |event| switch (event) {
             .connection_state => |state| switch (state) {
-                .disconnected, .closed, .failed => return error.ConnectionFailed,
+                .closed, .failed => return error.ConnectionFailed,
                 else => {},
             },
             .data_channel => |dc_event| switch (dc_event) {
                 .new => |id| conn.dc = conn.pc.getDataChannel(id),
                 .open => if (conn.offerer) try conn.sendData(),
-                .buffered_amount_low_threshold => try conn.sendData(),
+                // The answerer's threshold is 0, the event fires once its DCEP ack is sent.
+                .buffered_amount_low_threshold => if (conn.offerer) try conn.sendData(),
                 else => {},
             },
             else => {},
         };
 
         while (try conn.pc.pollTransmit(conn.buffers[max_datagram_size..], now)) |message| {
-            try conn.socket.send(conn.io, message.to, message.data);
+            conn.socket.send(conn.io, message.to, message.data) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                // A failed UDP send is just a lost packet (e.g. EPERM from netfilter), the peers recover from it.
+                else => std.log.warn("Failed to send datagram to {f}: {}", .{ message.to, err }),
+            };
         }
     }
 

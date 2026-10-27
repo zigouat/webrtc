@@ -13,6 +13,7 @@ The examples are a rewrite of the [pion](https://github.com/pion/webrtc) example
 
 ### Data Channel API
 * [Data Channels](data-channels): The data-channels example shows how you can send/recv DataChannel messages from a web browser.
+* [Data Channels Flow Control](data-channels-flow-control): Example data-channels-flow-control shows how to use the DataChannel API efficiently. You can measure the amount the rate at which the remote peer is receiving data, and structure your application accordingly.
 
 ### Usage
 
