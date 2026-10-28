@@ -10,8 +10,7 @@ pub const State = InternalDataChannel.State;
 pub const Event = InternalDataChannel.Event;
 pub const UserMessage = InternalDataChannel.UserMessage;
 
-pub const CreateError = error{
-    ConnectionClosed,
+pub const CreateError = PeerConnection.ClosedError || error{
     LabelTooLong,
     ProtocolTooLong,
     InvalidParameters,

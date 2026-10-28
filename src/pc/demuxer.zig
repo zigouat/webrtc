@@ -34,16 +34,19 @@ pub fn deinit(demuxer: *Demuxer) void {
     demuxer.ssrc_to_transceiver.deinit();
 }
 
-pub fn updateMaps(demuxer: *Demuxer, sdp_session: *const SDPSession, transceivers: []const InternalRtpTransceiver) !void {
+pub fn updateMaps(demuxer: *Demuxer, sdp_session: *const SDPSession, transceivers: []const InternalRtpTransceiver) std.mem.Allocator.Error!void {
+    demuxer.removeStoppedTransceivers(transceivers);
+
     for (sdp_session.getMedias()) |*media| {
         if (demuxer.mid_id == null) for (media.rtp_header_extensions) |ext| if (std.mem.eql(u8, ext.uri, webrtc.mid_extension_uri)) {
             demuxer.mid_id = ext.id;
         };
 
         const tr_id = findTransceiverByMid(transceivers, media.mid) orelse continue;
+        if (transceivers[tr_id].isStopped()) continue;
 
-        if (media.ssrc) |ssrc| try demuxer.addEntry(ssrc, tr_id);
-        if (media.rtx_ssrc) |ssrc| try demuxer.addEntry(ssrc, tr_id);
+        if (media.ssrc) |ssrc| try demuxer.putEntry(ssrc, tr_id);
+        if (media.rtx_ssrc) |ssrc| try demuxer.putEntry(ssrc, tr_id);
 
         inner: for (media.rtp_codec_parameters) |codec| {
             for (sdp_session.getMedias()) |*m| if (media.mid != m.mid and m.hasPayload(codec.payload_type))
@@ -68,8 +71,10 @@ pub fn getTransceiver(demuxer: *Demuxer, packet: *const rtp.Packet) Lookup {
     return .none;
 }
 
-pub fn cacheSsrc(demuxer: *Demuxer, ssrc: u32, tr_id: u32) !void {
-    try demuxer.addEntry(ssrc, tr_id);
+/// No-op once `max_entries` is reached.
+pub fn cacheSsrc(demuxer: *Demuxer, ssrc: u32, tr_id: u32) std.mem.Allocator.Error!void {
+    if (demuxer.ssrc_to_transceiver.count() >= max_entries and !demuxer.ssrc_to_transceiver.contains(ssrc)) return;
+    try demuxer.putEntry(ssrc, tr_id);
 }
 
 pub fn registerRandomSsrc(demuxer: *Demuxer, random: std.Random) !u32 {
@@ -96,10 +101,19 @@ fn findTransceiverByMid(transceivers: []const InternalRtpTransceiver, mid: Mid.I
     return null;
 }
 
-fn addEntry(demuxer: *Demuxer, ssrc: u32, tr_id: u32) !void {
-    if (demuxer.ssrc_to_transceiver.count() >= max_entries) return error.TooManyEntries;
+fn putEntry(demuxer: *Demuxer, ssrc: u32, tr_id: u32) std.mem.Allocator.Error!void {
     try demuxer.ssrc_to_transceiver.put(ssrc, tr_id);
     try demuxer.generated_ssrc.put(ssrc, {});
+}
+
+fn removeStoppedTransceivers(demuxer: *Demuxer, transceivers: []const InternalRtpTransceiver) void {
+    var ssrc_it = demuxer.ssrc_to_transceiver.iterator();
+    while (ssrc_it.next()) |entry| if (transceivers[entry.value_ptr.*].isStopped())
+        demuxer.ssrc_to_transceiver.removeByPtr(entry.key_ptr);
+
+    var pt_it = demuxer.pt_to_transceiver.iterator();
+    while (pt_it.next()) |entry| if (transceivers[entry.value_ptr.*].isStopped())
+        demuxer.pt_to_transceiver.removeByPtr(entry.key_ptr);
 }
 
 const RtpCodecParameters = @import("../webrtc.zig").RtpCodecParameters;
@@ -317,7 +331,7 @@ test "Demuxer.getTransceiver: falls back to the mid header extension when ssrc i
     try std.testing.expectEqual(@as(u32, 0), lookup.transceiver);
 }
 
-test "Demuxer.getTransceiver: returs error when count entries exceeds max_entries" {
+test "Demuxer.cacheSsrc: stops caching once max_entries is reached" {
     const allocator = std.testing.allocator;
 
     var demuxer = init(allocator);
@@ -334,6 +348,32 @@ test "Demuxer.getTransceiver: returs error when count entries exceeds max_entrie
         packet.header.ssrc = ssrc;
     }
 
+    try demuxer.cacheSsrc(packet.header.ssrc, 0);
+    try std.testing.expectEqual(max_entries, demuxer.ssrc_to_transceiver.count());
     try std.testing.expectEqual(mid_1, demuxer.getTransceiver(&packet).mid);
-    try std.testing.expectError(error.TooManyEntries, demuxer.cacheSsrc(packet.header.ssrc, 0));
+
+    try demuxer.cacheSsrc(0xBEBEBEBE, 1);
+    try std.testing.expectEqual(@as(u32, 1), demuxer.ssrc_to_transceiver.get(0xBEBEBEBE).?);
+}
+
+test "Demuxer.updateMaps: removes entries of stopped transceivers" {
+    const allocator = std.testing.allocator;
+
+    var demuxer = init(allocator);
+    defer demuxer.deinit();
+
+    var session = try testSdpSession(allocator);
+    defer session.deinit(allocator);
+
+    var transceivers = [_]InternalRtpTransceiver{ testTransceiver(mid_1), testTransceiver(mid_2), testTransceiver(mid_3) };
+    try demuxer.updateMaps(&session, &transceivers);
+    try demuxer.cacheSsrc(0xDEADBEEF, 0);
+
+    transceivers[0].stopped = true;
+    try demuxer.updateMaps(&session, &transceivers);
+
+    try std.testing.expectEqual(1, demuxer.ssrc_to_transceiver.count());
+    try std.testing.expectEqual(@as(u32, 2), demuxer.ssrc_to_transceiver.get(0x20202020).?);
+    var pt_it = demuxer.pt_to_transceiver.valueIterator();
+    while (pt_it.next()) |tr_id| try std.testing.expect(tr_id.* != 0);
 }

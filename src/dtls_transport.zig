@@ -86,24 +86,32 @@ pub fn deinit(transport: *DtlsTransport) void {
     }
 }
 
-pub fn applyIceAttributes(transport: *DtlsTransport, media: *SDPSession.Media, fingerprint: *const [32]u8, now: i64) !void {
+pub const ApplyIceAttributesError = std.mem.Allocator.Error || error{InvalidSDP};
+
+pub fn applyIceAttributes(transport: *DtlsTransport, media: *SDPSession.Media, fingerprint: *const [32]u8, now: i64) ApplyIceAttributesError!void {
     Logger.debug("Apply remote credentials and candidates...", .{});
     const remote_credens = transport.ice_agent.getRemoteCredentials();
     if (remote_credens) |credens| {
         if (!std.mem.eql(u8, media.ice_ufrag, credens.username) or !std.mem.eql(u8, media.ice_pwd, credens.password))
-            return error.MismatchedIceCredentials;
+            return error.InvalidSDP;
     } else {
-        try transport.ice_agent.setRemoteCredentials(
+        transport.ice_agent.setRemoteCredentials(
             .{ .username = media.ice_ufrag, .password = media.ice_pwd },
             now,
-        );
+        ) catch |err| switch (err) {
+            error.CredentialsTooLong => return error.InvalidSDP,
+            error.OutOfMemory => |e| return e,
+        };
 
         for (media.candidates) |candidate| {
             if (candidate.component != 1 or candidate.transport == .tcp) continue;
             try transport.ice_agent.addRemoteCandidate(candidate, now);
         }
 
-        try transport.session.setRole(media.setup == .active);
+        transport.session.setRole(media.setup == .active) catch |err| {
+            Logger.err("Failed to setup dtls session: {}", .{err});
+            transport.session.fail();
+        };
         try transport.drainEvents(now);
     }
 
@@ -224,7 +232,7 @@ fn frame(transport: *DtlsTransport, buffer: []u8, payload: []const u8) error{Wri
     return .{ .data = msg.data, .from = msg.from, .to = msg.to };
 }
 
-fn drainEvents(transport: *DtlsTransport, now: i64) !void {
+fn drainEvents(transport: *DtlsTransport, now: i64) std.mem.Allocator.Error!void {
     while (transport.ice_agent.pollEvent()) |event| switch (event) {
         .connection_state => |state| {
             if (state == .connected) transport.session.handleTimeout(now);
@@ -244,28 +252,37 @@ fn drainEvents(transport: *DtlsTransport, now: i64) !void {
 
     while (transport.session.pollEvent()) |event| switch (event) {
         .connection_state => |state| try transport.events.pushBack(transport.allocator, .{ .dtls_connection_state = state }),
-        .srtp_keying_material => |keying| {
-            const profile = switch (keying.profile) {
-                1 => srtp.Profile.AesCm128HmacSha1_80,
-                2 => srtp.Profile.AesCm128HmacSha1_32,
-                else => unreachable,
-            };
-
-            transport.in_srtp_session = try srtp.Session.init(&keying.remote_keying_material, profile);
-            errdefer {
-                transport.in_srtp_session.?.deinit(transport.allocator);
-                transport.in_srtp_session = null;
-            }
-
-            transport.out_srtp_session = try srtp.Session.init(&keying.local_keying_material, profile);
+        .srtp_keying_material => |keying| transport.initSrtpSessions(&keying) catch |err| {
+            Logger.err("Failed to init srtp sessions: {}", .{err});
+            transport.session.fail();
         },
     };
+}
+
+fn initSrtpSessions(transport: *DtlsTransport, keying: *const dtls.SrtpProfile) error{InvalidKeyingMaterial}!void {
+    const profile = switch (keying.profile) {
+        1 => srtp.Profile.AesCm128HmacSha1_80,
+        2 => srtp.Profile.AesCm128HmacSha1_32,
+        else => unreachable,
+    };
+
+    transport.in_srtp_session = try srtp.Session.init(&keying.remote_keying_material, profile);
+    errdefer {
+        transport.in_srtp_session.?.deinit(transport.allocator);
+        transport.in_srtp_session = null;
+    }
+
+    transport.out_srtp_session = try srtp.Session.init(&keying.local_keying_material, profile);
 }
 
 fn handleIceData(transport: *DtlsTransport, now: i64, data: []u8, buffer: []u8) !?DataEvent {
     switch (getPacketType(data)) {
         .dtls => {
-            switch (try transport.session.handleRead(data, now, buffer)) {
+            const result = transport.session.handleRead(data, now, buffer) catch |err| {
+                Logger.debug("Discarding dtls record: {}", .{err});
+                return null;
+            };
+            switch (result) {
                 .app_data => |app_data| return .{ .app_data = app_data },
                 .consumed => return null,
             }
