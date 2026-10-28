@@ -478,11 +478,14 @@ fn writeFingerprint(s: *const SDPSession, w: *std.Io.Writer) !void {
 
 fn validateIceCredentials(medias: []Media) !void {
     if (medias.len == 0) return;
-    const ice_ufrag = medias[0].ice_ufrag;
-    const ice_pwd = medias[0].ice_pwd;
+    const first = for (medias) |*media| {
+        if (media.ice_ufrag.len != 0 or media.ice_pwd.len != 0) break media;
+    } else &medias[0];
+    const ice_ufrag = first.ice_ufrag;
+    const ice_pwd = first.ice_pwd;
 
     if (ice_ufrag.len < 4 or ice_pwd.len < 22) return error.InvalidIceCredentials;
-    for (medias[1..]) |*media| {
+    for (medias) |*media| {
         if (media.ice_ufrag.len == 0 and media.ice_pwd.len == 0) continue;
         if (!std.mem.eql(u8, media.ice_ufrag, ice_ufrag) or !std.mem.eql(u8, media.ice_pwd, ice_pwd))
             return error.MismatchedCredentials;
