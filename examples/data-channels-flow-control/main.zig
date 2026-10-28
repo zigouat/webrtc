@@ -173,20 +173,11 @@ pub fn main(init: std.process.Init) !void {
 
     const offer = try offerer.pc.createOffer();
     try offerer.pc.setLocalDescription(offer);
-
-    {
-        const local_desc = (try offerer.pc.getLocalDescription()).?;
-        defer local_desc.deinit(init.gpa);
-        try answerer.pc.setRemoteDescription(local_desc, now);
-    }
+    try answerer.pc.setRemoteDescription(offer, now);
 
     const answer = try answerer.pc.createAnswer();
     try answerer.pc.setLocalDescription(answer);
-    {
-        const local_desc = (try answerer.pc.getLocalDescription()).?;
-        defer local_desc.deinit(init.gpa);
-        try offerer.pc.setRemoteDescription(local_desc, now);
-    }
+    try offerer.pc.setRemoteDescription(answer, now);
 
     try grp.concurrent(io, ConnectionContext.start, .{&offerer});
     try grp.concurrent(io, ConnectionContext.start, .{&answerer});

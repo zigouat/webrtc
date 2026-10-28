@@ -373,20 +373,31 @@ pub fn addTransceiverFromKind(pc: *PeerConnection, kind: webrtc.TrackKind, init_
     return pc.getRtpTransceiver(@intCast(pc.transceivers.items.len - 1));
 }
 
+pub const CreateOfferError = error{
+    ConnectionClosed,
+    MidOverflow,
+} || std.mem.Allocator.Error;
+
 /// Creates a new offer.
 ///
 /// Pointers are invalidated in the next call to `createOffer`.
-pub fn createOffer(pc: *PeerConnection) !webrtc.SessionDescription {
+pub fn createOffer(pc: *PeerConnection) CreateOfferError!webrtc.SessionDescription {
     try pc.checkNotClosed();
 
     const first_offer = pc.pending_local_description == null and pc.local_description == null;
     return if (first_offer) pc.createFirstOffer() else pc.createSubsequentOffer();
 }
 
+pub const CreateAnswerError = error{
+    ConnectionClosed,
+    InvalidState,
+    UnknownTransceiver,
+} || std.mem.Allocator.Error;
+
 /// Creates an answer to a remote offer.
 ///
 /// See [MDN RTCPeerConnection: createAnswer](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/createAnswer)
-pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
+pub fn createAnswer(pc: *PeerConnection) CreateAnswerError!webrtc.SessionDescription {
     try pc.checkNotClosed();
     switch (pc.signaling_state) {
         .have_remote_offer, .have_local_pranswer => {},
@@ -426,7 +437,9 @@ pub fn createAnswer(pc: *PeerConnection) !webrtc.SessionDescription {
         };
     }
 
-    try sdp_session.write(&w.writer);
+    pc.writeSessionWithCandidates(&sdp_session, &w.writer) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+    };
 
     pc.last_answer.deinit(pc.allocator);
     pc.last_answer = .init(.answer, try w.toOwnedSlice(), sdp_session);
@@ -501,7 +514,7 @@ pub fn setRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDes
 pub fn writeLocalDescription(pc: *PeerConnection, w: *Io.Writer) !void {
     try pc.checkNotClosed();
     const sess_desc = pc.pending_local_description orelse pc.local_description;
-    return if (sess_desc) |*desc| try pc.writeDescriptionWithCandidates(desc, w) else error.NoLocalDescription;
+    return if (sess_desc) |*desc| try pc.writeSessionWithCandidates(&desc.session, w) else error.NoLocalDescription;
 }
 
 pub const DataChannelError = DataChannel.CreateError;
@@ -858,7 +871,9 @@ fn createFirstOffer(pc: *PeerConnection) !webrtc.SessionDescription {
         try pc.initDataChannelMedia(medias.addOneAssumeCapacity());
     }
 
-    try sdp_session.write(&w.writer);
+    pc.writeSessionWithCandidates(&sdp_session, &w.writer) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+    };
 
     pc.last_offer.deinit(pc.allocator);
     pc.last_offer = .init(.offer, try w.toOwnedSlice(), sdp_session);
@@ -926,8 +941,9 @@ fn createSubsequentOffer(pc: *PeerConnection) !webrtc.SessionDescription {
             app_media.?.port = constants.sdp_default_port;
     }
 
-    try sdp_session.write(&w.writer);
-    try pc.writeIceCandidates(&w.writer);
+    pc.writeSessionWithCandidates(&sdp_session, &w.writer) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+    };
 
     pc.last_offer.deinit(pc.allocator);
     pc.last_offer = .init(.offer, try w.toOwnedSlice(), sdp_session);
@@ -995,22 +1011,15 @@ fn nextPeerConnectionState(ice_state: ice.ConnectionState, dtls_state: dtls.Conn
         .connecting;
 }
 
-fn writeDescriptionWithCandidates(pc: *PeerConnection, sess_desc: *const ParsedSessionDescription, w: *Io.Writer) !void {
-    const session = sess_desc.session;
-    const maybe_media = blk: {
-        for (session.getMedias()) |*media| if (!media.isRejected()) break :blk media;
-        break :blk null;
-    };
-
+fn writeSessionWithCandidates(pc: *PeerConnection, session: *const SDPSession, w: *Io.Writer) Io.Writer.Error!void {
     const ice_agent = &pc.dtls_transport.ice_agent;
-
-    if (maybe_media) |media| {
+    for (session.getMedias()) |*media| if (!media.isRejected()) {
         media.candidates = ice_agent.candidates[0..ice_agent.candidates_len];
         media.end_of_candidates = ice_agent.gathering_state == .complete;
         defer media.candidates = &.{};
-
-        try sess_desc.session.write(w);
-    } else try w.writeAll(sess_desc.sdp);
+        return session.write(w);
+    };
+    try session.write(w);
 }
 
 fn setSignalingState(pc: *PeerConnection, state: SignalingState) void {
@@ -1308,19 +1317,6 @@ fn handleRtpData(pc: *PeerConnection, data: []const u8) !ReadResult {
 fn findSenderBySsrc(pc: *PeerConnection, ssrc: u32) ?RtpSenderID {
     for (pc.transceivers.items, 0..) |tr, idx| if (tr.sender.ssrc == ssrc) return @intCast(idx);
     return null;
-}
-
-fn writeIceCandidates(pc: *PeerConnection, w: *Io.Writer) !void {
-    const ice_agent = &pc.dtls_transport.ice_agent;
-
-    for (ice_agent.candidates[0..ice_agent.candidates_len]) |*candidate| {
-        try w.print("a=candidate:{f}\r\n", .{candidate});
-    }
-
-    if (ice_agent.gathering_state == .complete) {
-        const attr: SDPAttribute = .end_of_candidates;
-        try attr.write(w);
-    }
 }
 
 fn maybeCloseSctpTransport(pc: *PeerConnection, sdp_session: *const SDPSession) void {

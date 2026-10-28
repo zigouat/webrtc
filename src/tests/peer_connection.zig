@@ -431,6 +431,9 @@ test "PeerConnection.createOffer: m-lines created for each transceiver" {
     var pc = &conn.pc;
     defer conn.deinit();
 
+    const local_addr = std.Io.net.IpAddress{ .ip4 = .loopback(6000) };
+    try pc.addLocalCandidates(&.{local_addr}, 0);
+
     _ = try pc.addTrack(.initWithId("video", .video), null);
     _ = try pc.addTrack(.initWithId("audio", .audio), null);
     _ = try pc.addTrack(.initWithId("video", .video), null);
@@ -449,6 +452,39 @@ test "PeerConnection.createOffer: m-lines created for each transceiver" {
         try testing.expectEqual(idx, tr.sdp_mline_index.?);
         try testing.expect(media.mid != 0);
     }
+
+    const candidates = sdp_session.getMedias()[0].candidates;
+    try testing.expectEqual(1, candidates.len);
+    try testing.expectEqual(.udp, candidates[0].transport);
+    try testing.expect(candidates[0].address.eql(&local_addr));
+    try testing.expectEqual(pc.dtls_transport.ice_agent.gathering_state == .complete, medias[0].end_of_candidates);
+    for (medias[1..]) |media| try testing.expectEqual(0, media.candidates.len);
+}
+
+test "PeerConnection.createOffer: candidates skip rejected m-lines" {
+    var conn = try Connection.init(.{});
+    var pc = &conn.pc;
+    defer conn.deinit();
+
+    const local_addr = std.Io.net.IpAddress{ .ip4 = .loopback(6000) };
+    try pc.addLocalCandidates(&.{local_addr}, 0);
+
+    _ = try pc.addTrack(.initWithId("video", .video), null);
+    _ = try pc.addTrack(.initWithId("audio", .audio), null);
+
+    try pc.setLocalDescription(try pc.createOffer());
+    try pc.getRtpTransceiver(0).stop();
+
+    const offer = try pc.createOffer();
+    var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
+    defer sdp_session.deinit(testing.allocator);
+
+    const medias = sdp_session.getMedias();
+    try testing.expectEqual(2, medias.len);
+    try testing.expectEqual(0, medias[0].port);
+    try testing.expectEqual(0, medias[0].candidates.len);
+    try testing.expectEqual(1, medias[1].candidates.len);
+    try testing.expect(medias[1].candidates[0].address.eql(&local_addr));
 }
 
 test "PeerConnection.createOffer: enable_rtx synthesizes rtx codecs for video only" {
@@ -560,15 +596,56 @@ test "PeerConnection.createAnswer: answer to offer" {
     try pc.setLocalDescription(offer);
     try pc2.setRemoteDescription(offer, 0);
 
+    const local_addr = std.Io.net.IpAddress{ .ip4 = .loopback(6000) };
+    try pc2.addLocalCandidates(&.{local_addr}, 0);
+
     const answer = try pc2.createAnswer();
     try testing.expectEqual(.answer, answer.type);
 
     var sdp_session = try SDPSession.parse(testing.allocator, answer.sdp);
     defer sdp_session.deinit(testing.allocator);
 
-    try testing.expectEqual(2, sdp_session.getMedias().len);
-    try testing.expect(sdp_session.getMedias()[0].port != 0);
-    try testing.expect(sdp_session.getMedias()[1].port != 0);
+    const medias = sdp_session.getMedias();
+    try testing.expectEqual(2, medias.len);
+    try testing.expect(medias[0].port != 0);
+    try testing.expect(medias[1].port != 0);
+
+    try testing.expectEqual(1, medias[0].candidates.len);
+    try testing.expect(medias[0].candidates[0].address.eql(&local_addr));
+    try testing.expectEqual(pc2.dtls_transport.ice_agent.gathering_state == .complete, medias[0].end_of_candidates);
+    try testing.expectEqual(0, medias[1].candidates.len);
+}
+
+test "PeerConnection.createAnswer: candidates skip rejected m-lines" {
+    var conn = try Connection.init(.{});
+    var pc = &conn.pc;
+    defer conn.deinit();
+
+    var conn2 = try Connection.init(.{});
+    var pc2 = &conn2.pc;
+    defer conn2.deinit();
+
+    _ = try pc.addTrack(.initWithId("video", .video), null);
+    _ = try pc.addTrack(.initWithId("audio", .audio), null);
+
+    const offer = try pc.createOffer();
+    try pc.setLocalDescription(offer);
+    try pc2.setRemoteDescription(offer, 0);
+
+    const local_addr = std.Io.net.IpAddress{ .ip4 = .loopback(6000) };
+    try pc2.addLocalCandidates(&.{local_addr}, 0);
+    try pc2.getRtpTransceiver(0).stop();
+
+    const answer = try pc2.createAnswer();
+    var sdp_session = try SDPSession.parse(testing.allocator, answer.sdp);
+    defer sdp_session.deinit(testing.allocator);
+
+    const medias = sdp_session.getMedias();
+    try testing.expectEqual(2, medias.len);
+    try testing.expectEqual(0, medias[0].port);
+    try testing.expectEqual(0, medias[0].candidates.len);
+    try testing.expectEqual(1, medias[1].candidates.len);
+    try testing.expect(medias[1].candidates[0].address.eql(&local_addr));
 }
 
 test "PeerConnection.createAnswer: reject media in offer" {
