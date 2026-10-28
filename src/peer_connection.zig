@@ -35,8 +35,20 @@ pub const RtpTransceiverID = RtpTransceiver.TransceiverID;
 pub const RtpSenderID = RtpSender.SenderID;
 pub const RtpReceiverID = RtpReceiver.ReceiverID;
 
-pub const Error = error{
+/// Returned by every operation called after the PeerConnection has been closed.
+pub const ClosedError = error{
+    /// `close` was called or the connection state transitioned to `closed`.
     ConnectionClosed,
+};
+
+/// Returned by signaling operations.
+pub const SignalingError = ClosedError || error{
+    /// The operation is not allowed in the current signaling state, e.g. creating an answer
+    /// without a pending remote offer.
+    InvalidState,
+};
+
+pub const Error = ClosedError || error{
     /// Returned when an ssrc cannot be
     /// generated for a sender
     SsrcUnavailable,
@@ -48,8 +60,6 @@ pub const Error = error{
     InvalidAnswer,
     /// No local description has been set.
     NoLocalDescription,
-    /// A media section references a transceiver that does not exist.
-    UnknownTransceiver,
     /// The requested operation is not implemented.
     NotImplemented,
 } || std.mem.Allocator.Error;
@@ -312,18 +322,18 @@ pub fn addTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, stream_id: 
     };
 
     const tr_id = transceived_id orelse try pc.initTransceiverFromTrack(track, stream_id, true);
-    pc.checkNegotiationNeeded();
+    try pc.checkNegotiationNeeded();
     return pc.getRtpSender(tr_id);
 }
 
 /// Removes a track from the PeerConnection.
 ///
 /// Removing a track will update the transceiver's direction and stop sending media.
-pub fn removeTrack(pc: *PeerConnection, sender_id: RtpSenderID) error{ConnectionClosed}!void {
+pub fn removeTrack(pc: *PeerConnection, sender_id: RtpSenderID) (ClosedError || std.mem.Allocator.Error)!void {
     try pc.checkNotClosed();
     const tr = &pc.transceivers.items[sender_id];
     tr.removeTrack();
-    pc.checkNegotiationNeeded();
+    try pc.checkNegotiationNeeded();
 }
 
 pub fn getRtpSender(pc: *PeerConnection, id: RtpSenderID) RtpSender {
@@ -345,7 +355,7 @@ pub fn getRtpTransceiver(pc: *PeerConnection, id: RtpTransceiverID) RtpTransceiv
 pub fn addTransceiverFromTrack(pc: *PeerConnection, track: webrtc.MediaStreamTrack, init_config: RtpTransceiver.Init) Error!RtpTransceiver {
     const tr = try pc.initTransceiverFromTrack(track, init_config.stream_id, false);
     pc.transceivers.items[tr].direction = init_config.direction;
-    pc.checkNegotiationNeeded();
+    try pc.checkNegotiationNeeded();
     return pc.getRtpTransceiver(tr);
 }
 
@@ -369,14 +379,11 @@ pub fn addTransceiverFromKind(pc: *PeerConnection, kind: webrtc.TrackKind, init_
     try pc.generateSsrc(&tr.sender);
 
     pc.transceivers.appendAssumeCapacity(tr);
-    pc.checkNegotiationNeeded();
+    try pc.checkNegotiationNeeded();
     return pc.getRtpTransceiver(@intCast(pc.transceivers.items.len - 1));
 }
 
-pub const CreateOfferError = error{
-    ConnectionClosed,
-    MidOverflow,
-} || std.mem.Allocator.Error;
+pub const CreateOfferError = ClosedError || error{MidOverflow} || std.mem.Allocator.Error;
 
 /// Creates a new offer.
 ///
@@ -388,11 +395,7 @@ pub fn createOffer(pc: *PeerConnection) CreateOfferError!webrtc.SessionDescripti
     return if (first_offer) pc.createFirstOffer() else pc.createSubsequentOffer();
 }
 
-pub const CreateAnswerError = error{
-    ConnectionClosed,
-    InvalidState,
-    UnknownTransceiver,
-} || std.mem.Allocator.Error;
+pub const CreateAnswerError = SignalingError || std.mem.Allocator.Error;
 
 /// Creates an answer to a remote offer.
 ///
@@ -432,7 +435,7 @@ pub fn createAnswer(pc: *PeerConnection) CreateAnswerError!webrtc.SessionDescrip
             cloned.bundle_only = false;
             break :blk cloned;
         } else blk: {
-            const tr = pc.findTransceiverByMid(media.mid) orelse return error.UnknownTransceiver;
+            const tr = pc.findTransceiverByMid(media.mid).?;
             break :blk try tr.toSdpMediaAnswer(pc.allocator, media, pc.media_engine, pc.dtls_transport.ice_agent.getLocalCredentials());
         };
     }
@@ -446,11 +449,13 @@ pub fn createAnswer(pc: *PeerConnection) CreateAnswerError!webrtc.SessionDescrip
     return pc.last_answer.toSessionDescription();
 }
 
+pub const GetLocalDescriptionError = WriteLocalDescriptionError || std.mem.Allocator.Error;
+
 /// Get local description.
 ///
 /// This function allocates the sdp buffer inside the `webrtc.SessionDescription`. The caller owns
 /// the buffer.
-pub fn getLocalDescription(pc: *PeerConnection) !?webrtc.SessionDescription {
+pub fn getLocalDescription(pc: *PeerConnection) GetLocalDescriptionError!?webrtc.SessionDescription {
     const sess_desc = pc.pending_local_description orelse pc.local_description;
     if (sess_desc) |desc| {
         var w = Io.Writer.Allocating.init(pc.allocator);
@@ -472,10 +477,15 @@ pub fn getRemoteDescription(pc: *PeerConnection) Error!?webrtc.SessionDescriptio
     return if (sess_desc) |*desc| desc.toSessionDescription() else null;
 }
 
+pub const SetLocalDescriptionError = SignalingError || error{
+    NotImplemented,
+    TamperedOffer,
+} || std.mem.Allocator.Error;
+
 /// Apply a local description generated by `createOffer` or `createAnswer`.
 ///
 /// For more details [MDN RTCPeerConnection: setLocalDescription](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/setLocalDescription)
-pub fn setLocalDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescription) !void {
+pub fn setLocalDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescription) SetLocalDescriptionError!void {
     try pc.checkNotClosed();
 
     switch (session_desc.type) {
@@ -491,8 +501,13 @@ pub fn setLocalDescription(pc: *PeerConnection, session_desc: webrtc.SessionDesc
     }
 }
 
+pub const SetRemoteDescriptionError = SignalingError || error{
+    NotImplemented,
+    InvalidAnswer,
+} || SDPSession.Error;
+
 /// Apply a remote description received from the remote peer.
-pub fn setRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescription, now: i64) !void {
+pub fn setRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDescription, now: i64) SetRemoteDescriptionError!void {
     try pc.checkNotClosed();
 
     switch (session_desc.type) {
@@ -508,10 +523,12 @@ pub fn setRemoteDescription(pc: *PeerConnection, session_desc: webrtc.SessionDes
     }
 }
 
+pub const WriteLocalDescriptionError = ClosedError || error{NoLocalDescription} || Io.Writer.Error;
+
 /// Write the local description to a writer.
 ///
 /// This will include the ICE candidates if they have been gathered.
-pub fn writeLocalDescription(pc: *PeerConnection, w: *Io.Writer) !void {
+pub fn writeLocalDescription(pc: *PeerConnection, w: *Io.Writer) WriteLocalDescriptionError!void {
     try pc.checkNotClosed();
     const sess_desc = pc.pending_local_description orelse pc.local_description;
     return if (sess_desc) |*desc| try pc.writeSessionWithCandidates(&desc.session, w) else error.NoLocalDescription;
@@ -550,6 +567,7 @@ pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataCha
     return data_channel;
 }
 
+/// Internal, use `DataChannel.send` or `DataChannel.sendText` instead.
 pub fn sendDataChannelMessage(
     pc: *PeerConnection,
     channel_id: DataChannel.ChannelId,
@@ -567,6 +585,7 @@ pub fn sendDataChannelMessage(
     };
 }
 
+/// Internal, use `DataChannel.close` instead.
 pub fn closeDataChannel(pc: *PeerConnection, channel_id: DataChannel.ChannelId) std.mem.Allocator.Error!void {
     const dc = pc.getInternalDataChannel(channel_id);
     if (dc.ready_state == .closing or dc.ready_state == .closed) return;
@@ -580,19 +599,9 @@ pub fn closeDataChannel(pc: *PeerConnection, channel_id: DataChannel.ChannelId) 
     dc.ready_state = .closing;
 }
 
-fn getInternalDataChannel(pc: *PeerConnection, id: DataChannel.ChannelId) *InternalDataChannel {
-    std.debug.assert(id < pc.data_channels.items.len);
-    return &pc.data_channels.items[id];
-}
-
 pub fn close(pc: *PeerConnection) void {
     pc.dtls_transport.close();
     pc.closeDataChannels();
-}
-
-fn closeDataChannels(pc: *PeerConnection) void {
-    pc.sctp_transport.close();
-    for (pc.data_channels.items) |*dc| dc.ready_state = .closed;
 }
 
 pub const ReadResult = union(enum) {
@@ -679,30 +688,19 @@ pub const SctpMessageIterator = struct {
 ///
 /// `app_data` returns data channel messages, if any. Also it drives the SCTP transport state machine, not
 /// consuming the iterator will exercise backpressure on the SCTP association and data channels events will be stalled.
-pub fn handleRead(pc: *PeerConnection, message: webrtc.TransportMessage, now: i64) !ReadResult {
-    const data_event = (try pc.dtls_transport.handleRead(
-        message,
-        now,
-        pc.int_buffers[0..packet_size],
-    )) orelse {
-        @branchHint(.unlikely);
-        return .none;
-    };
-
-    return switch (data_event) {
-        .rtp => |data| try pc.handleRtpData(data),
-        .rtcp => |data| .{ .rtcp = .init(pc, data) },
-        .app_data => |data| blk: {
-            const sctp_it = try pc.sctp_transport.handleRead(data, now) orelse {
-                try pc.handleSctpTransportEvents();
-                break :blk .none;
-            };
-            break :blk .{ .app_data = .{ .sctp_it = sctp_it, .pc = pc } };
+///
+/// Invalid packets are discarded.
+pub fn handleRead(pc: *PeerConnection, message: webrtc.TransportMessage, now: i64) std.mem.Allocator.Error!ReadResult {
+    return pc.readMessage(message, now) catch |err| switch (err) {
+        error.OutOfMemory => |e| e,
+        else => {
+            Logger.debug("Discarding invalid packet: {}", .{err});
+            return .none;
         },
     };
 }
 
-pub fn handleTimeout(pc: *PeerConnection, now: i64, wall_clock_us: i64) !void {
+pub fn handleTimeout(pc: *PeerConnection, now: i64, wall_clock_us: i64) std.mem.Allocator.Error!void {
     try pc.dtls_transport.handleTimeout(now);
     try pc.sctp_transport.handleTimeout(now);
 
@@ -735,7 +733,7 @@ pub fn pollEvent(pc: *PeerConnection) ?Event {
                     }
 
                     if (pc.connection_state == .closed) {
-                        pc.setSignalingState(.closed);
+                        pc.signaling_state = .closed;
                         pc.closeDataChannels();
                     }
                     return .{ .connection_state = new_state };
@@ -748,7 +746,9 @@ pub fn pollEvent(pc: *PeerConnection) ?Event {
     return pc.events.popFront();
 }
 
-pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) !?webrtc.TransportMessage {
+pub const PollTransmitError = DtlsTransport.WriteRtpError || DtlsTransport.WriteRtcpError;
+
+pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) PollTransmitError!?webrtc.TransportMessage {
     const buffer2 = pc.int_buffers[packet_size .. 2 * packet_size];
     if (try pc.dtls_transport.pollTransmit(buffer)) |msg| return msg;
 
@@ -789,16 +789,68 @@ pub fn pollTimeout(pc: *PeerConnection) ?i64 {
     return if (deadline == std.math.maxInt(i64)) null else deadline;
 }
 
+pub const AddLocalCandidatesError = error{GatheringDone} || std.mem.Allocator.Error;
+
 /// Adds local host addresses. The first call starts ICE gathering.
 ///
 /// Gathering only completes once this is called with an empty list, so call
 /// `addLocalCandidates(&.{}, now)` after all addresses and ICE servers are added.
-pub fn addLocalCandidates(pc: *PeerConnection, addrs: []const Io.net.IpAddress, now: i64) !void {
+pub fn addLocalCandidates(pc: *PeerConnection, addrs: []const Io.net.IpAddress, now: i64) AddLocalCandidatesError!void {
     try pc.dtls_transport.addIceLocalAddrs(addrs, now);
 }
 
-pub fn addIceServer(pc: *PeerConnection, local_addr: Io.net.IpAddress, server: ice.agent.Server, now: i64) !void {
+pub const AddIceServerError = error{
+    GatheringDone,
+} || std.mem.Allocator.Error;
+
+pub fn addIceServer(pc: *PeerConnection, local_addr: Io.net.IpAddress, server: ice.agent.Server, now: i64) AddIceServerError!void {
     try pc.dtls_transport.addIceServer(local_addr, server, now);
+}
+
+/// Internal, called by `RtpTransceiver.stop`.
+pub fn checkNegotiationNeeded(pc: *PeerConnection) std.mem.Allocator.Error!void {
+    if (pc.signaling_state != .stable) return;
+
+    if (pc.isNegotiationNeeded()) {
+        if (pc.negotiation_needed) return;
+        try pc.events.pushBack(pc.allocator, .negotiation_needed);
+        pc.negotiation_needed = true;
+    } else {
+        pc.negotiation_needed = false;
+    }
+}
+
+fn getInternalDataChannel(pc: *PeerConnection, id: DataChannel.ChannelId) *InternalDataChannel {
+    std.debug.assert(id < pc.data_channels.items.len);
+    return &pc.data_channels.items[id];
+}
+
+fn closeDataChannels(pc: *PeerConnection) void {
+    pc.sctp_transport.close();
+    for (pc.data_channels.items) |*dc| dc.ready_state = .closed;
+}
+
+fn readMessage(pc: *PeerConnection, message: webrtc.TransportMessage, now: i64) !ReadResult {
+    const data_event = (try pc.dtls_transport.handleRead(
+        message,
+        now,
+        pc.int_buffers[0..packet_size],
+    )) orelse {
+        @branchHint(.unlikely);
+        return .none;
+    };
+
+    return switch (data_event) {
+        .rtp => |data| try pc.handleRtpData(data),
+        .rtcp => |data| .{ .rtcp = .init(pc, data) },
+        .app_data => |data| blk: {
+            const sctp_it = try pc.sctp_transport.handleRead(data, now) orelse {
+                try pc.handleSctpTransportEvents();
+                break :blk .none;
+            };
+            break :blk .{ .app_data = .{ .sctp_it = sctp_it, .pc = pc } };
+        },
+    };
 }
 
 fn deinitDescriptions(pc: *PeerConnection, descriptions: []const *?ParsedSessionDescription) void {
@@ -961,18 +1013,6 @@ fn initDataChannelMedia(pc: *PeerConnection, media: *SDPSession.Media) !void {
     pc.mid +%= 1;
 }
 
-pub fn checkNegotiationNeeded(pc: *PeerConnection) void {
-    if (pc.signaling_state != .stable) return;
-
-    if (pc.isNegotiationNeeded()) {
-        if (pc.negotiation_needed) return;
-        pc.negotiation_needed = true;
-        pc.events.pushBack(pc.allocator, .negotiation_needed) catch @panic("OOM");
-    } else {
-        pc.negotiation_needed = false;
-    }
-}
-
 fn isNegotiationNeeded(pc: *const PeerConnection) bool {
     // TODO: Check ice restart
     const local_desc = pc.local_description orelse return false;
@@ -1022,14 +1062,15 @@ fn writeSessionWithCandidates(pc: *PeerConnection, session: *const SDPSession, w
     try session.write(w);
 }
 
-fn setSignalingState(pc: *PeerConnection, state: SignalingState) void {
+fn setSignalingState(pc: *PeerConnection, state: SignalingState) std.mem.Allocator.Error!void {
     if (pc.signaling_state == state) return;
+    try pc.events.pushBack(pc.allocator, .{ .signaling_state = state });
     pc.signaling_state = state;
-    pc.events.pushBack(pc.allocator, .{ .signaling_state = state }) catch @panic("OOM");
 }
 
 fn applyLocalOffer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescription) !void {
     if (!std.mem.eql(u8, pc.last_offer.sdp, sess_desc.sdp)) return error.TamperedOffer;
+    try pc.events.ensureUnusedCapacity(pc.allocator, 1);
 
     const offer = pc.last_offer.session;
     for (offer.getMedias(), 0..) |*media, idx| {
@@ -1049,7 +1090,7 @@ fn applyLocalOffer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescript
     pc.last_offer = .empty(.offer);
 
     pc.mid +%= @intCast(offer.getMedias().len);
-    pc.setSignalingState(.have_local_offer);
+    try pc.setSignalingState(.have_local_offer);
 }
 
 fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescription) !void {
@@ -1079,7 +1120,7 @@ fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescrip
 
     pc.last_offer.deinit(pc.allocator);
     pc.pending_local_description = pc.last_answer;
-    pc.updateSignalingStateToStable();
+    try pc.updateSignalingStateToStable();
 }
 
 fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.SessionDescription, now: i64) !void {
@@ -1109,7 +1150,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
         var transceiver = blk: {
             switch (session_desc.type) {
                 .answer => {
-                    const tr = pc.findTransceiverByMediaIndex(idx) orelse return error.UnknownTransceiver;
+                    const tr = pc.findTransceiverByMediaIndex(idx) orelse return error.InvalidSDP;
                     break :blk tr;
                 },
                 .offer => {
@@ -1145,7 +1186,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
             const local_sdp = &pc.pending_local_description.?.session;
             const local_codecs = local_sdp.getMedias()[idx].rtp_codec_parameters;
             const remote_codecs = media.rtp_codec_parameters;
-            const codecs = try utils.intersectCodecs(remote_codecs, local_codecs);
+            const codecs = utils.intersectCodecs(remote_codecs, local_codecs) catch return error.InvalidSDP;
 
             try transceiver.sender.setCodecs(pc.allocator, pc.random, codecs.@"0", pc.nack_config.send_buffer_size);
             transceiver.receiver.setCodecs(codecs.@"1");
@@ -1173,6 +1214,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
         try pc.dtls_transport.applyIceAttributes(media, &remote_sdp.fingerprint, now);
     }
 
+    try pc.events.ensureUnusedCapacity(pc.allocator, track_events.items.len + 2);
     switch (session_desc.type) {
         .answer => {
             try pc.demuxer.updateMaps(&remote_sdp, pc.transceivers.items);
@@ -1180,17 +1222,16 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
             pc.maybeCloseSctpTransport(&remote_sdp);
 
             pc.pending_remote_description = .init(.answer, sdp_text, remote_sdp);
-            pc.updateSignalingStateToStable();
+            try pc.updateSignalingStateToStable();
         },
         .offer => {
             if (pc.pending_remote_description) |*desc| desc.deinit(pc.allocator);
             pc.pending_remote_description = .init(.offer, sdp_text, remote_sdp);
-            pc.setSignalingState(.have_remote_offer);
+            try pc.setSignalingState(.have_remote_offer);
         },
         else => {},
     }
 
-    try pc.events.ensureUnusedCapacity(pc.allocator, track_events.items.len);
     for (track_events.items) |event| {
         const receiver_id: RtpReceiverID = blk: {
             for (pc.transceivers.items, 0..) |*tr, idx| if (tr == event.transceiver) break :blk @intCast(idx);
@@ -1204,7 +1245,8 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
     }
 }
 
-fn updateSignalingStateToStable(pc: *PeerConnection) void {
+fn updateSignalingStateToStable(pc: *PeerConnection) std.mem.Allocator.Error!void {
+    try pc.events.ensureUnusedCapacity(pc.allocator, 2);
     pc.deinitDescriptions(&.{ &pc.local_description, &pc.remote_description });
 
     pc.local_description = pc.pending_local_description;
@@ -1216,10 +1258,10 @@ fn updateSignalingStateToStable(pc: *PeerConnection) void {
     pc.last_answer = .empty(.answer);
     pc.last_offer = .empty(.offer);
 
-    pc.setSignalingState(.stable);
+    try pc.setSignalingState(.stable);
 
     pc.negotiation_needed = false;
-    pc.checkNegotiationNeeded();
+    try pc.checkNegotiationNeeded();
 }
 
 fn findTransceiverByMediaIndex(pc: *PeerConnection, index: usize) ?*InternalRtpTransceiver {
@@ -1295,7 +1337,7 @@ fn handleRtpData(pc: *PeerConnection, data: []const u8) !ReadResult {
     const id: u32 = switch (pc.demuxer.getTransceiver(&packet)) {
         .transceiver => |id| id,
         .mid => |mid| blk: {
-            for (pc.transceivers.items, 0..) |tr, idx| if (tr.mid) |tr_mid| if (tr_mid == mid) {
+            for (pc.transceivers.items, 0..) |tr, idx| if (tr.mid) |tr_mid| if (tr_mid == mid and !tr.isStopped()) {
                 try pc.demuxer.cacheSsrc(packet.header.ssrc, @intCast(idx));
                 break :blk @intCast(idx);
             };

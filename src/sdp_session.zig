@@ -21,9 +21,13 @@ const sdp_header =
 ;
 
 pub const SDPError = error{
-    ParseError,
+    InvalidSDP,
     MissingBundleGroup,
-    InvalidAttribute,
+    MidAttributeRequired,
+    SctpPortRequired,
+    RtcpMuxRequired,
+    UnsupportedMediaType,
+    MismatchedCredentials,
 };
 
 pub const Error = SDPError || std.mem.Allocator.Error;
@@ -377,47 +381,18 @@ pub inline fn getMedias(session: *const SDPSession) []Media {
     return session.medias.items;
 }
 
-pub fn parse(allocator: std.mem.Allocator, data: []const u8) !SDPSession {
-    const session = sdp.Session.parse(data) catch return error.ParseError;
-    if (session.version != 0) return error.ParseError;
-
-    var it = session.attributeIterator();
-    var result: SDPSession = .empty;
-
-    while (try it.next()) |attr| switch (try attr.parse()) {
-        .fingerprint => |fp| switch (fp) {
-            .sha_256 => |v| result.fingerprint = v,
-            else => return error.ParseError,
-        },
-        .group => |group| switch (group.semantics) {
-            .BUNDLE => result.bundle = group.mids,
-            else => {},
-        },
-        .ice_lite => result.ice_lite = true,
-        else => {},
+pub fn parse(allocator: std.mem.Allocator, data: []const u8) Error!SDPSession {
+    return parseSession(allocator, data) catch |err| switch (err) {
+        error.OutOfMemory,
+        error.MissingBundleGroup,
+        error.MidAttributeRequired,
+        error.SctpPortRequired,
+        error.RtcpMuxRequired,
+        error.UnsupportedMediaType,
+        error.MismatchedCredentials,
+        => |e| e,
+        else => error.InvalidSDP,
     };
-
-    var medias: std.ArrayList(Media) = .empty;
-    errdefer {
-        for (medias.items) |*m| m.deinit(allocator);
-        medias.deinit(allocator);
-    }
-
-    var media_it = session.mediaIterator();
-    while (try media_it.next()) |media| {
-        var parsed_media = try Media.parse(allocator, media, &result.fingerprint);
-        errdefer parsed_media.deinit(allocator);
-        try medias.append(allocator, parsed_media);
-    }
-
-    for (medias.items) |*media| if (media.port != 0 and result.bundle.len == 0)
-        return error.MissingBundleGroup;
-
-    // TODO: check all media have different mid values
-    try validateIceCredentials(medias.items);
-
-    result.medias = medias;
-    return result;
 }
 
 pub fn deinit(s: *SDPSession, allocator: std.mem.Allocator) void {
@@ -469,6 +444,49 @@ pub fn clone(s: *const SDPSession, allocator: std.mem.Allocator) !SDPSession {
 pub fn getApplicationMedia(s: *const SDPSession) ?*const Media {
     for (s.getMedias()) |*m| if (m.isDataChannel()) return m;
     return null;
+}
+
+fn parseSession(allocator: std.mem.Allocator, data: []const u8) !SDPSession {
+    const session = sdp.Session.parse(data) catch return error.ParseError;
+    if (session.version != 0) return error.ParseError;
+
+    var it = session.attributeIterator();
+    var result: SDPSession = .empty;
+
+    while (try it.next()) |attr| switch (try attr.parse()) {
+        .fingerprint => |fp| switch (fp) {
+            .sha_256 => |v| result.fingerprint = v,
+            else => return error.ParseError,
+        },
+        .group => |group| switch (group.semantics) {
+            .BUNDLE => result.bundle = group.mids,
+            else => {},
+        },
+        .ice_lite => result.ice_lite = true,
+        else => {},
+    };
+
+    var medias: std.ArrayList(Media) = .empty;
+    errdefer {
+        for (medias.items) |*m| m.deinit(allocator);
+        medias.deinit(allocator);
+    }
+
+    var media_it = session.mediaIterator();
+    while (try media_it.next()) |media| {
+        var parsed_media = try Media.parse(allocator, media, &result.fingerprint);
+        errdefer parsed_media.deinit(allocator);
+        try medias.append(allocator, parsed_media);
+    }
+
+    for (medias.items) |*media| if (media.port != 0 and result.bundle.len == 0)
+        return error.MissingBundleGroup;
+
+    // TODO: check all media have different mid values
+    try validateIceCredentials(medias.items);
+
+    result.medias = medias;
+    return result;
 }
 
 fn writeFingerprint(s: *const SDPSession, w: *std.Io.Writer) !void {

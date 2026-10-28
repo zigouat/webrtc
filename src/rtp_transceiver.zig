@@ -13,7 +13,7 @@ pub const TransceiverID = u32;
 pub const Direction = InternalRtpTransceiver.Direction;
 pub const Init = InternalRtpTransceiver.Init;
 
-pub const StopError = error{ConnectionClosed};
+pub const StopError = PeerConnection.ClosedError || std.mem.Allocator.Error;
 
 id: TransceiverID,
 pc: *PeerConnection,
@@ -49,7 +49,7 @@ pub fn stop(transceiver: RtpTransceiver) StopError!void {
     const pc = transceiver.pc;
     if (pc.connection_state == .closed) return error.ConnectionClosed;
     transceiver.internal().stop();
-    pc.checkNegotiationNeeded();
+    try pc.checkNegotiationNeeded();
 }
 
 fn internal(self: RtpTransceiver) *InternalRtpTransceiver {

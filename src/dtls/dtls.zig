@@ -221,6 +221,7 @@ pub const Session = struct {
                     else => |err_code| {
                         m.mbedtls_strerror(err_code, out_buffer.ptr, out_buffer.len);
                         Logger.err("Error: {s}", .{out_buffer});
+                        session.setConnectionState(.failed);
                         return error.HandshakeFailed;
                     },
                 }
@@ -270,6 +271,10 @@ pub const Session = struct {
     pub fn close(session: *Self) void {
         session.close_pending = true;
         session.setConnectionState(.closed);
+    }
+
+    pub fn fail(session: *Self) void {
+        if (session.connection_state != .failed) session.setConnectionState(.failed);
     }
 
     pub fn pollEvent(session: *Self) ?Event {

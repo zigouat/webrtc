@@ -471,7 +471,7 @@ test "parse: data channel media requires webrtc-datachannel format" {
         \\
     ;
 
-    try testing.expectError(error.InvalidMedia, SDPSession.parse(testing.allocator, sdp));
+    try testing.expectError(error.InvalidSDP, SDPSession.parse(testing.allocator, sdp));
 }
 
 test "parse: data channel media requires mid" {
@@ -743,7 +743,7 @@ test "SDPSession.parse: malformed media" {
         \\
     ;
 
-    try testing.expectError(error.InvalidMedia, SDPSession.parse(testing.allocator, sdp));
+    try testing.expectError(error.InvalidSDP, SDPSession.parse(testing.allocator, sdp));
 }
 
 test "SDPSession.parse: reject oversized track id" {
