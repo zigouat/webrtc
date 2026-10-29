@@ -86,13 +86,14 @@ pub fn add(send_buffer: *SendBuffer, packet: *const rtp.Packet) void {
     send_buffer.entries[index] = .from(packet);
 }
 
-pub fn get(send_buffer: *SendBuffer, seq_number: u16, buffer: []u8) ?rtp.Packet {
+pub fn get(send_buffer: *SendBuffer, seq_number: u16, buffer: []u8) error{WriteFailed}!?rtp.Packet {
     const index = seq_number & (send_buffer.size - 1);
     const entry = send_buffer.entries[index];
 
     if (send_buffer.highest_seq_number -% seq_number >= send_buffer.size) return null;
     if (!entry.available) return null;
 
+    if (entry.payload_len > buffer.len) return error.WriteFailed;
     const offset = @as(usize, index) * send_buffer.max_rtp_payload;
     @memcpy(buffer[0..entry.payload_len], send_buffer.buffer[offset .. offset + entry.payload_len]);
     return rtp.Packet{
@@ -133,7 +134,7 @@ test "add and get: roundtrips a single packet" {
     send_buffer.add(&testPacket(0, "abc"));
 
     var buf: [16]u8 = undefined;
-    const got = send_buffer.get(0, &buf).?;
+    const got = (try send_buffer.get(0, &buf)).?;
     try testing.expectEqualSlices(u8, "abc", got.payload[0..3]);
 }
 
@@ -144,7 +145,7 @@ test "get: returns null for a sequence number never added" {
     send_buffer.add(&testPacket(0, "abc"));
 
     var buf: [16]u8 = undefined;
-    try testing.expectEqual(null, send_buffer.get(1, &buf));
+    try testing.expectEqual(null, try send_buffer.get(1, &buf));
 }
 
 test "get: returns null for a sequence number newer than the highest added" {
@@ -154,7 +155,7 @@ test "get: returns null for a sequence number newer than the highest added" {
     send_buffer.add(&testPacket(5, "abc"));
 
     var buf: [16]u8 = undefined;
-    try testing.expectEqual(null, send_buffer.get(6, &buf));
+    try testing.expectEqual(null, try send_buffer.get(6, &buf));
 }
 
 test "add: duplicate sequence number does not overwrite existing data" {
@@ -165,7 +166,7 @@ test "add: duplicate sequence number does not overwrite existing data" {
     send_buffer.add(&testPacket(0, "xyz"));
 
     var buf: [16]u8 = undefined;
-    const got = send_buffer.get(0, &buf).?;
+    const got = (try send_buffer.get(0, &buf)).?;
     try testing.expectEqualSlices(u8, "abc", got.payload[0..3]);
 }
 
@@ -179,7 +180,7 @@ test "add: out-of-order packet is stored without advancing the highest sequence 
     try testing.expectEqual(5, send_buffer.highest_seq_number);
 
     var buf: [16]u8 = undefined;
-    const got = send_buffer.get(4, &buf).?;
+    const got = (try send_buffer.get(4, &buf)).?;
     try testing.expectEqualSlices(u8, "first", got.payload[0..5]);
 }
 
@@ -193,7 +194,7 @@ test "add: advancing past the window evicts old entries" {
     try testing.expectEqual(7, send_buffer.highest_seq_number);
     var buf: [16]u8 = undefined;
     for (0..7) |seq| {
-        try testing.expectEqual(null, send_buffer.get(@intCast(seq), &buf));
+        try testing.expectEqual(null, try send_buffer.get(@intCast(seq), &buf));
     }
 }
 
@@ -207,7 +208,7 @@ test "add: sequence number wraparound is treated as newer" {
     try testing.expectEqual(1, send_buffer.highest_seq_number);
 
     var buf: [16]u8 = undefined;
-    const got = send_buffer.get(1, &buf).?;
+    const got = (try send_buffer.get(1, &buf)).?;
     try testing.expectEqualSlices(u8, "xyz", got.payload[0..3]);
 }
 
@@ -221,7 +222,7 @@ test "add and get: preserves timestamp and marker" {
     send_buffer.add(&packet);
 
     var buf: [16]u8 = undefined;
-    const got = send_buffer.get(0, &buf).?;
+    const got = (try send_buffer.get(0, &buf)).?;
     try testing.expectEqual(12345, got.header.timestamp);
     try testing.expectEqual(true, got.header.marker);
 }

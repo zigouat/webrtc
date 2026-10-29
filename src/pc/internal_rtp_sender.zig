@@ -15,7 +15,7 @@ const Mid = @import("../mid.zig");
 pub const AllocError = std.mem.Allocator.Error;
 /// The sender has no negotiated track or the transceiver cannot send.
 pub const StateError = error{ NoAssociatedTrack, InvalidDirection };
-pub const WriteError = StateError || Io.Writer.Error;
+pub const WriteError = StateError || Io.Writer.Error || error{PayloadTooLarge};
 pub const PacketizeError = rtp.Packetizer.Error;
 
 const RtpHeaderExtensions = struct {
@@ -212,6 +212,7 @@ pub const SamplePacketizerIterator = struct {
     }
 
     pub fn next(it: *SamplePacketizerIterator, buffer: []u8, now_us: i64) PacketizeError!?[]const u8 {
+        if (buffer.len < constants.rtp_default_header_size) return error.WriteFailed;
         const header_size = constants.rtp_default_header_size + try it.rtp_sender.writeHeaderExtensions(
             it.mid,
             buffer[constants.rtp_default_header_size..],
@@ -232,12 +233,17 @@ pub fn handleMediaPacketWrite(sender: *InternalRtpSender, sample: *const MediaPa
 }
 
 pub fn handleWrite(sender: *InternalRtpSender, packet: *const rtp.Packet, buffer: []u8, now_us: i64) WriteError![]const u8 {
+    if (packet.payload.len > constants.max_rtp_payload_size) return error.PayloadTooLarge;
+    if (buffer.len < constants.rtp_default_header_size + packet.payload.len) return error.WriteFailed;
     const tr = try checkAndGetTransceiver(sender);
 
     const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(
         tr.mid.?,
         buffer[constants.rtp_default_header_size..],
     );
+
+    const packet_size = header_size + packet.payload.len;
+    if (packet_size > buffer.len) return error.WriteFailed;
 
     const header: rtp.Packet.Header = .{
         .extension = header_size != constants.rtp_default_header_size,
@@ -250,7 +256,7 @@ pub fn handleWrite(sender: *InternalRtpSender, packet: *const rtp.Packet, buffer
     };
 
     std.mem.writeInt(u96, buffer[0..constants.rtp_default_header_size], @bitCast(header), .big);
-    @memcpy(buffer[header_size .. packet.payload.len + header_size], packet.payload);
+    @memcpy(buffer[header_size..packet_size], packet.payload);
 
     const new_packet: rtp.Packet = .{
         .header = header,
@@ -259,7 +265,7 @@ pub fn handleWrite(sender: *InternalRtpSender, packet: *const rtp.Packet, buffer
 
     sender.report.recordPacket(&new_packet, now_us);
     if (sender.send_buffer) |*send_buffer| send_buffer.add(&new_packet);
-    return buffer[0 .. header_size + packet.payload.len];
+    return buffer[0..packet_size];
 }
 
 pub fn writeRtcpSenderReport(sender: *InternalRtpSender, timestamp: i64, buffer: []u8) []const u8 {
@@ -307,15 +313,21 @@ pub fn nextNack(sender: *InternalRtpSender, buffer: []u8) (AllocError || Io.Writ
     const is_rtx = sender.rtx_config != null;
     const tr = checkAndGetTransceiver(sender) catch return null;
 
+    if (buffer.len < constants.rtp_default_header_size) return error.WriteFailed;
+
     while (true) {
-        const seq = sender.nacks.popFront() orelse return null;
+        const seq = sender.nacks.front() orelse return null;
         const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(
             tr.mid.?,
             buffer[constants.rtp_default_header_size..],
         );
         // RFC 4588: RTX payload is the original sequence number followed by the original payload.
         const payload_offset = header_size + @as(usize, if (is_rtx) 2 else 0);
-        const packet = send_buffer.get(seq, buffer[payload_offset..]) orelse continue;
+        if (buffer.len < payload_offset) return error.WriteFailed;
+        const packet = try send_buffer.get(seq, buffer[payload_offset..]) orelse {
+            _ = sender.nacks.popFront();
+            continue;
+        };
 
         const header: rtp.Packet.Header = .{
             .extension = header_size != constants.rtp_default_header_size,
@@ -333,6 +345,8 @@ pub fn nextNack(sender: *InternalRtpSender, buffer: []u8) (AllocError || Io.Writ
         }
         const payload_len = if (is_rtx) 2 + packet.payload.len else packet.payload.len;
         std.mem.writeInt(u96, buffer[0..constants.rtp_default_header_size], @bitCast(header), .big);
+
+        _ = sender.nacks.popFront();
         return buffer[0 .. header_size + payload_len];
     }
 }
@@ -552,6 +566,97 @@ test "InternalRtpSender: record packets" {
     try testing.expectEqual(6000, report.timestamp);
     try testing.expectEqual(3, report.packet_count);
     try testing.expectEqual(payload.len * 3, report.octet_count);
+}
+
+test "InternalRtpSender.handleWrite: rejects oversized payloads and short buffers without recording" {
+    var tr = testTransceiver(.sendrecv);
+    defer tr.sender.deinit(testing.allocator);
+    tr.mid = 0;
+    tr.sender.track = .{ .id = @splat(0), .kind = .video, .stream_id = null, .muted = false };
+
+    const codecs = [_]webrtc.RtpCodecParameters{
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } } },
+    };
+    try tr.sender.setCodecs(testing.allocator, prng.random(), &codecs, 16);
+
+    var payload: [constants.max_rtp_payload_size + 1]u8 = @splat(0xAB);
+    var packet: rtp.Packet = .{
+        .header = .{ .ssrc = 0, .timestamp = 1000, .sequence_number = 10, .payload_type = 96, .marker = false, .extension = false, .padding = false },
+        .payload = &payload,
+    };
+
+    var buffer: [constants.max_packet_size]u8 = undefined;
+    try testing.expectError(error.PayloadTooLarge, tr.sender.handleWrite(&packet, &buffer, 0));
+
+    packet.payload = payload[0..constants.max_rtp_payload_size];
+    const packet_size = constants.rtp_default_header_size + packet.payload.len;
+    try testing.expectError(error.WriteFailed, tr.sender.handleWrite(&packet, buffer[0 .. constants.rtp_default_header_size - 1], 0));
+    try testing.expectError(error.WriteFailed, tr.sender.handleWrite(&packet, buffer[0 .. packet_size - 1], 0));
+    try testing.expectEqual(null, tr.sender.report.last_sequence_number);
+    try testing.expectEqual(null, try tr.sender.send_buffer.?.get(10, &buffer));
+
+    const written = try tr.sender.handleWrite(&packet, buffer[0..packet_size], 0);
+    try testing.expectEqual(packet_size, written.len);
+    try testing.expectEqual(10, tr.sender.report.last_sequence_number);
+}
+
+test "InternalRtpSender.SamplePacketizerIterator: short buffers fail without recording" {
+    var tr = testTransceiver(.sendrecv);
+    defer tr.sender.deinit(testing.allocator);
+    tr.mid = 0;
+    tr.sender.track = .{ .id = @splat(0), .kind = .video, .stream_id = null, .muted = false };
+
+    const codecs = [_]webrtc.RtpCodecParameters{
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } } },
+    };
+    try tr.sender.setCodecs(testing.allocator, prng.random(), &codecs, 16);
+
+    const data: [100]u8 = @splat(0xAB);
+    const sample: MediaPacket = .{ .data = &data };
+    var it = try tr.sender.handleMediaPacketWrite(&sample);
+
+    var buffer: [constants.max_packet_size]u8 = undefined;
+    const packet_size = constants.rtp_default_header_size + 1 + data.len;
+    try testing.expectError(error.WriteFailed, it.next(buffer[0 .. constants.rtp_default_header_size - 1], 0));
+    try testing.expectError(error.WriteFailed, it.next(buffer[0 .. packet_size - 1], 0));
+    try testing.expectEqual(null, tr.sender.report.last_sequence_number);
+
+    const packet = (try it.next(buffer[0..packet_size], 0)).?;
+    try testing.expectEqual(packet_size, packet.len);
+    try testing.expectEqual(null, try it.next(&buffer, 0));
+}
+
+test "InternalRtpSender.nextNack: skips unknown packets and keeps the nack on a short buffer" {
+    var tr = testTransceiver(.sendrecv);
+    defer tr.sender.deinit(testing.allocator);
+    tr.mid = 0;
+    tr.sender.track = .{ .id = @splat(0), .kind = .video, .stream_id = null, .muted = false };
+
+    const codecs = [_]webrtc.RtpCodecParameters{
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } } },
+    };
+    try tr.sender.setCodecs(testing.allocator, prng.random(), &codecs, 16);
+
+    const payload: [100]u8 = @splat(0xAB);
+    const packet: rtp.Packet = .{
+        .header = .{ .ssrc = 0, .timestamp = 1000, .sequence_number = 10, .payload_type = 96, .marker = false, .extension = false, .padding = false },
+        .payload = &payload,
+    };
+    var buffer: [constants.max_packet_size]u8 = undefined;
+    _ = try tr.sender.handleWrite(&packet, &buffer, 0);
+
+    try tr.sender.nacks.pushBack(testing.allocator, 9);
+    try tr.sender.nacks.pushBack(testing.allocator, 10);
+
+    const packet_size = constants.rtp_default_header_size + payload.len;
+    try testing.expectError(error.WriteFailed, tr.sender.nextNack(buffer[0 .. packet_size - 1]));
+    try testing.expectEqual(1, tr.sender.nacks.len);
+    try testing.expectEqual(10, tr.sender.nacks.front().?);
+
+    const retransmit = (try tr.sender.nextNack(buffer[0..packet_size])).?;
+    try testing.expectEqual(packet_size, retransmit.len);
+    try testing.expectEqualSlices(u8, &payload, retransmit[constants.rtp_default_header_size..]);
+    try testing.expectEqual(null, try tr.sender.nextNack(&buffer));
 }
 
 test "InternalRtpSender: convert microseconds to ntp" {

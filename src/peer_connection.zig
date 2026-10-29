@@ -756,7 +756,7 @@ pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) PollTransmitErr
         return try pc.dtls_transport.writeAppData(sctp_data, buffer);
     }
 
-    const payload = try pc.dtls_transport.payloadBuffer(buffer);
+    const payload = try pc.dtls_transport.rtpPayloadBuffer(buffer);
 
     if (pc.sender_report_it) |*it| {
         if (it.next(pc, payload)) |data| return try pc.dtls_transport.writeRtcp(buffer, data.len);
