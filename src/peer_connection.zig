@@ -746,7 +746,7 @@ pub fn pollEvent(pc: *PeerConnection) ?Event {
     return pc.events.popFront();
 }
 
-pub const PollTransmitError = DtlsTransport.WriteRtpError || DtlsTransport.WriteRtcpError;
+pub const PollTransmitError = DtlsTransport.WriteMediaError;
 
 pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) PollTransmitError!?webrtc.TransportMessage {
     const buffer2 = pc.int_buffers[packet_size .. 2 * packet_size];
@@ -799,9 +799,7 @@ pub fn addLocalCandidates(pc: *PeerConnection, addrs: []const Io.net.IpAddress, 
     try pc.dtls_transport.addIceLocalAddrs(addrs, now);
 }
 
-pub const AddIceServerError = error{
-    GatheringDone,
-} || std.mem.Allocator.Error;
+pub const AddIceServerError = ice.agent.AddServerError;
 
 pub fn addIceServer(pc: *PeerConnection, local_addr: Io.net.IpAddress, server: ice.agent.Server, now: i64) AddIceServerError!void {
     try pc.dtls_transport.addIceServer(local_addr, server, now);

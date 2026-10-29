@@ -16,38 +16,10 @@ pub const AllocError = std.mem.Allocator.Error;
 /// The sender has no negotiated track or the transceiver cannot send.
 pub const StateError = error{ NoAssociatedTrack, InvalidDirection };
 pub const WriteError = StateError || Io.Writer.Error;
-pub const PacketizeError = Io.Writer.Error || Io.Reader.Error;
+pub const PacketizeError = rtp.Packetizer.Error;
 
 const RtpHeaderExtensions = struct {
     mid: u16 = 0,
-};
-
-const Packetizer = union(enum) {
-    vp8: rtp.packetizer.VP8,
-    h264: rtp.packetizer.H264,
-    opus: rtp.packetizer.Opus,
-    none: void,
-
-    fn init(r: std.Random, ssrc: u32, codec: webrtc.RtpCodecParameters) @This() {
-        var rtp_config = rtp.packetizer.RtpConfig{
-            .payload_type = 0,
-            .seq_number = r.uintAtMost(u16, std.math.maxInt(u16)),
-            .ssrc = r.uintAtMost(u32, std.math.maxInt(u32)),
-        };
-
-        rtp_config.payload_type = @intCast(codec.payload_type);
-        rtp_config.ssrc = ssrc;
-
-        if (std.mem.eql(u8, codec.rtp_codec.mime_type, webrtc.MimeType.VP8)) {
-            return .{ .vp8 = .init(rtp_config) };
-        } else if (std.mem.eql(u8, codec.rtp_codec.mime_type, webrtc.MimeType.H264)) {
-            return .{ .h264 = .init(rtp_config) };
-        } else if (std.mem.eql(u8, codec.rtp_codec.mime_type, webrtc.MimeType.Opus)) {
-            return .{ .opus = .init(rtp_config) };
-        }
-
-        return .none;
-    }
 };
 
 const RtxConfig = struct {
@@ -96,7 +68,7 @@ header_extensions: RtpHeaderExtensions,
 ssrc: u32,
 rtx_ssrc: u32,
 report: Report,
-packetizer: Packetizer,
+packetizer: rtp.Packetizer,
 rtx_config: ?RtxConfig,
 send_buffer: ?SendBuffer,
 /// Store the nacks after processing NACK rtcp packet.
@@ -111,7 +83,7 @@ pub fn init(track: ?MediaStreamTrack) InternalRtpSender {
         .ssrc = 0,
         .rtx_ssrc = 0,
         .report = .empty,
-        .packetizer = .none,
+        .packetizer = undefined,
         .rtx_config = null,
         .send_buffer = null,
         .nacks = .empty,
@@ -133,7 +105,7 @@ pub fn reset(sender: *InternalRtpSender, allocator: std.mem.Allocator) void {
     while (sender.nacks.popFront()) |_| {}
     sender.header_extensions = .{};
     sender.report = .empty;
-    sender.packetizer = .none;
+    sender.packetizer = undefined;
     sender.rtx_config = null;
     sender.ssrc = 0;
     sender.rtx_ssrc = 0;
@@ -197,7 +169,23 @@ pub fn setCodecs(
         .sequence_number = 0,
         .payload_type = @intCast(rc.payload_type),
     } else null;
-    sender.packetizer = Packetizer.init(r, sender.ssrc, chosen_codec);
+
+    const mime = chosen_codec.rtp_codec.mime_type;
+    const codec: rtp.Packetizer.Codec = if (std.mem.eql(u8, mime, webrtc.MimeType.VP8))
+        .vp8
+    else if (std.mem.eql(u8, mime, webrtc.MimeType.H264))
+        .h264
+    else if (std.mem.eql(u8, mime, webrtc.MimeType.Opus))
+        .opus
+    else
+        unreachable;
+
+    sender.packetizer = rtp.Packetizer.init(codec, .{
+        .payload_type = @intCast(chosen_codec.payload_type),
+        .seq_number = r.uintAtMost(u16, std.math.maxInt(u16)),
+        .ssrc = sender.ssrc,
+        .fragment_size = constants.max_rtp_payload_size,
+    });
     sender.codec = chosen_codec;
 }
 
@@ -211,28 +199,14 @@ pub fn setHeaderExtensions(sender: *InternalRtpSender, extensions: []const webrt
 
 pub const SamplePacketizerIterator = struct {
     rtp_sender: *InternalRtpSender,
-    packet_it: PacketIterator,
+    packet_it: rtp.Packetizer.Iterator,
     mid: Mid.Int,
-
-    const PacketIterator = union(enum) {
-        vp8: rtp.packetizer.VP8.Iterator,
-        h264: rtp.packetizer.H264.Iterator,
-        opus: rtp.packetizer.Opus.Iterator,
-    };
 
     pub fn init(sender: *InternalRtpSender, media_packet: *const MediaPacket) StateError!SamplePacketizerIterator {
         const tr = try sender.checkAndGetTransceiver();
-
-        const packet_it = switch (sender.packetizer) {
-            .vp8 => |*p| PacketIterator{ .vp8 = p.packetize(media_packet) },
-            .h264 => |*p| PacketIterator{ .h264 = p.packetize(media_packet) },
-            .opus => |*p| PacketIterator{ .opus = p.packetize(media_packet) },
-            else => unreachable,
-        };
-
         return .{
             .rtp_sender = sender,
-            .packet_it = packet_it,
+            .packet_it = sender.packetizer.packetize(media_packet),
             .mid = tr.mid.?,
         };
     }
@@ -243,13 +217,7 @@ pub const SamplePacketizerIterator = struct {
             buffer[constants.rtp_default_header_size..],
         );
 
-        const rtp_buffer = buffer[0 .. header_size + constants.max_rtp_payload_size];
-        var rtp_packet = switch (it.packet_it) {
-            .vp8 => |*packet_it| packet_it.next(rtp_buffer[header_size..]),
-            .h264 => |*packet_it| try packet_it.next(rtp_buffer[header_size..]),
-            .opus => |*packet_it| packet_it.next(rtp_buffer[header_size..]),
-        } orelse return null;
-
+        var rtp_packet = try it.packet_it.next(buffer[header_size..]) orelse return null;
         rtp_packet.header.extension = header_size != constants.rtp_default_header_size;
         std.mem.writeInt(u96, buffer[0..constants.rtp_default_header_size], @bitCast(rtp_packet.header), .big);
 
@@ -432,18 +400,7 @@ test "InternalRtpSender.setCodecs: sets codecs and initializes the packetizer fo
 
     try testing.expectEqual(1, tr.sender.codecs.len);
     try testing.expectEqual(96, tr.sender.codec.?.payload_type);
-    try testing.expectEqual(.vp8, std.meta.activeTag(tr.sender.packetizer));
-}
-
-test "InternalRtpSender.setCodecs: unknown mime type leaves the packetizer as none" {
-    var tr = testTransceiver(null);
-    const codecs = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = "video/unknown", .clock_rate = 90_000 } },
-    };
-
-    try tr.sender.setCodecs(testing.allocator, prng.random(), &codecs, 16);
-
-    try testing.expectEqual(.none, std.meta.activeTag(tr.sender.packetizer));
+    try testing.expectEqual(.vp8, tr.sender.packetizer.codec);
 }
 
 test "InternalRtpSender.setCodecs: enables the send buffer when the transceiver can send and rtx+nack are negotiated" {
@@ -513,7 +470,7 @@ test "InternalRtpSender.setCodecs: ignores the codec list on subsequent calls, k
 
     try testing.expectEqual(1, tr.sender.codecs.len);
     try testing.expectEqual(96, tr.sender.codec.?.payload_type);
-    try testing.expectEqual(.vp8, std.meta.activeTag(tr.sender.packetizer));
+    try testing.expectEqual(.vp8, tr.sender.packetizer.codec);
 }
 
 test "InternalRtpSender.setHeaderExtensions: picks the mid extension id, ignores others" {

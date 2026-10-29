@@ -9,7 +9,7 @@ const RtpReceiver = @This();
 
 pub const ReceiverID = u32;
 
-pub const SendPliError = DtlsTransport.WriteRtcpError;
+pub const SendPliError = DtlsTransport.WriteMediaError;
 
 id: ReceiverID,
 pc: *PeerConnection,

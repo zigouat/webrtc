@@ -95,6 +95,7 @@ pub const Session = struct {
 
     direct_out: ?[]u8,
     direct_out_len: usize,
+    write_failed: bool,
 
     handshake_needed: bool,
     close_pending: bool,
@@ -116,6 +117,7 @@ pub const Session = struct {
         session.events_out = .empty;
         session.direct_out = null;
         session.direct_out_len = 0;
+        session.write_failed = false;
         session.handshake_needed = false;
         session.close_pending = false;
 
@@ -253,10 +255,15 @@ pub const Session = struct {
         }
     }
 
-    pub fn handleWrite(session: *Self, data: []const u8, out_buffer: []u8) usize {
+    /// Bytes a record adds to the data passed to `handleWrite`.
+    pub fn recordOverhead(session: *const Self) usize {
+        return @intCast(m.mbedtls_ssl_get_record_expansion(&session.ssl));
+    }
+
+    pub fn handleWrite(session: *Self, data: []const u8, out_buffer: []u8) error{WriteFailed}!usize {
         std.debug.assert(session.connection_state == .connected);
         std.debug.assert(data.len <= max_write_size);
-        std.debug.assert(out_buffer.len >= dtls_mtu);
+        if (out_buffer.len < data.len + session.recordOverhead()) return error.WriteFailed;
 
         session.direct_out = out_buffer;
         session.direct_out_len = 0;
@@ -281,9 +288,11 @@ pub const Session = struct {
         return session.events_out.popFront();
     }
 
-    pub fn pollTransmit(session: *Self, out_buffer: []u8) ?[]const u8 {
+    /// Returns `error.WriteFailed` when the next datagram doesn't fit `out_buffer`, it's kept for the next call.
+    pub fn pollTransmit(session: *Self, out_buffer: []u8) error{WriteFailed}!?[]const u8 {
         session.direct_out = out_buffer;
         session.direct_out_len = 0;
+        session.write_failed = false;
         defer session.direct_out = null;
 
         if (session.close_pending) {
@@ -301,6 +310,7 @@ pub const Session = struct {
             else => session.handshake_needed = false,
         };
 
+        if (session.write_failed) return error.WriteFailed;
         if (session.direct_out_len == 0) return null;
         return out_buffer[0..session.direct_out_len];
     }
@@ -391,7 +401,11 @@ pub const Session = struct {
         const session: *Self = @ptrCast(@alignCast(ctx.?));
 
         const dest = session.direct_out orelse return m.MBEDTLS_ERR_SSL_WANT_WRITE;
-        if (session.direct_out_len != 0 or len > dest.len) return m.MBEDTLS_ERR_SSL_WANT_WRITE;
+        if (session.direct_out_len != 0) return m.MBEDTLS_ERR_SSL_WANT_WRITE;
+        if (len > dest.len) {
+            session.write_failed = true;
+            return m.MBEDTLS_ERR_SSL_WANT_WRITE;
+        }
 
         @memcpy(dest[0..len], buf[0..len]);
         session.direct_out_len = len;
@@ -584,11 +598,11 @@ fn driveHandshake(peer1: *Session, peer2: *Session) !void {
     while (peer1.connection_state != .connected or peer2.connection_state != .connected) {
         var progressed = false;
 
-        while (peer2.pollTransmit(&out)) |dgram| {
+        while (try peer2.pollTransmit(&out)) |dgram| {
             _ = try peer1.handleRead(dgram, now, &buf);
             progressed = true;
         }
-        while (peer1.pollTransmit(&out)) |dgram| {
+        while (try peer1.pollTransmit(&out)) |dgram| {
             _ = try peer2.handleRead(dgram, now, &buf);
             progressed = true;
         }
@@ -642,11 +656,11 @@ test "Dtls session: server resends final flight after it got lost" {
         if (now > 60_000) return error.HandshakeNotCompleted;
         var progressed = false;
 
-        while (client.pollTransmit(&out)) |dgram| {
+        while (try client.pollTransmit(&out)) |dgram| {
             _ = try server.handleRead(dgram, now, &buf);
             progressed = true;
         }
-        while (server.pollTransmit(&out)) |dgram| {
+        while (try server.pollTransmit(&out)) |dgram| {
             progressed = true;
             if (server.connection_state == .connected and !client_retransmitted) {
                 dropped += 1;
@@ -704,7 +718,7 @@ test "Dtls session: handshake failed (wrong fingerprint)" {
     var buf: [1500]u8 = undefined;
     var out: [1500]u8 = undefined;
     while (true) {
-        if (peer2.pollTransmit(&out)) |dgram| {
+        if (try peer2.pollTransmit(&out)) |dgram| {
             if (peer1.handleRead(dgram, now, &buf)) |_| {} else |err| {
                 try testing.expectEqual(error.X509Error, err);
                 try testing.expect(peer1.connection_state == .failed);
@@ -712,7 +726,7 @@ test "Dtls session: handshake failed (wrong fingerprint)" {
             }
             continue;
         }
-        if (peer1.pollTransmit(&out)) |dgram| {
+        if (try peer1.pollTransmit(&out)) |dgram| {
             if (peer2.handleRead(dgram, now, &buf)) |_| {} else |err| {
                 try testing.expectEqual(error.X509Error, err);
                 try testing.expect(peer2.connection_state == .failed);
@@ -767,8 +781,47 @@ test "Dtls session: close connection" {
     try testing.expect(peer1.connection_state == .closed);
 
     var out: [1500]u8 = undefined;
-    const dgram = peer1.pollTransmit(&out) orelse return error.ExpectedTransmit;
+    const dgram = (try peer1.pollTransmit(&out)) orelse return error.ExpectedTransmit;
     var buf: [1500]u8 = undefined;
     _ = try peer2.handleRead(dgram, 0, &buf);
     try testing.expect(peer2.connection_state == .closed);
+}
+
+test "Dtls session: pollTransmit keeps a datagram that doesn't fit" {
+    var peer1: Session = undefined;
+    var peer2: Session = undefined;
+    var prng = std.Random.DefaultPrng.init(testing.random_seed);
+    try createPeers(&peer1, &peer2, prng.random());
+    defer peer1.deinit();
+    defer peer2.deinit();
+
+    peer2.handleTimeout(0);
+
+    var out: [1500]u8 = undefined;
+    try testing.expectError(error.WriteFailed, peer2.pollTransmit(out[0..64]));
+    const dgram = (try peer2.pollTransmit(&out)) orelse return error.ExpectedTransmit;
+
+    var buf: [1500]u8 = undefined;
+    _ = try peer1.handleRead(dgram, 0, &buf);
+    try driveHandshake(&peer1, &peer2);
+}
+
+test "Dtls session: handleWrite rejects a buffer smaller than the record" {
+    var peer1: Session = undefined;
+    var peer2: Session = undefined;
+    var prng = std.Random.DefaultPrng.init(testing.random_seed);
+    try createPeers(&peer1, &peer2, prng.random());
+    defer peer1.deinit();
+    defer peer2.deinit();
+
+    try driveHandshake(&peer1, &peer2);
+
+    const data = "hello";
+    var out: [1500]u8 = undefined;
+    try testing.expectError(error.WriteFailed, peer1.handleWrite(data, out[0 .. data.len + peer1.recordOverhead() - 1]));
+
+    const size = try peer1.handleWrite(data, &out);
+    var buf: [1500]u8 = undefined;
+    const result = try peer2.handleRead(out[0..size], 0, &buf);
+    try testing.expectEqualSlices(u8, data, result.app_data);
 }
