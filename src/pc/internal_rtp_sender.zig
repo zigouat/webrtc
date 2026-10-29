@@ -268,14 +268,13 @@ pub fn handleWrite(sender: *InternalRtpSender, packet: *const rtp.Packet, buffer
     return buffer[0..packet_size];
 }
 
-pub fn writeRtcpSenderReport(sender: *InternalRtpSender, timestamp: i64, buffer: []u8) []const u8 {
-    if (sender.codec == null) return &.{};
-    const report = sender.report;
-    const codec = sender.codec.?;
-
+pub fn writeRtcpSenderReport(sender: *InternalRtpSender, timestamp: i64, buffer: []u8) error{WriteFailed}![]const u8 {
+    const codec = sender.codec orelse return &.{};
+    const report = &sender.report;
     if (report.packet_count == 0) return &.{};
-    std.debug.assert(buffer.len >= rtcp.header_size + rtcp.sr_base_size);
+
     const length = rtcp.header_size + rtcp.sr_base_size;
+    if (buffer.len < length) return error.WriteFailed;
 
     const header: rtcp.Header = .{
         .payload_type = .sender_report,
@@ -283,7 +282,8 @@ pub fn writeRtcpSenderReport(sender: *InternalRtpSender, timestamp: i64, buffer:
         .length = length / 4 - 1,
         .padding = false,
     };
-    std.mem.writeInt(@Int(.unsigned, rtcp.header_size * 8), buffer[0..rtcp.header_size], @bitCast(header), .big);
+
+    std.mem.writeInt(@Int(.unsigned, @bitSizeOf(rtcp.Header)), buffer[0..rtcp.header_size], @bitCast(header), .big);
 
     const ts = if (timestamp <= report.timestamp) report.timestamp else timestamp;
     const diff: u32 = @intCast(@divTrunc(@as(i128, (ts - report.timestamp)) * codec.rtp_codec.clock_rate, std.time.us_per_s));
@@ -296,7 +296,6 @@ pub fn writeRtcpSenderReport(sender: *InternalRtpSender, timestamp: i64, buffer:
         .packet_count = report.packet_count,
     };
     sender_report.encode(buffer[rtcp.header_size..][0..rtcp.sr_base_size]);
-
     return buffer[0..length];
 }
 

@@ -219,14 +219,22 @@ const SenderReportIterator = struct {
     index: usize = 0,
     timestamp: i64,
 
-    fn next(it: *SenderReportIterator, pc: *PeerConnection, buffer: []u8) ?[]const u8 {
+    fn next(it: *SenderReportIterator, pc: *PeerConnection, buffer: []u8) error{ WriteFailed, OutOfMemory }!?webrtc.TransportMessage {
+        const writable_buffer = pc.dtls_transport.rtcpPayloadBuffer(buffer) catch buffer[0..0];
         const transceivers = pc.transceivers.items;
-        while (it.index < transceivers.len) {
+        while (it.index < transceivers.len) : (it.index += 1) {
             const tr = &transceivers[it.index];
-            it.index += 1;
             if (tr.isStopped() or tr.direction == .inactive) continue;
-            const data = tr.getRtcpReport(it.timestamp, buffer);
-            if (data.len != 0) return data;
+
+            const data = try tr.getRtcpReport(it.timestamp, writable_buffer);
+            if (data.len == 0) continue;
+
+            const msg = pc.dtls_transport.writeRtcp(buffer, data.len) catch |err| switch (err) {
+                error.WriteFailed => unreachable,
+                else => |e| return e,
+            };
+            it.index += 1;
+            return msg;
         }
         return null;
     }
@@ -752,23 +760,26 @@ pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) PollTransmitErr
     const buffer2 = pc.int_buffers[packet_size .. 2 * packet_size];
     if (try pc.dtls_transport.pollTransmit(buffer)) |msg| return msg;
 
-    if (try pc.sctp_transport.pollTransmit(buffer2, now)) |sctp_data| {
+    const app_data_len = (try pc.dtls_transport.appDataPayloadBuffer(buffer)).len;
+    if (try pc.sctp_transport.pollTransmit(buffer2[0..@min(app_data_len, buffer2.len)], now)) |sctp_data| {
         return try pc.dtls_transport.writeAppData(sctp_data, buffer);
     }
 
-    const payload = try pc.dtls_transport.rtpPayloadBuffer(buffer);
-
     if (pc.sender_report_it) |*it| {
-        if (it.next(pc, payload)) |data| return try pc.dtls_transport.writeRtcp(buffer, data.len);
+        if (try it.next(pc, buffer)) |msg| return msg;
         pc.sender_report_it = null;
     }
 
-    if (pc.nack_generator) |*ng| if (try ng.pollTransmit(payload[0..1200])) |data| {
-        return try pc.dtls_transport.writeRtcp(buffer, data.len);
-    };
+    if (pc.nack_generator) |*ng| {
+        const payload = try pc.dtls_transport.rtpPayloadBuffer(buffer);
+        if (try ng.pollTransmit(payload[0..1200])) |data| {
+            return try pc.dtls_transport.writeRtcp(buffer, data.len);
+        }
+    }
 
     while (pc.transmits.front()) |entry| switch (entry) {
         .nack => |sender_id| {
+            const payload = try pc.dtls_transport.rtpPayloadBuffer(buffer);
             const sender = &pc.transceivers.items[sender_id].sender;
             const data = try sender.nextNack(payload) orelse {
                 _ = pc.transmits.popFront();
