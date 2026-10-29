@@ -296,7 +296,7 @@ pub fn deinit(pc: *PeerConnection) void {
     pc.last_offer.deinit(pc.allocator);
     pc.last_answer.deinit(pc.allocator);
 
-    if (pc.nack_generator) |*ng| ng.deinit();
+    if (pc.nack_generator) |*ng| ng.deinit(pc.allocator);
     pc.sctp_transport.deinit();
     pc.dtls_transport.deinit();
     pc.demuxer.deinit();
@@ -760,19 +760,14 @@ pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) PollTransmitErr
     const buffer2 = pc.int_buffers[packet_size .. 2 * packet_size];
     if (try pc.dtls_transport.pollTransmit(buffer)) |msg| return msg;
 
-    const app_data_len = (try pc.dtls_transport.appDataPayloadBuffer(buffer)).len;
-    if (try pc.sctp_transport.pollTransmit(buffer2[0..@min(app_data_len, buffer2.len)], now)) |sctp_data| {
-        return try pc.dtls_transport.writeAppData(sctp_data, buffer);
-    }
-
     if (pc.sender_report_it) |*it| {
         if (try it.next(pc, buffer)) |msg| return msg;
         pc.sender_report_it = null;
     }
 
     if (pc.nack_generator) |*ng| {
-        const payload = try pc.dtls_transport.rtpPayloadBuffer(buffer);
-        if (try ng.pollTransmit(payload[0..1200])) |data| {
+        const payload = try pc.dtls_transport.rtcpPayloadBuffer(buffer);
+        if (try ng.pollTransmit(payload[0..@min(payload.len, constants.max_rtp_payload_size)])) |data| {
             return try pc.dtls_transport.writeRtcp(buffer, data.len);
         }
     }
@@ -788,6 +783,11 @@ pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) PollTransmitErr
             return try pc.dtls_transport.writeRtp(buffer, data.len);
         },
     };
+
+    const app_data_len = (try pc.dtls_transport.appDataPayloadBuffer(buffer)).len;
+    if (try pc.sctp_transport.pollTransmit(buffer2[0..@min(app_data_len, buffer2.len)], now)) |sctp_data| {
+        return pc.dtls_transport.writeAppData(sctp_data, buffer) catch unreachable;
+    }
 
     return null;
 }
@@ -1358,7 +1358,7 @@ fn handleRtpData(pc: *PeerConnection, data: []const u8) !ReadResult {
 
     const tr = &pc.transceivers.items[id];
     if (tr.receiver.handleRtpPacket(&packet)) {
-        if (tr.receiver.nack) if (pc.nack_generator) |*nack_generator| try nack_generator.handleRead(&packet);
+        if (tr.receiver.nack) if (pc.nack_generator) |*nack_generator| try nack_generator.handleRead(pc.allocator, &packet);
         return .{ .rtp = .{ pc.getRtpReceiver(id), packet } };
     }
 
@@ -1394,16 +1394,16 @@ fn startRtpRtcpInterceptors(pc: *PeerConnection) !void {
         if (tr.canReceive() and tr.receiver.nack) {
             nack = true;
             if (pc.nack_generator == null) {
-                pc.nack_generator = .init(pc.allocator, .{
+                pc.nack_generator = .init(.{
                     .size = pc.nack_config.receive_log_size,
                     .interval = pc.nack_config.interval,
                 });
             }
-        } else if (pc.nack_generator) |*ng| if (tr.receiver.ssrc) |ssrc| ng.deleteSource(ssrc);
+        } else if (pc.nack_generator) |*ng| if (tr.receiver.ssrc) |ssrc| ng.deleteSource(pc.allocator, ssrc);
     }
 
     if (!nack) if (pc.nack_generator) |*nack_generator| {
-        nack_generator.deinit();
+        nack_generator.deinit(pc.allocator);
         pc.nack_generator = null;
     };
 }

@@ -141,7 +141,6 @@ pub fn addIceServer(transport: *DtlsTransport, addr: Io.net.IpAddress, server: i
 }
 
 pub const WriteMediaError = std.mem.Allocator.Error || error{WriteFailed};
-pub const WriteAppDataError = error{WriteFailed};
 
 /// Returns the part of `buffer` packets must be written to, after the TURN header when the
 /// nominated pair is relayed.
@@ -191,7 +190,7 @@ pub fn writeRtcp(transport: *DtlsTransport, buffer: []u8, len: usize) WriteMedia
     return transport.frame(buffer, data);
 }
 
-pub fn writeAppData(transport: *DtlsTransport, data: []const u8, buffer: []u8) WriteAppDataError!webrtc.TransportMessage {
+pub fn writeAppData(transport: *DtlsTransport, data: []const u8, buffer: []u8) error{WriteFailed}!webrtc.TransportMessage {
     const payload = try transport.reservedPayloadBuffer(buffer, 0);
     const size = try transport.session.handleWrite(data, payload);
     return transport.frame(buffer, payload[0..size]);

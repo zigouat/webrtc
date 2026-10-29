@@ -4,7 +4,7 @@ const rtcp = @import("rtcp");
 
 const NackGenerator = @This();
 const ReceiveLog = @import("receive_log.zig");
-const HashMap = std.AutoHashMap(u32, ReceiveLog);
+const HashMap = std.AutoHashMapUnmanaged(u32, ReceiveLog);
 
 const Logger = std.log.scoped(.nack_generator);
 
@@ -22,11 +22,11 @@ receive_logs: HashMap,
 deadline: i64,
 it: ?NackGeneratorIterator,
 
-pub fn init(allocator: std.mem.Allocator, config: Config) NackGenerator {
+pub fn init(config: Config) NackGenerator {
     Logger.debug("Init nack generator", .{});
 
     return .{
-        .receive_logs = .init(allocator),
+        .receive_logs = .empty,
         .size = config.size,
         .interval = config.interval,
         .deadline = std.math.maxInt(i64),
@@ -34,24 +34,19 @@ pub fn init(allocator: std.mem.Allocator, config: Config) NackGenerator {
     };
 }
 
-pub fn deinit(self: *NackGenerator) void {
+pub fn deinit(self: *NackGenerator, allocator: std.mem.Allocator) void {
     Logger.debug("Deinit nack generator", .{});
-
-    const allocator = self.receive_logs.allocator;
-
     var it = self.receive_logs.iterator();
-    while (it.next()) |entry| {
-        entry.value_ptr.deinit(allocator);
-    }
-    self.receive_logs.deinit();
+    while (it.next()) |entry| entry.value_ptr.deinit(allocator);
+    self.receive_logs.deinit(allocator);
 }
 
-pub fn handleRead(self: *NackGenerator, packet: *const rtp.Packet) !void {
-    const entry = try self.receive_logs.getOrPut(packet.header.ssrc);
+pub fn handleRead(self: *NackGenerator, allocator: std.mem.Allocator, packet: *const rtp.Packet) !void {
+    const entry = try self.receive_logs.getOrPut(allocator, packet.header.ssrc);
     errdefer if (!entry.found_existing) self.receive_logs.removeByPtr(entry.key_ptr);
 
     if (!entry.found_existing) {
-        entry.value_ptr.* = try ReceiveLog.init(self.receive_logs.allocator, self.size);
+        entry.value_ptr.* = try ReceiveLog.init(allocator, self.size);
     }
 
     entry.value_ptr.add(packet.header.sequence_number);
@@ -95,8 +90,8 @@ pub fn pollTransmit(self: *NackGenerator, buffer: []u8) !?[]const u8 {
     }
 }
 
-pub fn deleteSource(self: *NackGenerator, ssrc: u32) void {
-    if (self.receive_logs.getPtr(ssrc)) |receive_log| receive_log.deinit(self.receive_logs.allocator);
+pub fn deleteSource(self: *NackGenerator, allocator: std.mem.Allocator, ssrc: u32) void {
+    if (self.receive_logs.getPtr(ssrc)) |receive_log| receive_log.deinit(allocator);
     _ = self.receive_logs.remove(ssrc);
 }
 
@@ -131,11 +126,12 @@ const NackGeneratorIterator = struct {
                 continue;
             }
 
+            if (buffer.len < 4) return error.WriteFailed;
             var w = try rtcp.Nack.Writer.init(buffer[4..], 0, entry.key_ptr.*);
             var missing_it = entry.value_ptr.iterateMissing();
-            while (missing_it.next()) |seq| try w.writeSequenceNumber(seq);
+            while (missing_it.next()) |seq| w.writeSequenceNumber(seq) catch {}; // still a valid nack, it has at least one FCI
 
-            const nack = try w.finalize();
+            const nack = w.finalize();
             rtcp_header.length = @intCast(nack.len / 4);
             std.mem.writeInt(u32, buffer[0..4], @bitCast(rtcp_header), .big);
             self.entry = self.it.next();
@@ -167,29 +163,29 @@ fn triggerNack(gen: *NackGenerator) void {
 }
 
 test "NackGenerator.handleRtpPacket: failed init" {
-    var gen = NackGenerator.init(testing.allocator, .{ .size = 127 });
-    defer gen.deinit();
+    var gen = NackGenerator.init(.{ .size = 127 });
+    defer gen.deinit(testing.allocator);
 }
 
 test "NackGenerator.deleteSource" {
-    var gen = NackGenerator.init(testing.allocator, .{});
-    defer gen.deinit();
+    var gen = NackGenerator.init(.{});
+    defer gen.deinit(testing.allocator);
 
-    try gen.handleRead(&testPacket(1, 1));
-    try gen.handleRead(&testPacket(2, 10));
+    try gen.handleRead(testing.allocator, &testPacket(1, 1));
+    try gen.handleRead(testing.allocator, &testPacket(2, 10));
 
-    gen.deleteSource(1);
+    gen.deleteSource(testing.allocator, 1);
     try testing.expectEqual(1, gen.receive_logs.count());
 }
 
 test "NackGenerator.handleTimeout: first call arms the deadline" {
-    var gen = NackGenerator.init(testing.allocator, .{ .interval = 100 });
-    defer gen.deinit();
+    var gen = NackGenerator.init(.{ .interval = 100 });
+    defer gen.deinit(testing.allocator);
 
     try testing.expectEqual(std.math.maxInt(i64), gen.pollTimeout());
 
-    try gen.handleRead(&testPacket(1, 1));
-    try gen.handleRead(&testPacket(1, 3));
+    try gen.handleRead(testing.allocator, &testPacket(1, 1));
+    try gen.handleRead(testing.allocator, &testPacket(1, 3));
 
     gen.handleTimeout(1000);
     try testing.expectEqual(1100, gen.pollTimeout());
@@ -199,11 +195,11 @@ test "NackGenerator.handleTimeout: first call arms the deadline" {
 }
 
 test "NackGenerator.handleTimeout: no nack before the deadline" {
-    var gen = NackGenerator.init(testing.allocator, .{ .interval = 100 });
-    defer gen.deinit();
+    var gen = NackGenerator.init(.{ .interval = 100 });
+    defer gen.deinit(testing.allocator);
 
-    try gen.handleRead(&testPacket(1, 1));
-    try gen.handleRead(&testPacket(1, 3));
+    try gen.handleRead(testing.allocator, &testPacket(1, 1));
+    try gen.handleRead(testing.allocator, &testPacket(1, 3));
 
     gen.handleTimeout(1000);
     gen.handleTimeout(1099);
@@ -214,12 +210,12 @@ test "NackGenerator.handleTimeout: no nack before the deadline" {
 }
 
 test "NackGenerator.pollTransmit: emits nack after deadline then returns null" {
-    var gen = NackGenerator.init(testing.allocator, .{ .interval = 100 });
-    defer gen.deinit();
+    var gen = NackGenerator.init(.{ .interval = 100 });
+    defer gen.deinit(testing.allocator);
 
-    try gen.handleRead(&testPacket(42, 1));
-    try gen.handleRead(&testPacket(42, 2));
-    try gen.handleRead(&testPacket(42, 5));
+    try gen.handleRead(testing.allocator, &testPacket(42, 1));
+    try gen.handleRead(testing.allocator, &testPacket(42, 2));
+    try gen.handleRead(testing.allocator, &testPacket(42, 5));
 
     gen.handleTimeout(1000);
     gen.handleTimeout(1150);
@@ -242,11 +238,11 @@ test "NackGenerator.pollTransmit: emits nack after deadline then returns null" {
 }
 
 test "NackGenerator.pollTransmit: nothing missing returns null" {
-    var gen = NackGenerator.init(testing.allocator, .{ .interval = 100 });
-    defer gen.deinit();
+    var gen = NackGenerator.init(.{ .interval = 100 });
+    defer gen.deinit(testing.allocator);
 
-    try gen.handleRead(&testPacket(1, 1));
-    try gen.handleRead(&testPacket(1, 2));
+    try gen.handleRead(testing.allocator, &testPacket(1, 1));
+    try gen.handleRead(testing.allocator, &testPacket(1, 2));
 
     gen.handleTimeout(1000);
     gen.handleTimeout(1100);
@@ -257,11 +253,11 @@ test "NackGenerator.pollTransmit: nothing missing returns null" {
 }
 
 test "NackGenerator.pollTransmit: buffer too small keeps the iteration" {
-    var gen = NackGenerator.init(testing.allocator, .{ .interval = 100 });
-    defer gen.deinit();
+    var gen = NackGenerator.init(.{ .interval = 100 });
+    defer gen.deinit(testing.allocator);
 
-    try gen.handleRead(&testPacket(42, 1));
-    try gen.handleRead(&testPacket(42, 3));
+    try gen.handleRead(testing.allocator, &testPacket(42, 1));
+    try gen.handleRead(testing.allocator, &testPacket(42, 3));
 
     gen.handleTimeout(1000);
     gen.handleTimeout(1100);
@@ -278,13 +274,13 @@ test "NackGenerator.pollTransmit: buffer too small keeps the iteration" {
 }
 
 test "NackGenerator.pollTransmit: resumes when buffer fills up" {
-    var gen = NackGenerator.init(testing.allocator, .{ .interval = 100 });
-    defer gen.deinit();
+    var gen = NackGenerator.init(.{ .interval = 100 });
+    defer gen.deinit(testing.allocator);
 
-    try gen.handleRead(&testPacket(1, 1));
-    try gen.handleRead(&testPacket(1, 3));
-    try gen.handleRead(&testPacket(2, 10));
-    try gen.handleRead(&testPacket(2, 12));
+    try gen.handleRead(testing.allocator, &testPacket(1, 1));
+    try gen.handleRead(testing.allocator, &testPacket(1, 3));
+    try gen.handleRead(testing.allocator, &testPacket(2, 10));
+    try gen.handleRead(testing.allocator, &testPacket(2, 12));
 
     gen.handleTimeout(1000);
     gen.handleTimeout(1100);
@@ -304,12 +300,52 @@ test "NackGenerator.pollTransmit: resumes when buffer fills up" {
     try testing.expectEqual(null, try gen.pollTransmit(&buffer));
 }
 
-test "NackGenerator.pollTransmit: new round after next deadline" {
-    var gen = NackGenerator.init(testing.allocator, .{ .interval = 100 });
-    defer gen.deinit();
+test "NackGenerator.pollTransmit: less than an rtcp header left after a nack" {
+    var gen = NackGenerator.init(.{ .interval = 100 });
+    defer gen.deinit(testing.allocator);
 
-    try gen.handleRead(&testPacket(1, 1));
-    try gen.handleRead(&testPacket(1, 3));
+    try gen.handleRead(testing.allocator, &testPacket(1, 1));
+    try gen.handleRead(testing.allocator, &testPacket(1, 3));
+    try gen.handleRead(testing.allocator, &testPacket(2, 10));
+    try gen.handleRead(testing.allocator, &testPacket(2, 12));
+
+    gen.handleTimeout(1000);
+    gen.handleTimeout(1100);
+
+    var buffer: [16 + 3]u8 = undefined;
+    for (0..2) |_| {
+        const data = (try gen.pollTransmit(&buffer)) orelse return error.TestExpectedNack;
+        try testing.expectEqual(16, data.len);
+    }
+    try testing.expectEqual(null, try gen.pollTransmit(&buffer));
+}
+
+test "NackGenerator.pollTransmit: fcis that don't fit are left for the next round" {
+    var gen = NackGenerator.init(.{ .interval = 100 });
+    defer gen.deinit(testing.allocator);
+
+    try gen.handleRead(testing.allocator, &testPacket(1, 1));
+    try gen.handleRead(testing.allocator, &testPacket(1, 40));
+
+    gen.handleTimeout(1000);
+    gen.handleTimeout(1100);
+
+    var buffer: [16]u8 = undefined;
+    const data = (try gen.pollTransmit(&buffer)) orelse return error.TestExpectedNack;
+    const packet = try rtcp.Packet.decode(data);
+    try testing.expectEqual(1, packet.payload.nack.media_ssrc);
+    try testing.expectEqual(null, try gen.pollTransmit(&buffer));
+
+    gen.handleTimeout(1200);
+    try testing.expect(try gen.pollTransmit(&buffer) != null);
+}
+
+test "NackGenerator.pollTransmit: new round after next deadline" {
+    var gen = NackGenerator.init(.{ .interval = 100 });
+    defer gen.deinit(testing.allocator);
+
+    try gen.handleRead(testing.allocator, &testPacket(1, 1));
+    try gen.handleRead(testing.allocator, &testPacket(1, 3));
 
     gen.handleTimeout(1000);
     gen.handleTimeout(1100);
@@ -327,35 +363,35 @@ test "NackGenerator.pollTransmit: new round after next deadline" {
 }
 
 test "NackGenerator.handleRead: creates one receive log per ssrc" {
-    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
-    defer gen.deinit();
+    var gen = NackGenerator.init(.{ .size = 128 });
+    defer gen.deinit(testing.allocator);
 
-    try gen.handleRead(&testPacket(1, 1));
+    try gen.handleRead(testing.allocator, &testPacket(1, 1));
     try testing.expectEqual(1, gen.receive_logs.count());
 
-    try gen.handleRead(&testPacket(1, 2));
+    try gen.handleRead(testing.allocator, &testPacket(1, 2));
     try testing.expectEqual(1, gen.receive_logs.count());
 
-    try gen.handleRead(&testPacket(2, 1));
+    try gen.handleRead(testing.allocator, &testPacket(2, 1));
     try testing.expectEqual(2, gen.receive_logs.count());
 }
 
 test "NackGenerator.handleRead: invalid log size does not keep the entry" {
-    var gen = NackGenerator.init(testing.allocator, .{ .size = 127 });
-    defer gen.deinit();
+    var gen = NackGenerator.init(.{ .size = 127 });
+    defer gen.deinit(testing.allocator);
 
-    try testing.expectError(error.InvalidSize, gen.handleRead(&testPacket(1, 1)));
+    try testing.expectError(error.InvalidSize, gen.handleRead(testing.allocator, &testPacket(1, 1)));
     try testing.expectEqual(0, gen.receive_logs.count());
 }
 
 test "NackGenerator.pollTransmit: only ssrcs with missing packets produce a nack" {
-    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
-    defer gen.deinit();
+    var gen = NackGenerator.init(.{ .size = 128 });
+    defer gen.deinit(testing.allocator);
 
-    try gen.handleRead(&testPacket(1, 1));
-    try gen.handleRead(&testPacket(1, 2));
-    try gen.handleRead(&testPacket(2, 10));
-    try gen.handleRead(&testPacket(2, 12));
+    try gen.handleRead(testing.allocator, &testPacket(1, 1));
+    try gen.handleRead(testing.allocator, &testPacket(1, 2));
+    try gen.handleRead(testing.allocator, &testPacket(2, 10));
+    try gen.handleRead(testing.allocator, &testPacket(2, 12));
 
     triggerNack(&gen);
 
@@ -375,13 +411,13 @@ test "NackGenerator.pollTransmit: only ssrcs with missing packets produce a nack
 }
 
 test "NackGenerator.pollTransmit: builds rtcp compound packet" {
-    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
-    defer gen.deinit();
+    var gen = NackGenerator.init(.{ .size = 128 });
+    defer gen.deinit(testing.allocator);
 
-    try gen.handleRead(&testPacket(1, 1));
-    try gen.handleRead(&testPacket(1, 4));
-    try gen.handleRead(&testPacket(2, 10));
-    try gen.handleRead(&testPacket(2, 12));
+    try gen.handleRead(testing.allocator, &testPacket(1, 1));
+    try gen.handleRead(testing.allocator, &testPacket(1, 4));
+    try gen.handleRead(testing.allocator, &testPacket(2, 10));
+    try gen.handleRead(testing.allocator, &testPacket(2, 12));
 
     triggerNack(&gen);
 
@@ -406,11 +442,11 @@ test "NackGenerator.pollTransmit: builds rtcp compound packet" {
 }
 
 test "NackGenerator.pollTransmit: handles sequence number wraparound" {
-    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
-    defer gen.deinit();
+    var gen = NackGenerator.init(.{ .size = 128 });
+    defer gen.deinit(testing.allocator);
 
-    try gen.handleRead(&testPacket(1, 65534));
-    try gen.handleRead(&testPacket(1, 1));
+    try gen.handleRead(testing.allocator, &testPacket(1, 65534));
+    try gen.handleRead(testing.allocator, &testPacket(1, 1));
 
     triggerNack(&gen);
 
@@ -425,12 +461,12 @@ test "NackGenerator.pollTransmit: handles sequence number wraparound" {
 }
 
 test "NackGenerator.pollTransmit: missing packet received before deadline is not nacked" {
-    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
-    defer gen.deinit();
+    var gen = NackGenerator.init(.{ .size = 128 });
+    defer gen.deinit(testing.allocator);
 
-    try gen.handleRead(&testPacket(1, 1));
-    try gen.handleRead(&testPacket(1, 3));
-    try gen.handleRead(&testPacket(1, 2));
+    try gen.handleRead(testing.allocator, &testPacket(1, 1));
+    try gen.handleRead(testing.allocator, &testPacket(1, 3));
+    try gen.handleRead(testing.allocator, &testPacket(1, 2));
 
     triggerNack(&gen);
 
@@ -439,12 +475,12 @@ test "NackGenerator.pollTransmit: missing packet received before deadline is not
 }
 
 test "NackGenerator.pollTransmit: deleted source is not nacked" {
-    var gen = NackGenerator.init(testing.allocator, .{ .size = 128 });
-    defer gen.deinit();
+    var gen = NackGenerator.init(.{ .size = 128 });
+    defer gen.deinit(testing.allocator);
 
-    try gen.handleRead(&testPacket(1, 1));
-    try gen.handleRead(&testPacket(1, 3));
-    gen.deleteSource(1);
+    try gen.handleRead(testing.allocator, &testPacket(1, 1));
+    try gen.handleRead(testing.allocator, &testPacket(1, 3));
+    gen.deleteSource(testing.allocator, 1);
 
     triggerNack(&gen);
 
