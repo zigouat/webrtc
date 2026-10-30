@@ -15,39 +15,11 @@ const Mid = @import("../mid.zig");
 pub const AllocError = std.mem.Allocator.Error;
 /// The sender has no negotiated track or the transceiver cannot send.
 pub const StateError = error{ NoAssociatedTrack, InvalidDirection };
-pub const WriteError = StateError || Io.Writer.Error;
-pub const PacketizeError = Io.Writer.Error || Io.Reader.Error;
+pub const WriteError = StateError || Io.Writer.Error || error{PayloadTooLarge};
+pub const PacketizeError = rtp.Packetizer.Error;
 
 const RtpHeaderExtensions = struct {
     mid: u16 = 0,
-};
-
-const Packetizer = union(enum) {
-    vp8: rtp.packetizer.VP8,
-    h264: rtp.packetizer.H264,
-    opus: rtp.packetizer.Opus,
-    none: void,
-
-    fn init(r: std.Random, ssrc: u32, codec: webrtc.RtpCodecParameters) @This() {
-        var rtp_config = rtp.packetizer.RtpConfig{
-            .payload_type = 0,
-            .seq_number = r.uintAtMost(u16, std.math.maxInt(u16)),
-            .ssrc = r.uintAtMost(u32, std.math.maxInt(u32)),
-        };
-
-        rtp_config.payload_type = @intCast(codec.payload_type);
-        rtp_config.ssrc = ssrc;
-
-        if (std.mem.eql(u8, codec.rtp_codec.mime_type, webrtc.MimeType.VP8)) {
-            return .{ .vp8 = .init(rtp_config) };
-        } else if (std.mem.eql(u8, codec.rtp_codec.mime_type, webrtc.MimeType.H264)) {
-            return .{ .h264 = .init(rtp_config) };
-        } else if (std.mem.eql(u8, codec.rtp_codec.mime_type, webrtc.MimeType.Opus)) {
-            return .{ .opus = .init(rtp_config) };
-        }
-
-        return .none;
-    }
 };
 
 const RtxConfig = struct {
@@ -96,7 +68,7 @@ header_extensions: RtpHeaderExtensions,
 ssrc: u32,
 rtx_ssrc: u32,
 report: Report,
-packetizer: Packetizer,
+packetizer: rtp.Packetizer,
 rtx_config: ?RtxConfig,
 send_buffer: ?SendBuffer,
 /// Store the nacks after processing NACK rtcp packet.
@@ -111,7 +83,7 @@ pub fn init(track: ?MediaStreamTrack) InternalRtpSender {
         .ssrc = 0,
         .rtx_ssrc = 0,
         .report = .empty,
-        .packetizer = .none,
+        .packetizer = undefined,
         .rtx_config = null,
         .send_buffer = null,
         .nacks = .empty,
@@ -133,7 +105,7 @@ pub fn reset(sender: *InternalRtpSender, allocator: std.mem.Allocator) void {
     while (sender.nacks.popFront()) |_| {}
     sender.header_extensions = .{};
     sender.report = .empty;
-    sender.packetizer = .none;
+    sender.packetizer = undefined;
     sender.rtx_config = null;
     sender.ssrc = 0;
     sender.rtx_ssrc = 0;
@@ -197,7 +169,23 @@ pub fn setCodecs(
         .sequence_number = 0,
         .payload_type = @intCast(rc.payload_type),
     } else null;
-    sender.packetizer = Packetizer.init(r, sender.ssrc, chosen_codec);
+
+    const mime = chosen_codec.rtp_codec.mime_type;
+    const codec: rtp.Packetizer.Codec = if (std.mem.eql(u8, mime, webrtc.MimeType.VP8))
+        .vp8
+    else if (std.mem.eql(u8, mime, webrtc.MimeType.H264))
+        .h264
+    else if (std.mem.eql(u8, mime, webrtc.MimeType.Opus))
+        .opus
+    else
+        unreachable;
+
+    sender.packetizer = rtp.Packetizer.init(codec, .{
+        .payload_type = @intCast(chosen_codec.payload_type),
+        .seq_number = r.uintAtMost(u16, std.math.maxInt(u16)),
+        .ssrc = sender.ssrc,
+        .fragment_size = constants.max_rtp_payload_size,
+    });
     sender.codec = chosen_codec;
 }
 
@@ -211,45 +199,26 @@ pub fn setHeaderExtensions(sender: *InternalRtpSender, extensions: []const webrt
 
 pub const SamplePacketizerIterator = struct {
     rtp_sender: *InternalRtpSender,
-    packet_it: PacketIterator,
+    packet_it: rtp.Packetizer.Iterator,
     mid: Mid.Int,
-
-    const PacketIterator = union(enum) {
-        vp8: rtp.packetizer.VP8.Iterator,
-        h264: rtp.packetizer.H264.Iterator,
-        opus: rtp.packetizer.Opus.Iterator,
-    };
 
     pub fn init(sender: *InternalRtpSender, media_packet: *const MediaPacket) StateError!SamplePacketizerIterator {
         const tr = try sender.checkAndGetTransceiver();
-
-        const packet_it = switch (sender.packetizer) {
-            .vp8 => |*p| PacketIterator{ .vp8 = p.packetize(media_packet) },
-            .h264 => |*p| PacketIterator{ .h264 = p.packetize(media_packet) },
-            .opus => |*p| PacketIterator{ .opus = p.packetize(media_packet) },
-            else => unreachable,
-        };
-
         return .{
             .rtp_sender = sender,
-            .packet_it = packet_it,
+            .packet_it = sender.packetizer.packetize(media_packet),
             .mid = tr.mid.?,
         };
     }
 
     pub fn next(it: *SamplePacketizerIterator, buffer: []u8, now_us: i64) PacketizeError!?[]const u8 {
+        if (buffer.len < constants.rtp_default_header_size) return error.WriteFailed;
         const header_size = constants.rtp_default_header_size + try it.rtp_sender.writeHeaderExtensions(
             it.mid,
             buffer[constants.rtp_default_header_size..],
         );
 
-        const rtp_buffer = buffer[0 .. header_size + constants.max_rtp_payload_size];
-        var rtp_packet = switch (it.packet_it) {
-            .vp8 => |*packet_it| packet_it.next(rtp_buffer[header_size..]),
-            .h264 => |*packet_it| try packet_it.next(rtp_buffer[header_size..]),
-            .opus => |*packet_it| packet_it.next(rtp_buffer[header_size..]),
-        } orelse return null;
-
+        var rtp_packet = try it.packet_it.next(buffer[header_size..]) orelse return null;
         rtp_packet.header.extension = header_size != constants.rtp_default_header_size;
         std.mem.writeInt(u96, buffer[0..constants.rtp_default_header_size], @bitCast(rtp_packet.header), .big);
 
@@ -264,12 +233,17 @@ pub fn handleMediaPacketWrite(sender: *InternalRtpSender, sample: *const MediaPa
 }
 
 pub fn handleWrite(sender: *InternalRtpSender, packet: *const rtp.Packet, buffer: []u8, now_us: i64) WriteError![]const u8 {
+    if (packet.payload.len > constants.max_rtp_payload_size) return error.PayloadTooLarge;
+    if (buffer.len < constants.rtp_default_header_size + packet.payload.len) return error.WriteFailed;
     const tr = try checkAndGetTransceiver(sender);
 
     const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(
         tr.mid.?,
         buffer[constants.rtp_default_header_size..],
     );
+
+    const packet_size = header_size + packet.payload.len;
+    if (packet_size > buffer.len) return error.WriteFailed;
 
     const header: rtp.Packet.Header = .{
         .extension = header_size != constants.rtp_default_header_size,
@@ -282,7 +256,7 @@ pub fn handleWrite(sender: *InternalRtpSender, packet: *const rtp.Packet, buffer
     };
 
     std.mem.writeInt(u96, buffer[0..constants.rtp_default_header_size], @bitCast(header), .big);
-    @memcpy(buffer[header_size .. packet.payload.len + header_size], packet.payload);
+    @memcpy(buffer[header_size..packet_size], packet.payload);
 
     const new_packet: rtp.Packet = .{
         .header = header,
@@ -291,17 +265,16 @@ pub fn handleWrite(sender: *InternalRtpSender, packet: *const rtp.Packet, buffer
 
     sender.report.recordPacket(&new_packet, now_us);
     if (sender.send_buffer) |*send_buffer| send_buffer.add(&new_packet);
-    return buffer[0 .. header_size + packet.payload.len];
+    return buffer[0..packet_size];
 }
 
-pub fn writeRtcpSenderReport(sender: *InternalRtpSender, timestamp: i64, buffer: []u8) []const u8 {
-    if (sender.codec == null) return &.{};
-    const report = sender.report;
-    const codec = sender.codec.?;
-
+pub fn writeRtcpSenderReport(sender: *InternalRtpSender, timestamp: i64, buffer: []u8) error{WriteFailed}![]const u8 {
+    const codec = sender.codec orelse return &.{};
+    const report = &sender.report;
     if (report.packet_count == 0) return &.{};
-    std.debug.assert(buffer.len >= rtcp.header_size + rtcp.sr_base_size);
+
     const length = rtcp.header_size + rtcp.sr_base_size;
+    if (buffer.len < length) return error.WriteFailed;
 
     const header: rtcp.Header = .{
         .payload_type = .sender_report,
@@ -309,7 +282,8 @@ pub fn writeRtcpSenderReport(sender: *InternalRtpSender, timestamp: i64, buffer:
         .length = length / 4 - 1,
         .padding = false,
     };
-    std.mem.writeInt(@Int(.unsigned, rtcp.header_size * 8), buffer[0..rtcp.header_size], @bitCast(header), .big);
+
+    std.mem.writeInt(@Int(.unsigned, @bitSizeOf(rtcp.Header)), buffer[0..rtcp.header_size], @bitCast(header), .big);
 
     const ts = if (timestamp <= report.timestamp) report.timestamp else timestamp;
     const diff: u32 = @intCast(@divTrunc(@as(i128, (ts - report.timestamp)) * codec.rtp_codec.clock_rate, std.time.us_per_s));
@@ -322,7 +296,6 @@ pub fn writeRtcpSenderReport(sender: *InternalRtpSender, timestamp: i64, buffer:
         .packet_count = report.packet_count,
     };
     sender_report.encode(buffer[rtcp.header_size..][0..rtcp.sr_base_size]);
-
     return buffer[0..length];
 }
 
@@ -339,15 +312,21 @@ pub fn nextNack(sender: *InternalRtpSender, buffer: []u8) (AllocError || Io.Writ
     const is_rtx = sender.rtx_config != null;
     const tr = checkAndGetTransceiver(sender) catch return null;
 
+    if (buffer.len < constants.rtp_default_header_size) return error.WriteFailed;
+
     while (true) {
-        const seq = sender.nacks.popFront() orelse return null;
+        const seq = sender.nacks.front() orelse return null;
         const header_size = constants.rtp_default_header_size + try sender.writeHeaderExtensions(
             tr.mid.?,
             buffer[constants.rtp_default_header_size..],
         );
         // RFC 4588: RTX payload is the original sequence number followed by the original payload.
         const payload_offset = header_size + @as(usize, if (is_rtx) 2 else 0);
-        const packet = send_buffer.get(seq, buffer[payload_offset..]) orelse continue;
+        if (buffer.len < payload_offset) return error.WriteFailed;
+        const packet = try send_buffer.get(seq, buffer[payload_offset..]) orelse {
+            _ = sender.nacks.popFront();
+            continue;
+        };
 
         const header: rtp.Packet.Header = .{
             .extension = header_size != constants.rtp_default_header_size,
@@ -365,6 +344,8 @@ pub fn nextNack(sender: *InternalRtpSender, buffer: []u8) (AllocError || Io.Writ
         }
         const payload_len = if (is_rtx) 2 + packet.payload.len else packet.payload.len;
         std.mem.writeInt(u96, buffer[0..constants.rtp_default_header_size], @bitCast(header), .big);
+
+        _ = sender.nacks.popFront();
         return buffer[0 .. header_size + payload_len];
     }
 }
@@ -432,18 +413,7 @@ test "InternalRtpSender.setCodecs: sets codecs and initializes the packetizer fo
 
     try testing.expectEqual(1, tr.sender.codecs.len);
     try testing.expectEqual(96, tr.sender.codec.?.payload_type);
-    try testing.expectEqual(.vp8, std.meta.activeTag(tr.sender.packetizer));
-}
-
-test "InternalRtpSender.setCodecs: unknown mime type leaves the packetizer as none" {
-    var tr = testTransceiver(null);
-    const codecs = [_]webrtc.RtpCodecParameters{
-        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = "video/unknown", .clock_rate = 90_000 } },
-    };
-
-    try tr.sender.setCodecs(testing.allocator, prng.random(), &codecs, 16);
-
-    try testing.expectEqual(.none, std.meta.activeTag(tr.sender.packetizer));
+    try testing.expectEqual(.vp8, tr.sender.packetizer.codec);
 }
 
 test "InternalRtpSender.setCodecs: enables the send buffer when the transceiver can send and rtx+nack are negotiated" {
@@ -513,7 +483,7 @@ test "InternalRtpSender.setCodecs: ignores the codec list on subsequent calls, k
 
     try testing.expectEqual(1, tr.sender.codecs.len);
     try testing.expectEqual(96, tr.sender.codec.?.payload_type);
-    try testing.expectEqual(.vp8, std.meta.activeTag(tr.sender.packetizer));
+    try testing.expectEqual(.vp8, tr.sender.packetizer.codec);
 }
 
 test "InternalRtpSender.setHeaderExtensions: picks the mid extension id, ignores others" {
@@ -595,6 +565,97 @@ test "InternalRtpSender: record packets" {
     try testing.expectEqual(6000, report.timestamp);
     try testing.expectEqual(3, report.packet_count);
     try testing.expectEqual(payload.len * 3, report.octet_count);
+}
+
+test "InternalRtpSender.handleWrite: rejects oversized payloads and short buffers without recording" {
+    var tr = testTransceiver(.sendrecv);
+    defer tr.sender.deinit(testing.allocator);
+    tr.mid = 0;
+    tr.sender.track = .{ .id = @splat(0), .kind = .video, .stream_id = null, .muted = false };
+
+    const codecs = [_]webrtc.RtpCodecParameters{
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } } },
+    };
+    try tr.sender.setCodecs(testing.allocator, prng.random(), &codecs, 16);
+
+    var payload: [constants.max_rtp_payload_size + 1]u8 = @splat(0xAB);
+    var packet: rtp.Packet = .{
+        .header = .{ .ssrc = 0, .timestamp = 1000, .sequence_number = 10, .payload_type = 96, .marker = false, .extension = false, .padding = false },
+        .payload = &payload,
+    };
+
+    var buffer: [constants.max_packet_size]u8 = undefined;
+    try testing.expectError(error.PayloadTooLarge, tr.sender.handleWrite(&packet, &buffer, 0));
+
+    packet.payload = payload[0..constants.max_rtp_payload_size];
+    const packet_size = constants.rtp_default_header_size + packet.payload.len;
+    try testing.expectError(error.WriteFailed, tr.sender.handleWrite(&packet, buffer[0 .. constants.rtp_default_header_size - 1], 0));
+    try testing.expectError(error.WriteFailed, tr.sender.handleWrite(&packet, buffer[0 .. packet_size - 1], 0));
+    try testing.expectEqual(null, tr.sender.report.last_sequence_number);
+    try testing.expectEqual(null, try tr.sender.send_buffer.?.get(10, &buffer));
+
+    const written = try tr.sender.handleWrite(&packet, buffer[0..packet_size], 0);
+    try testing.expectEqual(packet_size, written.len);
+    try testing.expectEqual(10, tr.sender.report.last_sequence_number);
+}
+
+test "InternalRtpSender.SamplePacketizerIterator: short buffers fail without recording" {
+    var tr = testTransceiver(.sendrecv);
+    defer tr.sender.deinit(testing.allocator);
+    tr.mid = 0;
+    tr.sender.track = .{ .id = @splat(0), .kind = .video, .stream_id = null, .muted = false };
+
+    const codecs = [_]webrtc.RtpCodecParameters{
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } } },
+    };
+    try tr.sender.setCodecs(testing.allocator, prng.random(), &codecs, 16);
+
+    const data: [100]u8 = @splat(0xAB);
+    const sample: MediaPacket = .{ .data = &data };
+    var it = try tr.sender.handleMediaPacketWrite(&sample);
+
+    var buffer: [constants.max_packet_size]u8 = undefined;
+    const packet_size = constants.rtp_default_header_size + 1 + data.len;
+    try testing.expectError(error.WriteFailed, it.next(buffer[0 .. constants.rtp_default_header_size - 1], 0));
+    try testing.expectError(error.WriteFailed, it.next(buffer[0 .. packet_size - 1], 0));
+    try testing.expectEqual(null, tr.sender.report.last_sequence_number);
+
+    const packet = (try it.next(buffer[0..packet_size], 0)).?;
+    try testing.expectEqual(packet_size, packet.len);
+    try testing.expectEqual(null, try it.next(&buffer, 0));
+}
+
+test "InternalRtpSender.nextNack: skips unknown packets and keeps the nack on a short buffer" {
+    var tr = testTransceiver(.sendrecv);
+    defer tr.sender.deinit(testing.allocator);
+    tr.mid = 0;
+    tr.sender.track = .{ .id = @splat(0), .kind = .video, .stream_id = null, .muted = false };
+
+    const codecs = [_]webrtc.RtpCodecParameters{
+        .{ .payload_type = 96, .rtp_codec = .{ .mime_type = webrtc.MimeType.VP8, .clock_rate = 90_000, .rtcp_feedbacks = .{ .nack = true } } },
+    };
+    try tr.sender.setCodecs(testing.allocator, prng.random(), &codecs, 16);
+
+    const payload: [100]u8 = @splat(0xAB);
+    const packet: rtp.Packet = .{
+        .header = .{ .ssrc = 0, .timestamp = 1000, .sequence_number = 10, .payload_type = 96, .marker = false, .extension = false, .padding = false },
+        .payload = &payload,
+    };
+    var buffer: [constants.max_packet_size]u8 = undefined;
+    _ = try tr.sender.handleWrite(&packet, &buffer, 0);
+
+    try tr.sender.nacks.pushBack(testing.allocator, 9);
+    try tr.sender.nacks.pushBack(testing.allocator, 10);
+
+    const packet_size = constants.rtp_default_header_size + payload.len;
+    try testing.expectError(error.WriteFailed, tr.sender.nextNack(buffer[0 .. packet_size - 1]));
+    try testing.expectEqual(1, tr.sender.nacks.len);
+    try testing.expectEqual(10, tr.sender.nacks.front().?);
+
+    const retransmit = (try tr.sender.nextNack(buffer[0..packet_size])).?;
+    try testing.expectEqual(packet_size, retransmit.len);
+    try testing.expectEqualSlices(u8, &payload, retransmit[constants.rtp_default_header_size..]);
+    try testing.expectEqual(null, try tr.sender.nextNack(&buffer));
 }
 
 test "InternalRtpSender: convert microseconds to ntp" {

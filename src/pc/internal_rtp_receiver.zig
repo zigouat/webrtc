@@ -68,8 +68,9 @@ pub fn handleRtpPacket(receiver: *InternalRtpReceiver, packet: *rtp.Packet) bool
 }
 
 /// Writes a Picture Loss Indication (PLI) RTCP packet.
-pub fn writePli(receiver: *const InternalRtpReceiver, buffer: []u8) []const u8 {
+pub fn writePli(receiver: *const InternalRtpReceiver, buffer: []u8) error{WriteFailed}![]const u8 {
     // 4 bytes header + PLI size is 8 bytes
+    if (buffer.len < 12) return error.WriteFailed;
     const header: rtcp.Header = .{ .rc = 1, .payload_type = .ps_fb, .length = 2, .padding = false };
     std.mem.writeInt(u32, buffer[0..4], @bitCast(header), .big);
     (rtcp.PLI{ .sender_ssrc = 0, .media_ssrc = receiver.ssrc orelse 0 }).encode(buffer[4..12]);
@@ -202,7 +203,7 @@ test "InternalRtpReceiver.writePli: writes a pli for the receiver ssrc" {
     receiver.ssrc = 0xDEADBEEF;
 
     var buffer: [64]u8 = @splat(0);
-    const data = receiver.writePli(&buffer);
+    const data = try receiver.writePli(&buffer);
     try testing.expectEqual(12, data.len);
 
     const packet = try rtcp.Packet.decode(data);

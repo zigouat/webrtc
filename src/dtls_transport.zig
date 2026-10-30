@@ -140,42 +140,59 @@ pub fn addIceServer(transport: *DtlsTransport, addr: Io.net.IpAddress, server: i
     try transport.ice_agent.addServer(addr, server, now);
 }
 
-pub const WriteRtpError = srtp.EncryptError || error{WriteFailed};
-pub const WriteRtcpError = std.mem.Allocator.Error || error{WriteFailed};
-pub const WriteAppDataError = error{WriteFailed};
-
-/// Minimum size of the buffers passed to the write functions. STUN messages are not subject to it.
-///
-/// Largest packet is a DTLS record at the 1237 bytes DTLS MTU (1200 bytes SCTP packet with AES-GCM
-/// expansion; RTP is at most 1232 bytes: 12 header + 8 mid extension + 2 RTX + 1200 payload + 10
-/// SRTP tag, RTCP 1214), plus 48 bytes for an IPv6 TURN send indication header and 3 bytes of
-/// padding.
-pub const min_write_buffer_size = 1288;
+pub const WriteMediaError = std.mem.Allocator.Error || error{WriteFailed};
 
 /// Returns the part of `buffer` packets must be written to, after the TURN header when the
 /// nominated pair is relayed.
 pub fn payloadBuffer(transport: *const DtlsTransport, buffer: []u8) error{WriteFailed}![]u8 {
-    if (buffer.len < min_write_buffer_size) return error.WriteFailed;
+    if (buffer.len < transport.frame_offset) return error.WriteFailed;
     return buffer[transport.frame_offset..];
 }
 
-/// Encrypts the RTP packet written to `payloadBuffer(buffer)[0..len]` in place.
-pub fn writeRtp(transport: *DtlsTransport, buffer: []u8, len: usize) WriteRtpError!webrtc.TransportMessage {
+/// Same as `payloadBuffer`, with room left at the end for the SRTP overhead and TURN padding.
+pub fn rtpPayloadBuffer(transport: *const DtlsTransport, buffer: []u8) error{WriteFailed}![]u8 {
+    return transport.reservedPayloadBuffer(buffer, transport.out_srtp_session.?.rtpOverhead());
+}
+
+/// Same as `payloadBuffer`, with room left at the end for the SRTCP overhead and TURN padding.
+pub fn rtcpPayloadBuffer(transport: *const DtlsTransport, buffer: []u8) error{WriteFailed}![]u8 {
+    return transport.reservedPayloadBuffer(buffer, transport.out_srtp_session.?.rtcpOverhead());
+}
+
+/// Same as `payloadBuffer`, with room left at the end for the DTLS record overhead and TURN padding.
+pub fn appDataPayloadBuffer(transport: *const DtlsTransport, buffer: []u8) error{WriteFailed}![]u8 {
+    return transport.reservedPayloadBuffer(buffer, transport.session.recordOverhead());
+}
+
+pub fn writeRtp(transport: *DtlsTransport, buffer: []u8, len: usize) WriteMediaError!webrtc.TransportMessage {
     const payload = try transport.payloadBuffer(buffer);
-    const data = try transport.out_srtp_session.?.encryptRtp(transport.allocator, payload[0..len], payload);
+    const data = transport.out_srtp_session.?.encryptRtp(
+        transport.allocator,
+        payload[0..len],
+        payload,
+    ) catch |err| switch (err) {
+        error.MalformedPacket => unreachable,
+        else => |e| return e,
+    };
     return transport.frame(buffer, data);
 }
 
-/// Encrypts the RTCP packet written to `payloadBuffer(buffer)[0..len]` in place.
-pub fn writeRtcp(transport: *DtlsTransport, buffer: []u8, len: usize) WriteRtcpError!webrtc.TransportMessage {
+pub fn writeRtcp(transport: *DtlsTransport, buffer: []u8, len: usize) WriteMediaError!webrtc.TransportMessage {
     const payload = try transport.payloadBuffer(buffer);
-    const data = try transport.out_srtp_session.?.encryptRtcp(transport.allocator, payload[0..len], payload);
+    const data = transport.out_srtp_session.?.encryptRtcp(
+        transport.allocator,
+        payload[0..len],
+        payload,
+    ) catch |err| switch (err) {
+        error.MalformedPacket => unreachable,
+        else => |e| return e,
+    };
     return transport.frame(buffer, data);
 }
 
-pub fn writeAppData(transport: *DtlsTransport, data: []const u8, buffer: []u8) WriteAppDataError!webrtc.TransportMessage {
-    const payload = try transport.payloadBuffer(buffer);
-    const size = transport.session.handleWrite(data, payload);
+pub fn writeAppData(transport: *DtlsTransport, data: []const u8, buffer: []u8) error{WriteFailed}!webrtc.TransportMessage {
+    const payload = try transport.reservedPayloadBuffer(buffer, 0);
+    const size = try transport.session.handleWrite(data, payload);
     return transport.frame(buffer, payload[0..size]);
 }
 
@@ -210,9 +227,9 @@ pub fn pollEvent(transport: *DtlsTransport) ?Event {
 }
 
 pub fn pollTransmit(transport: *DtlsTransport, buffer: []u8) error{WriteFailed}!?webrtc.TransportMessage {
-    const ice_msg = (transport.ice_agent.pollTransmit(buffer) catch return null) orelse {
+    const ice_msg = (try transport.ice_agent.pollTransmit(buffer)) orelse {
         if (transport.ice_agent.nominated_pair == null) return null;
-        const dtls_msg = transport.session.pollTransmit(try transport.payloadBuffer(buffer)) orelse return null;
+        const dtls_msg = (try transport.session.pollTransmit(try transport.reservedPayloadBuffer(buffer, 0))) orelse return null;
         return try transport.frame(buffer, dtls_msg);
     };
 
@@ -230,6 +247,14 @@ fn frame(transport: *DtlsTransport, buffer: []u8, payload: []const u8) error{Wri
     std.debug.assert(payload.ptr == buffer[transport.frame_offset..].ptr);
     const msg = try transport.ice_agent.handleWrite(buffer, payload.len);
     return .{ .data = msg.data, .from = msg.from, .to = msg.to };
+}
+
+fn reservedPayloadBuffer(transport: *const DtlsTransport, buffer: []u8, overhead: usize) error{WriteFailed}![]u8 {
+    const payload = try transport.payloadBuffer(buffer);
+    const turn_padding: usize = if (transport.frame_offset != 0) 3 else 0;
+    const tail = overhead + turn_padding;
+    if (payload.len < tail) return error.WriteFailed;
+    return payload[0 .. payload.len - tail];
 }
 
 fn drainEvents(transport: *DtlsTransport, now: i64) std.mem.Allocator.Error!void {

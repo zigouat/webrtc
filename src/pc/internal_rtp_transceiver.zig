@@ -276,7 +276,7 @@ pub fn processRemoteTrack(tr: *InternalRtpTransceiver, direction: Direction, msi
 /// Get rtcp report of the transceiver.
 ///
 /// For now it only gets sender report
-pub fn getRtcpReport(tr: *InternalRtpTransceiver, timestamp: i64, buffer: []u8) []const u8 {
+pub fn getRtcpReport(tr: *InternalRtpTransceiver, timestamp: i64, buffer: []u8) error{WriteFailed}![]const u8 {
     return switch (tr.direction) {
         .sendrecv, .sendonly => tr.sender.writeRtcpSenderReport(timestamp, buffer),
         else => &.{},
@@ -640,7 +640,7 @@ test "getRtcpReport" {
         .packet_count = 100,
     };
 
-    const data = tr.getRtcpReport(1782239530300000, &buffer);
+    const data = try tr.getRtcpReport(1782239530300000, &buffer);
     const packet = try rtcp.Packet.decode(data);
     try testing.expectEqual(.sender_report, packet.header.payload_type);
     try testing.expectEqual(tr.sender.ssrc, packet.payload.sr.ssrc);

@@ -219,14 +219,22 @@ const SenderReportIterator = struct {
     index: usize = 0,
     timestamp: i64,
 
-    fn next(it: *SenderReportIterator, pc: *PeerConnection, buffer: []u8) ?[]const u8 {
+    fn next(it: *SenderReportIterator, pc: *PeerConnection, buffer: []u8) error{ WriteFailed, OutOfMemory }!?webrtc.TransportMessage {
+        const writable_buffer = pc.dtls_transport.rtcpPayloadBuffer(buffer) catch buffer[0..0];
         const transceivers = pc.transceivers.items;
-        while (it.index < transceivers.len) {
+        while (it.index < transceivers.len) : (it.index += 1) {
             const tr = &transceivers[it.index];
-            it.index += 1;
             if (tr.isStopped() or tr.direction == .inactive) continue;
-            const data = tr.getRtcpReport(it.timestamp, buffer);
-            if (data.len != 0) return data;
+
+            const data = try tr.getRtcpReport(it.timestamp, writable_buffer);
+            if (data.len == 0) continue;
+
+            const msg = pc.dtls_transport.writeRtcp(buffer, data.len) catch |err| switch (err) {
+                error.WriteFailed => unreachable,
+                else => |e| return e,
+            };
+            it.index += 1;
+            return msg;
         }
         return null;
     }
@@ -288,7 +296,7 @@ pub fn deinit(pc: *PeerConnection) void {
     pc.last_offer.deinit(pc.allocator);
     pc.last_answer.deinit(pc.allocator);
 
-    if (pc.nack_generator) |*ng| ng.deinit();
+    if (pc.nack_generator) |*ng| ng.deinit(pc.allocator);
     pc.sctp_transport.deinit();
     pc.dtls_transport.deinit();
     pc.demuxer.deinit();
@@ -746,29 +754,27 @@ pub fn pollEvent(pc: *PeerConnection) ?Event {
     return pc.events.popFront();
 }
 
-pub const PollTransmitError = DtlsTransport.WriteRtpError || DtlsTransport.WriteRtcpError;
+pub const PollTransmitError = DtlsTransport.WriteMediaError;
 
 pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) PollTransmitError!?webrtc.TransportMessage {
     const buffer2 = pc.int_buffers[packet_size .. 2 * packet_size];
     if (try pc.dtls_transport.pollTransmit(buffer)) |msg| return msg;
 
-    if (try pc.sctp_transport.pollTransmit(buffer2, now)) |sctp_data| {
-        return try pc.dtls_transport.writeAppData(sctp_data, buffer);
-    }
-
-    const payload = try pc.dtls_transport.payloadBuffer(buffer);
-
     if (pc.sender_report_it) |*it| {
-        if (it.next(pc, payload)) |data| return try pc.dtls_transport.writeRtcp(buffer, data.len);
+        if (try it.next(pc, buffer)) |msg| return msg;
         pc.sender_report_it = null;
     }
 
-    if (pc.nack_generator) |*ng| if (try ng.pollTransmit(payload[0..1200])) |data| {
-        return try pc.dtls_transport.writeRtcp(buffer, data.len);
-    };
+    if (pc.nack_generator) |*ng| {
+        const payload = try pc.dtls_transport.rtcpPayloadBuffer(buffer);
+        if (try ng.pollTransmit(payload[0..@min(payload.len, constants.max_rtp_payload_size)])) |data| {
+            return try pc.dtls_transport.writeRtcp(buffer, data.len);
+        }
+    }
 
     while (pc.transmits.front()) |entry| switch (entry) {
         .nack => |sender_id| {
+            const payload = try pc.dtls_transport.rtpPayloadBuffer(buffer);
             const sender = &pc.transceivers.items[sender_id].sender;
             const data = try sender.nextNack(payload) orelse {
                 _ = pc.transmits.popFront();
@@ -777,6 +783,11 @@ pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) PollTransmitErr
             return try pc.dtls_transport.writeRtp(buffer, data.len);
         },
     };
+
+    const app_data_len = (try pc.dtls_transport.appDataPayloadBuffer(buffer)).len;
+    if (try pc.sctp_transport.pollTransmit(buffer2[0..@min(app_data_len, buffer2.len)], now)) |sctp_data| {
+        return pc.dtls_transport.writeAppData(sctp_data, buffer) catch unreachable;
+    }
 
     return null;
 }
@@ -799,9 +810,7 @@ pub fn addLocalCandidates(pc: *PeerConnection, addrs: []const Io.net.IpAddress, 
     try pc.dtls_transport.addIceLocalAddrs(addrs, now);
 }
 
-pub const AddIceServerError = error{
-    GatheringDone,
-} || std.mem.Allocator.Error;
+pub const AddIceServerError = ice.agent.AddServerError;
 
 pub fn addIceServer(pc: *PeerConnection, local_addr: Io.net.IpAddress, server: ice.agent.Server, now: i64) AddIceServerError!void {
     try pc.dtls_transport.addIceServer(local_addr, server, now);
@@ -1349,7 +1358,7 @@ fn handleRtpData(pc: *PeerConnection, data: []const u8) !ReadResult {
 
     const tr = &pc.transceivers.items[id];
     if (tr.receiver.handleRtpPacket(&packet)) {
-        if (tr.receiver.nack) if (pc.nack_generator) |*nack_generator| try nack_generator.handleRead(&packet);
+        if (tr.receiver.nack) if (pc.nack_generator) |*nack_generator| try nack_generator.handleRead(pc.allocator, &packet);
         return .{ .rtp = .{ pc.getRtpReceiver(id), packet } };
     }
 
@@ -1385,16 +1394,16 @@ fn startRtpRtcpInterceptors(pc: *PeerConnection) !void {
         if (tr.canReceive() and tr.receiver.nack) {
             nack = true;
             if (pc.nack_generator == null) {
-                pc.nack_generator = .init(pc.allocator, .{
+                pc.nack_generator = .init(.{
                     .size = pc.nack_config.receive_log_size,
                     .interval = pc.nack_config.interval,
                 });
             }
-        } else if (pc.nack_generator) |*ng| if (tr.receiver.ssrc) |ssrc| ng.deleteSource(ssrc);
+        } else if (pc.nack_generator) |*ng| if (tr.receiver.ssrc) |ssrc| ng.deleteSource(pc.allocator, ssrc);
     }
 
     if (!nack) if (pc.nack_generator) |*nack_generator| {
-        nack_generator.deinit();
+        nack_generator.deinit(pc.allocator);
         pc.nack_generator = null;
     };
 }
