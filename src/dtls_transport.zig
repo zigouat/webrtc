@@ -211,6 +211,7 @@ pub fn handleRead(transport: *DtlsTransport, message: webrtc.TransportMessage, n
         .consumed => null,
     };
 
+    if (transport.session.connection_state == .closed) transport.ice_agent.close();
     // Always drain events, data may be bundled with handshake messages.
     try transport.drainEvents(now);
     return event;

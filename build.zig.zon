@@ -13,8 +13,8 @@
             .hash = "media_protocols-0.2.0-WF_ij0L9BwAQMuxuubfIJvcFqCCbHWUJa-pD3AzrF8LN",
         },
         .sctp = .{
-            .url = "git+https://github.com/zigouat/sctp.git#a1f6ba1a67d4ea242fe83104780eb701e85ce6b6",
-            .hash = "sctp-0.0.0-jRqUYDgUBADgSj_T5WtWwGWkQNgT4gDdciEWkL26TTl3",
+            .url = "git+https://github.com/zigouat/sctp.git#1bf2c8c086b1e54e82ab9df8d3432bffaed28220",
+            .hash = "sctp-0.0.0-jRqUYBMdBACz8cQXoIzRz0bjU6hoVENLwW-WSQPnEYXg",
         },
         .mbedtls = .{
             .url = "git+https://github.com/allyourcodebase/mbedtls.git#55f2af148634945e9508a3a50de2ccfe65eb971f",

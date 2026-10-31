@@ -818,7 +818,27 @@ test "PeerConnection.close: closes data channels" {
     conn.pc.close();
 
     try testing.expectEqual(.closed, conn.pc.data_channels.items[dc.id].ready_state);
-    try testing.expectError(error.DataChannelNotOpen, dc.sendText("hello"));
+    try testing.expectError(error.ConnectionClosed, dc.sendText("hello"));
+
+    var buffer: [1500]u8 = undefined;
+    try testing.expectEqual(null, try conn.pc.pollTransmit(&buffer, 0));
+}
+
+test "PeerConnection: ice closing closes the connection when the transport events are handled" {
+    var conn = try Connection.init(.{});
+    defer conn.deinit();
+
+    const dc = try conn.pc.createDataChannel("dc", .{});
+    conn.pc.dtls_transport.ice_agent.close();
+    try conn.pc.handleTimeout(0, 0);
+
+    try testing.expectEqual(.closed, conn.pc.connection_state);
+    try testing.expectEqual(.closed, conn.pc.signaling_state);
+    try testing.expectEqual(.closed, conn.pc.data_channels.items[dc.id].ready_state);
+    try conn.expectEvent(.connection_state, .closed);
+
+    var buffer: [1500]u8 = undefined;
+    try testing.expectEqual(null, try conn.pc.pollTransmit(&buffer, 0));
 }
 
 test "PeerConnection.setRemoteDescription: answerer is controlled before its answer is applied" {
