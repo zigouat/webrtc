@@ -20,7 +20,7 @@ pub const CreateError = PeerConnection.ClosedError || error{
 pub const SendError = error{
     DataChannelNotOpen,
     MessageTooLarge,
-} || std.mem.Allocator.Error;
+} || std.mem.Allocator.Error || PeerConnection.ClosedError;
 
 id: ChannelId,
 pc: *PeerConnection,

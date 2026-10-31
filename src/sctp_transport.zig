@@ -88,7 +88,7 @@ pub fn close(sctp_transport: *SctpTranport) void {
             sctp_transport.connection_state = .closed;
             sctp_transport.streams.clearRetainingCapacity();
             sctp_transport.released_streams.clearRetainingCapacity();
-            sctp_transport.assoc.shutdown() catch return;
+            sctp_transport.assoc.abort();
         },
         else => {},
     }

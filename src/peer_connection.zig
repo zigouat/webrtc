@@ -582,6 +582,7 @@ pub fn sendDataChannelMessage(
     message: []const u8,
     is_binary: bool,
 ) DataChannel.SendError!void {
+    try pc.checkNotClosed();
     const msg = try pc.getInternalDataChannel(channel_id).wrapMessage(message, is_binary);
 
     const max_message_size = pc.sctp_transport.max_message_size;
@@ -610,6 +611,7 @@ pub fn closeDataChannel(pc: *PeerConnection, channel_id: DataChannel.ChannelId) 
 pub fn close(pc: *PeerConnection) void {
     pc.dtls_transport.close();
     pc.closeDataChannels();
+    pc.connection_state = .closed;
 }
 
 pub const ReadResult = union(enum) {
@@ -710,6 +712,7 @@ pub fn handleRead(pc: *PeerConnection, message: webrtc.TransportMessage, now: i6
 
 pub fn handleTimeout(pc: *PeerConnection, now: i64, wall_clock_us: i64) std.mem.Allocator.Error!void {
     try pc.dtls_transport.handleTimeout(now);
+    try pc.handleTransportEvents();
     try pc.sctp_transport.handleTimeout(now);
 
     if (pc.connection_state == .connected and pc.sender_report_deadline == std.math.maxInt(i64)) {
@@ -724,39 +727,13 @@ pub fn handleTimeout(pc: *PeerConnection, now: i64, wall_clock_us: i64) std.mem.
 }
 
 pub fn pollEvent(pc: *PeerConnection) ?Event {
-    while (true) {
-        const dtls_event = pc.dtls_transport.pollEvent() orelse return pc.events.popFront();
-        switch (dtls_event) {
-            .ice_candidate => |id| return .{ .candidate = pc.dtls_transport.ice_agent.candidates[id] },
-            .end_of_candidates => return .{ .candidate = null },
-            .ice_connection_state, .dtls_connection_state => {
-                const ice_state, const dtls_state = pc.dtls_transport.getConnectionState();
-                const new_state = nextPeerConnectionState(ice_state, dtls_state);
-                if (new_state != pc.connection_state) {
-                    pc.connection_state = new_state;
-                    if (pc.connection_state == .connected) {
-                        pc.maybeConnectSctpTransport() catch |err| {
-                            Logger.err("Failed to connect SCTP transport: {}", .{err});
-                        };
-                    }
-
-                    if (pc.connection_state == .closed) {
-                        pc.signaling_state = .closed;
-                        pc.closeDataChannels();
-                    }
-                    return .{ .connection_state = new_state };
-                }
-            },
-            .ice_gathering_state => |state| return .{ .gathering_state = state },
-        }
-    }
-
     return pc.events.popFront();
 }
 
 pub const PollTransmitError = DtlsTransport.WriteMediaError;
 
 pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) PollTransmitError!?webrtc.TransportMessage {
+    if (pc.connection_state == .closed) return null;
     const buffer2 = pc.int_buffers[packet_size .. 2 * packet_size];
     if (try pc.dtls_transport.pollTransmit(buffer)) |msg| return msg;
 
@@ -808,6 +785,7 @@ pub const AddLocalCandidatesError = error{GatheringDone} || std.mem.Allocator.Er
 /// `addLocalCandidates(&.{}, now)` after all addresses and ICE servers are added.
 pub fn addLocalCandidates(pc: *PeerConnection, addrs: []const Io.net.IpAddress, now: i64) AddLocalCandidatesError!void {
     try pc.dtls_transport.addIceLocalAddrs(addrs, now);
+    try pc.handleTransportEvents();
 }
 
 pub const AddIceServerError = ice.agent.AddServerError;
@@ -839,12 +817,45 @@ fn closeDataChannels(pc: *PeerConnection) void {
     for (pc.data_channels.items) |*dc| dc.ready_state = .closed;
 }
 
+fn handleTransportEvents(pc: *PeerConnection) std.mem.Allocator.Error!void {
+    while (true) {
+        try pc.events.ensureUnusedCapacity(pc.allocator, 1);
+        const dtls_event = pc.dtls_transport.pollEvent() orelse return;
+        switch (dtls_event) {
+            .ice_candidate => |id| pc.events.pushBackAssumeCapacity(.{ .candidate = pc.dtls_transport.ice_agent.candidates[id] }),
+            .end_of_candidates => pc.events.pushBackAssumeCapacity(.{ .candidate = null }),
+            .ice_connection_state, .dtls_connection_state => {
+                const ice_state, const dtls_state = pc.dtls_transport.getConnectionState();
+                const new_state = nextPeerConnectionState(ice_state, dtls_state);
+                if (new_state == pc.connection_state) continue;
+
+                pc.connection_state = new_state;
+                if (pc.connection_state == .connected) {
+                    pc.maybeConnectSctpTransport() catch |err| {
+                        Logger.err("Failed to connect SCTP transport: {}", .{err});
+                    };
+                }
+
+                if (pc.connection_state == .closed) {
+                    pc.signaling_state = .closed;
+                    pc.closeDataChannels();
+                }
+                pc.events.pushBackAssumeCapacity(.{ .connection_state = new_state });
+            },
+            .ice_gathering_state => |state| pc.events.pushBackAssumeCapacity(.{ .gathering_state = state }),
+        }
+    }
+}
+
 fn readMessage(pc: *PeerConnection, message: webrtc.TransportMessage, now: i64) !ReadResult {
-    const data_event = (try pc.dtls_transport.handleRead(
+    const maybe_data_event = try pc.dtls_transport.handleRead(
         message,
         now,
         pc.int_buffers[0..packet_size],
-    )) orelse {
+    );
+    try pc.handleTransportEvents();
+
+    const data_event = maybe_data_event orelse {
         @branchHint(.unlikely);
         return .none;
     };
@@ -1221,6 +1232,7 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
         }
 
         try pc.dtls_transport.applyIceAttributes(media, &remote_sdp.fingerprint, now);
+        try pc.handleTransportEvents();
     }
 
     try pc.events.ensureUnusedCapacity(pc.allocator, track_events.items.len + 2);
