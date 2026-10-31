@@ -824,12 +824,12 @@ test "PeerConnection.close: closes data channels" {
     try testing.expectEqual(null, try conn.pc.pollTransmit(&buffer, 0));
 }
 
-test "PeerConnection: ice closing closes the connection when the transport events are handled" {
+test "PeerConnection: dtls closing closes the connection when the transport events are handled" {
     var conn = try Connection.init(.{});
     defer conn.deinit();
 
     const dc = try conn.pc.createDataChannel("dc", .{});
-    conn.pc.dtls_transport.ice_agent.close();
+    conn.pc.dtls_transport.close();
     try conn.pc.handleTimeout(0, 0);
 
     try testing.expectEqual(.closed, conn.pc.connection_state);
