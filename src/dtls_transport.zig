@@ -122,9 +122,14 @@ pub fn getConnectionState(transport: *const DtlsTransport) struct { ice.Connecti
     return .{ transport.ice_agent.connection_state, transport.session.connection_state };
 }
 
+/// ICE is closed once the DTLS session is closed, a connected session sends close_notify first.
 pub fn close(transport: *DtlsTransport) void {
     transport.session.close();
-    transport.ice_agent.close();
+    if (transport.session.connection_state == .closed) transport.ice_agent.close();
+}
+
+pub fn isClosing(transport: *const DtlsTransport) bool {
+    return transport.session.connection_state == .closing;
 }
 
 pub fn getRole(transport: *const DtlsTransport) dtls.Role {
@@ -230,7 +235,10 @@ pub fn pollEvent(transport: *DtlsTransport) ?Event {
 pub fn pollTransmit(transport: *DtlsTransport, buffer: []u8) error{WriteFailed}!?webrtc.TransportMessage {
     const ice_msg = (try transport.ice_agent.pollTransmit(buffer)) orelse {
         if (transport.ice_agent.nominated_pair == null) return null;
-        const dtls_msg = (try transport.session.pollTransmit(try transport.reservedPayloadBuffer(buffer, 0))) orelse return null;
+        const dtls_msg = (try transport.session.pollTransmit(try transport.reservedPayloadBuffer(buffer, 0))) orelse {
+            if (transport.session.connection_state == .closed) transport.ice_agent.close();
+            return null;
+        };
         return try transport.frame(buffer, dtls_msg);
     };
 

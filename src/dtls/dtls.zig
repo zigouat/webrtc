@@ -27,7 +27,7 @@ const max_srtp_keying_material_size = 30;
 const dtls_mtu: u16 = 1237;
 pub const max_write_size = 1200;
 
-pub const ConnectionState = enum { new, connecting, connected, failed, closed };
+pub const ConnectionState = enum { new, connecting, connected, closing, failed, closed };
 pub const Role = enum { client, server };
 
 pub const SrtpProfile = struct {
@@ -261,7 +261,7 @@ pub const Session = struct {
     }
 
     pub fn handleWrite(session: *Self, data: []const u8, out_buffer: []u8) error{WriteFailed}!usize {
-        std.debug.assert(session.connection_state == .connected);
+        std.debug.assert(session.connection_state == .connected or session.connection_state == .closing);
         std.debug.assert(data.len <= max_write_size);
         if (out_buffer.len < data.len + session.recordOverhead()) return error.WriteFailed;
 
@@ -275,9 +275,16 @@ pub const Session = struct {
         return session.direct_out_len;
     }
 
+    /// A connected session moves to `closing` until `pollTransmit` sends close_notify, then to `closed`.
     pub fn close(session: *Self) void {
-        session.close_pending = true;
-        session.setConnectionState(.closed);
+        switch (session.connection_state) {
+            .connected => {
+                session.close_pending = true;
+                session.setConnectionState(.closing);
+            },
+            .closing, .closed => {},
+            else => session.setConnectionState(.closed),
+        }
     }
 
     pub fn fail(session: *Self) void {
@@ -296,7 +303,10 @@ pub const Session = struct {
         defer session.direct_out = null;
 
         if (session.close_pending) {
-            if (m.mbedtls_ssl_close_notify(&session.ssl) != m.MBEDTLS_ERR_SSL_WANT_WRITE) session.close_pending = false;
+            if (m.mbedtls_ssl_close_notify(&session.ssl) != m.MBEDTLS_ERR_SSL_WANT_WRITE) {
+                session.close_pending = false;
+                session.setConnectionState(.closed);
+            }
         } else if (session.handshake_needed) switch (session.connection_state) {
             .connecting => session.handshakeStep() catch {},
             .connected => {
@@ -778,10 +788,15 @@ test "Dtls session: close connection" {
     try driveHandshake(&peer1, &peer2);
 
     peer1.close();
-    try testing.expect(peer1.connection_state == .closed);
+    try testing.expect(peer1.connection_state == .closing);
 
     var out: [1500]u8 = undefined;
+    try testing.expectError(error.WriteFailed, peer1.pollTransmit(out[0..8]));
+    try testing.expect(peer1.connection_state == .closing);
+
     const dgram = (try peer1.pollTransmit(&out)) orelse return error.ExpectedTransmit;
+    try testing.expect(peer1.connection_state == .closed);
+    try testing.expectEqual(null, try peer1.pollTransmit(&out));
     var buf: [1500]u8 = undefined;
     _ = try peer2.handleRead(dgram, 0, &buf);
     try testing.expect(peer2.connection_state == .closed);
