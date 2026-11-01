@@ -608,6 +608,10 @@ pub fn closeDataChannel(pc: *PeerConnection, channel_id: DataChannel.ChannelId) 
     dc.ready_state = .closing;
 }
 
+/// Closes the PeerConnection.
+///
+/// A `closed` event is not generated. The caller still needs to call `pollTransmit` to send sctp
+/// abort and dtls close_notify messages.
 pub fn close(pc: *PeerConnection) void {
     pc.dtls_transport.close();
     pc.closeDataChannels();
@@ -733,8 +737,7 @@ pub fn pollEvent(pc: *PeerConnection) ?Event {
 pub const PollTransmitError = DtlsTransport.WriteMediaError;
 
 pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) PollTransmitError!?webrtc.TransportMessage {
-    if (pc.connection_state == .closed) return null;
-    const buffer2 = pc.int_buffers[packet_size .. 2 * packet_size];
+    if (pc.connection_state == .closed) return pc.pollCloseTransmit(buffer, now);
     if (try pc.dtls_transport.pollTransmit(buffer)) |msg| return msg;
 
     if (pc.sender_report_it) |*it| {
@@ -742,12 +745,12 @@ pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) PollTransmitErr
         pc.sender_report_it = null;
     }
 
-    if (pc.nack_generator) |*ng| {
+    if (pc.nack_generator) |*ng| if (ng.hasPendingNacks()) {
         const payload = try pc.dtls_transport.rtcpPayloadBuffer(buffer);
         if (try ng.pollTransmit(payload[0..@min(payload.len, constants.max_rtp_payload_size)])) |data| {
             return try pc.dtls_transport.writeRtcp(buffer, data.len);
         }
-    }
+    };
 
     while (pc.transmits.front()) |entry| switch (entry) {
         .nack => |sender_id| {
@@ -761,12 +764,7 @@ pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) PollTransmitErr
         },
     };
 
-    const app_data_len = (try pc.dtls_transport.appDataPayloadBuffer(buffer)).len;
-    if (try pc.sctp_transport.pollTransmit(buffer2[0..@min(app_data_len, buffer2.len)], now)) |sctp_data| {
-        return pc.dtls_transport.writeAppData(sctp_data, buffer) catch unreachable;
-    }
-
-    return null;
+    return pc.pollSctpTransportTransmit(buffer, now);
 }
 
 pub fn pollTimeout(pc: *PeerConnection) ?i64 {
@@ -805,6 +803,22 @@ pub fn checkNegotiationNeeded(pc: *PeerConnection) std.mem.Allocator.Error!void 
     } else {
         pc.negotiation_needed = false;
     }
+}
+
+fn pollCloseTransmit(pc: *PeerConnection, buffer: []u8, now: i64) PollTransmitError!?webrtc.TransportMessage {
+    if (pc.dtls_transport.isClosing()) {
+        if (try pc.pollSctpTransportTransmit(buffer, now)) |msg| return msg;
+    }
+    return pc.dtls_transport.pollTransmit(buffer);
+}
+
+fn pollSctpTransportTransmit(pc: *PeerConnection, buffer: []u8, now: i64) PollTransmitError!?webrtc.TransportMessage {
+    const buffer2 = pc.int_buffers[packet_size .. 2 * packet_size];
+    const app_data_len = (try pc.dtls_transport.appDataPayloadBuffer(buffer)).len;
+    if (try pc.sctp_transport.pollTransmit(buffer2[0..@min(app_data_len, buffer2.len)], now)) |sctp_data| {
+        return pc.dtls_transport.writeAppData(sctp_data, buffer) catch unreachable;
+    }
+    return null;
 }
 
 fn getInternalDataChannel(pc: *PeerConnection, id: DataChannel.ChannelId) *InternalDataChannel {
@@ -1057,7 +1071,7 @@ fn isNegotiationNeeded(pc: *const PeerConnection) bool {
 }
 
 fn nextPeerConnectionState(ice_state: ice.ConnectionState, dtls_state: dtls.ConnectionState) ConnectionState {
-    return if (ice_state == .closed)
+    return if (ice_state == .closed or dtls_state == .closing)
         .closed
     else if (ice_state == .failed or dtls_state == .failed)
         .failed
@@ -1456,4 +1470,5 @@ test "nextPeerConnectionState" {
     try std.testing.expectEqual(.failed, nextPeerConnectionState(.connected, .failed));
     try std.testing.expectEqual(.failed, nextPeerConnectionState(.failed, .connected));
     try std.testing.expectEqual(.closed, nextPeerConnectionState(.closed, .connected));
+    try std.testing.expectEqual(.closed, nextPeerConnectionState(.connected, .closing));
 }

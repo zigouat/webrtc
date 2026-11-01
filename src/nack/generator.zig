@@ -61,8 +61,12 @@ pub fn handleTimeout(self: *NackGenerator, now: i64) void {
 
     if (now >= self.deadline) {
         self.deadline = now + self.interval;
-        self.it = NackGeneratorIterator.init(self);
+        if (self.receive_logs.count() != 0) self.it = NackGeneratorIterator.init(self);
     }
+}
+
+pub fn hasPendingNacks(self: *const NackGenerator) bool {
+    return self.it != null;
 }
 
 pub fn pollTimeout(self: *NackGenerator) i64 {
