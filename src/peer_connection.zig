@@ -745,12 +745,12 @@ pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) PollTransmitErr
         pc.sender_report_it = null;
     }
 
-    if (pc.nack_generator) |*ng| {
+    if (pc.nack_generator) |*ng| if (ng.hasPendingNacks()) {
         const payload = try pc.dtls_transport.rtcpPayloadBuffer(buffer);
         if (try ng.pollTransmit(payload[0..@min(payload.len, constants.max_rtp_payload_size)])) |data| {
             return try pc.dtls_transport.writeRtcp(buffer, data.len);
         }
-    }
+    };
 
     while (pc.transmits.front()) |entry| switch (entry) {
         .nack => |sender_id| {
