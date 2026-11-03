@@ -652,6 +652,8 @@ pub const SctpMessageIterator = struct {
     sctp_it: SctpTransport.MessageIterator,
     pc: *PeerConnection,
 
+    /// The message's data is owned by the SCTP association and valid until the next call to `next`
+    /// or `handleRead`, copy it to keep it.
     pub fn next(it: *SctpMessageIterator) std.mem.Allocator.Error!?DataChannel.UserMessage {
         const pc = it.pc;
 
@@ -680,11 +682,7 @@ pub const SctpMessageIterator = struct {
                 },
                 .ack => |channel_id| _ = try pc.openDataChannel(channel_id),
                 .message => |m| {
-                    errdefer pc.allocator.free(m.data);
-                    if (!try pc.openDataChannel(m.channel_id)) {
-                        pc.allocator.free(m.data);
-                        continue;
-                    }
+                    if (!try pc.openDataChannel(m.channel_id)) continue;
                     return .{ .channel_id = m.channel_id, .binary = m.binary, .data = m.data };
                 },
             }
