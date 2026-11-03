@@ -265,7 +265,6 @@ fn handleAppData(sctp_transport: *SctpTranport, msg: *const sctp.message.UserMes
 
     switch (msg.ppid) {
         DCEP_PPID => {
-            defer allocator.free(msg.data);
             const message = DataChannel.Message.parse(msg.data) catch return null;
             switch (message) {
                 .open => {
@@ -288,12 +287,8 @@ fn handleAppData(sctp_transport: *SctpTranport, msg: *const sctp.message.UserMes
         BINARY_MESSAGE_PPID,
         EMPTY_BINRAY_MESSAGE_PPID,
         => {
-            const stream = sctp_transport.streams.get(msg.stream_id) orelse {
-                allocator.free(msg.data);
-                return null;
-            };
+            const stream = sctp_transport.streams.get(msg.stream_id) orelse return null;
             const empty_data = msg.ppid == EMPTY_TEXT_MESSAGE_PPID or msg.ppid == EMPTY_BINRAY_MESSAGE_PPID;
-            defer if (empty_data) allocator.free(msg.data);
             return .{ .message = .{
                 .channel_id = stream.channel_id,
                 .binary = msg.ppid == BINARY_MESSAGE_PPID or msg.ppid == EMPTY_BINRAY_MESSAGE_PPID,
@@ -302,7 +297,6 @@ fn handleAppData(sctp_transport: *SctpTranport, msg: *const sctp.message.UserMes
         },
         else => {
             Logger.debug("Received data with unknown ppid: {}", .{msg.ppid});
-            allocator.free(msg.data);
         },
     }
 

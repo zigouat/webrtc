@@ -74,7 +74,6 @@ const ConnectionContext = struct {
             switch (result) {
                 .app_data => |*it| while (it.next() catch return) |msg| {
                     std.debug.print("[{s}]: {s}\n", .{ conn.pc.getDataChannel(msg.channel_id).getLabel(), msg.data });
-                    conn.pc.allocator.free(msg.data);
                 },
                 else => {},
             }

@@ -897,6 +897,26 @@ test "PeerConnection.setRemoteDescription: answerer of an ice-lite offer is cont
     try testing.expectEqual(.controlling, conn2.pc.dtls_transport.ice_agent.role);
 }
 
+test "PeerConnection.pollTransmit: no media before the dtls handshake" {
+    var conn1 = try Connection.init(.{});
+    defer conn1.deinit();
+    var conn2 = try Connection.init(.{});
+    defer conn2.deinit();
+
+    _ = try conn1.pc.addTrack(.init(.video, prng.random()), "stream");
+    try negotiate(&conn1.pc, &conn2.pc);
+
+    try testing.expect(conn2.pc.nack_generator != null);
+    var buffer: [1500]u8 = undefined;
+    for ([_]*PeerConnection{ &conn1.pc, &conn2.pc }) |pc| {
+        for (0..3) |i| {
+            const now: i64 = @intCast(i * 2_000);
+            try pc.handleTimeout(now, now * 1_000);
+            try testing.expectEqual(null, try pc.pollTransmit(&buffer, now));
+        }
+    }
+}
+
 fn negotiate(pc1: *PeerConnection, pc2: *PeerConnection) !void {
     const offer = try pc1.createOffer();
     try pc1.setLocalDescription(offer);

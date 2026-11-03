@@ -103,7 +103,6 @@ const ConnectionContext = struct {
                     .app_data => |it| {
                         var it2 = it;
                         while (it2.next() catch return) |message| {
-                            defer conn.pc.allocator.free(message.data);
                             conn.received += message.data.len;
                         }
                     },
