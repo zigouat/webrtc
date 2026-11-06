@@ -804,7 +804,7 @@ test "PeerConnection.DataChannel.close: before sctp connected" {
     const dc = try conn.pc.createDataChannel("dc", .{});
     try dc.close();
     try conn.expectEvent(.data_channel, .{ .close = dc.id });
-    try testing.expectError(error.DataChannelNotOpen, dc.sendText("hello"));
+    try testing.expectError(error.DataChannelNotOpen, dc.sendText("hello", 0));
 
     try dc.close();
     try conn.expectNoEvent(.data_channel);
@@ -818,7 +818,7 @@ test "PeerConnection.close: closes data channels" {
     conn.pc.close();
 
     try testing.expectEqual(.closed, conn.pc.data_channels.items[dc.id].ready_state);
-    try testing.expectError(error.ConnectionClosed, dc.sendText("hello"));
+    try testing.expectError(error.ConnectionClosed, dc.sendText("hello", 0));
 
     var buffer: [1500]u8 = undefined;
     try testing.expectEqual(null, try conn.pc.pollTransmit(&buffer, 0));

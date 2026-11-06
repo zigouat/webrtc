@@ -554,7 +554,7 @@ pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataCha
     try pc.checkNotClosed();
     if (label.len > constants.max_data_channel_label_length) return error.LabelTooLong;
     if (params.protocol.len > constants.max_data_channel_label_length) return error.ProtocolTooLong;
-    if (params.max_packet_lifetime != 0 and params.max_retransmits != 0) return error.InvalidParameters;
+    if (params.max_packet_lifetime != null and params.max_retransmits != null) return error.InvalidParameters;
     if (params.id != null) return error.InvalidParameters;
 
     try pc.data_channels.ensureUnusedCapacity(pc.allocator, 1);
@@ -581,14 +581,16 @@ pub fn sendDataChannelMessage(
     channel_id: DataChannel.ChannelId,
     message: []const u8,
     is_binary: bool,
+    now: i64,
 ) DataChannel.SendError!void {
     try pc.checkNotClosed();
-    const msg = try pc.getInternalDataChannel(channel_id).wrapMessage(message, is_binary);
+    const dc = pc.getInternalDataChannel(channel_id);
+    const msg = try dc.wrapMessage(message, is_binary);
 
     const max_message_size = pc.sctp_transport.max_message_size;
     if (max_message_size != 0 and message.len > max_message_size) return error.MessageTooLarge;
 
-    pc.sctp_transport.handleWrite(msg) catch |err| switch (err) {
+    pc.sctp_transport.handleWrite(msg, dc.policy(now)) catch |err| switch (err) {
         error.AssocNotConnected => return error.DataChannelNotOpen,
         else => |e| return e,
     };

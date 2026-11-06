@@ -94,11 +94,11 @@ pub const Message = union(MessageType) {
             },
             .max_packet_lifetime = switch (open_msg.channel_type) {
                 .partial_reliable_timed, .partial_reliable_timed_unordered => open_msg.reliability_param,
-                else => 0,
+                else => null,
             },
             .max_retransmits = switch (open_msg.channel_type) {
-                .partial_reliable_rexmit, .partial_reliable_rexmit_unordered => open_msg.reliability_param,
-                else => 0,
+                .partial_reliable_rexmit, .partial_reliable_rexmit_unordered => @intCast(@min(open_msg.reliability_param, std.math.maxInt(u15))),
+                else => null,
             },
             .id = stream_id,
         };
@@ -107,8 +107,8 @@ pub const Message = union(MessageType) {
 
 pub const Parameters = struct {
     ordered: bool = true,
-    max_packet_lifetime: u32 = 0,
-    max_retransmits: u32 = 0,
+    max_packet_lifetime: ?u32 = null,
+    max_retransmits: ?u15 = null,
     protocol: []const u8 = "",
     id: ?u16 = null,
 };
@@ -117,8 +117,8 @@ id: ?u16,
 slice: []const u8, // label + protocol
 label_length: u16,
 ordered: bool,
-max_packet_lifetime: u32,
-max_retransmits: u32,
+max_packet_lifetime: ?u32,
+max_retransmits: ?u15,
 buffered_amount_low_threshold: u32,
 ready_state: State,
 
@@ -162,8 +162,8 @@ pub fn writeOpenMessage(data_channel: *const InternalDataChannel, buffer: []u8) 
     try w.writeInt(u16, 0, .big); // priority
     try w.writeInt(u32, switch (channel_type) {
         .reliable, .reliable_unordered => 0,
-        .partial_reliable_rexmit, .partial_reliable_rexmit_unordered => data_channel.max_retransmits,
-        .partial_reliable_timed, .partial_reliable_timed_unordered => data_channel.max_packet_lifetime,
+        .partial_reliable_rexmit, .partial_reliable_rexmit_unordered => data_channel.max_retransmits.?,
+        .partial_reliable_timed, .partial_reliable_timed_unordered => data_channel.max_packet_lifetime.?,
     }, .big);
     try w.writeInt(u16, data_channel.label_length, .big);
     try w.writeInt(u16, @intCast(data_channel.slice.len - data_channel.label_length), .big);
@@ -209,8 +209,14 @@ pub fn wrapMessage(dc: *const InternalDataChannel, data: []const u8, binary: boo
     };
 }
 
+pub fn policy(data_channel: *const InternalDataChannel, now: i64) sctp.message.Policy {
+    if (data_channel.max_retransmits) |count| return .{ .max_retransmit = count };
+    if (data_channel.max_packet_lifetime) |lifetime| return .{ .deadline = now + lifetime };
+    return .reliable;
+}
+
 pub fn format(data_channel: *const InternalDataChannel, writer: *std.Io.Writer) !void {
-    try writer.print("DataChannel {{ id: {?d}, label: \"{s}\", ordered: {}, max_packet_lifetime: {d}, max_retransmits: {d}, protocol: \"{s}\", ready_state: {t} }}", .{
+    try writer.print("DataChannel {{ id: {?d}, label: \"{s}\", ordered: {}, max_packet_lifetime: {?d}, max_retransmits: {?d}, protocol: \"{s}\", ready_state: {t} }}", .{
         data_channel.id,
         data_channel.getLabel(),
         data_channel.ordered,
@@ -223,17 +229,17 @@ pub fn format(data_channel: *const InternalDataChannel, writer: *std.Io.Writer) 
 
 fn getChannelType(data_channel: *const InternalDataChannel) Message.ChannelType {
     if (data_channel.ordered) {
-        if (data_channel.max_packet_lifetime != 0) {
+        if (data_channel.max_packet_lifetime != null) {
             return .partial_reliable_timed;
-        } else if (data_channel.max_retransmits != 0) {
+        } else if (data_channel.max_retransmits != null) {
             return .partial_reliable_rexmit;
         } else {
             return .reliable;
         }
     } else {
-        if (data_channel.max_packet_lifetime != 0) {
+        if (data_channel.max_packet_lifetime != null) {
             return .partial_reliable_timed_unordered;
-        } else if (data_channel.max_retransmits != 0) {
+        } else if (data_channel.max_retransmits != null) {
             return .partial_reliable_rexmit_unordered;
         } else {
             return .reliable_unordered;
@@ -358,7 +364,7 @@ test "InternalDataChannel.init" {
     try testing.expectEqual(4, data_channel.id);
     try testing.expectEqual(false, data_channel.ordered);
     try testing.expectEqual(3, data_channel.max_retransmits);
-    try testing.expectEqual(0, data_channel.max_packet_lifetime);
+    try testing.expectEqual(null, data_channel.max_packet_lifetime);
     try testing.expectEqual(.connecting, data_channel.ready_state);
 }
 
@@ -370,6 +376,8 @@ test "InternalDataChannel.writeOpenMessage round trip" {
         .{ .id = 4, .ordered = false, .max_retransmits = 5 },
         .{ .id = 5, .max_packet_lifetime = 1000 },
         .{ .id = 6, .ordered = false, .max_packet_lifetime = 1000, .protocol = "p" },
+        .{ .id = 7, .ordered = false, .max_retransmits = 0 },
+        .{ .id = 8, .max_packet_lifetime = 0 },
     };
     var buffer: [1024]u8 = undefined;
 
@@ -455,7 +463,7 @@ test "InternalDataChannel.format" {
     var buffer: [256]u8 = undefined;
     const out = try std.fmt.bufPrint(&buffer, "{f}", .{&data_channel});
     try testing.expectEqualStrings(
-        "DataChannel { id: 2, label: \"chat\", ordered: true, max_packet_lifetime: 0, max_retransmits: 3, protocol: \"json\", ready_state: connecting }",
+        "DataChannel { id: 2, label: \"chat\", ordered: true, max_packet_lifetime: null, max_retransmits: 3, protocol: \"json\", ready_state: connecting }",
         out,
     );
 }

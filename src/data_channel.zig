@@ -25,12 +25,12 @@ pub const SendError = error{
 id: ChannelId,
 pc: *PeerConnection,
 
-pub fn send(dc: DataChannel, data: []const u8) SendError!void {
-    return dc.pc.sendDataChannelMessage(dc.id, data, true);
+pub fn send(dc: DataChannel, data: []const u8, now: i64) SendError!void {
+    return dc.pc.sendDataChannelMessage(dc.id, data, true, now);
 }
 
-pub fn sendText(dc: DataChannel, text: []const u8) SendError!void {
-    return dc.pc.sendDataChannelMessage(dc.id, text, false);
+pub fn sendText(dc: DataChannel, text: []const u8, now: i64) SendError!void {
+    return dc.pc.sendDataChannelMessage(dc.id, text, false, now);
 }
 
 pub fn close(dc: DataChannel) std.mem.Allocator.Error!void {
@@ -47,7 +47,7 @@ pub fn getProtocol(dc: DataChannel) []const u8 {
 
 pub fn connect(dc: DataChannel, buffer: []u8) std.mem.Allocator.Error!void {
     const open_msg = dc.internal().writeOpenMessage(buffer) catch unreachable;
-    dc.pc.sctp_transport.handleWrite(open_msg) catch |err| switch (err) {
+    dc.pc.sctp_transport.handleWrite(open_msg, .reliable) catch |err| switch (err) {
         error.AssocNotConnected => unreachable,
         else => |e| return e,
     };

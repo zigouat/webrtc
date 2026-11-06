@@ -111,7 +111,9 @@ const ConnectionContext = struct {
         while (true) {
             try conn.io.sleep(.fromSeconds(5), .awake);
             common.utils.randString(conn.io, &message);
-            dc.sendText(&message) catch |err| {
+            try conn.mutex.lock(conn.io);
+            defer conn.mutex.unlock(conn.io);
+            dc.sendText(&message, Io.Timestamp.now(conn.io, .awake).toMilliseconds()) catch |err| {
                 std.log.err("Failed to send data channel message: {}", .{err});
                 return;
             };
