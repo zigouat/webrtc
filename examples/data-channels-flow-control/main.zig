@@ -128,9 +128,9 @@ const ConnectionContext = struct {
             },
             .data_channel => |dc_event| switch (dc_event) {
                 .new => |id| conn.dc = conn.pc.getDataChannel(id),
-                .open => if (conn.offerer) try conn.sendData(),
+                .open => if (conn.offerer) try conn.sendData(now),
                 // The answerer's threshold is 0, the event fires once its DCEP ack is sent.
-                .buffered_amount_low_threshold => if (conn.offerer) try conn.sendData(),
+                .buffered_amount_low_threshold => if (conn.offerer) try conn.sendData(now),
                 else => {},
             },
             else => {},
@@ -145,10 +145,10 @@ const ConnectionContext = struct {
         }
     }
 
-    fn sendData(conn: *ConnectionContext) !void {
+    fn sendData(conn: *ConnectionContext, now: i64) !void {
         var buffered = conn.dc.bufferedAmount();
         while (buffer.len + buffered <= max_buffered_amount) : (buffered += buffer.len) {
-            try conn.dc.send(&buffer);
+            try conn.dc.send(&buffer, now);
         }
     }
 };

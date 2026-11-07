@@ -61,7 +61,8 @@ pub fn init(allocator: std.mem.Allocator, init_config: InitConfig) SctpTranport 
             .dest_port = init_config.remote_port,
             .random = init_config.random,
             .supported_extensions = .{
-                .stream_reconfiguration = true, // data channel close support
+                .stream_reconfiguration = true,
+                .partial_reliability = true,
             },
         }),
         .max_message_size = default_max_message_size,
@@ -115,7 +116,7 @@ pub fn openStream(sctp_transport: *SctpTranport, channel_id: DataChannel.Channel
 
 pub fn acceptStream(sctp_transport: *SctpTranport, dc: *const DataChannel, channel_id: DataChannel.ChannelId) WriteError!void {
     try sctp_transport.streams.ensureUnusedCapacity(sctp_transport.assoc.allocator, 1);
-    try sctp_transport.handleWrite(dc.writeAckMessage());
+    try sctp_transport.handleWrite(dc.writeAckMessage(), .reliable);
     sctp_transport.streams.putAssumeCapacity(dc.id.?, .{ .channel_id = channel_id });
 }
 
@@ -184,16 +185,19 @@ pub fn setDataChannelBufferedAmountLowThreshold(sctp_transport: *SctpTranport, s
     try sctp_transport.assoc.setBufferedAmountLowThreshold(stream_id, threshold);
 }
 
-pub fn handleWrite(sctp_transport: *SctpTranport, msg: sctp.message.UserMessage) WriteError!void {
+pub fn handleWrite(sctp_transport: *SctpTranport, msg: sctp.message.UserMessage, policy: sctp.message.Policy) WriteError!void {
     if (sctp_transport.connection_state != .connected) return error.AssocNotConnected;
 
     sctp_transport.assoc.handleWrite(msg.data, .{
         .ppid = msg.ppid,
         .stream_id = msg.stream_id,
         .unordered = msg.unordered,
+        .policy = policy,
     }) catch |err| switch (err) {
         error.InvalidState => return error.AssocNotConnected,
         error.InvalidStream => unreachable,
+        // The peer doesn't support partial reliability, send the message reliably.
+        error.UnsupportedExtension => return sctp_transport.handleWrite(msg, .reliable),
         else => |e| return e,
     };
 }
