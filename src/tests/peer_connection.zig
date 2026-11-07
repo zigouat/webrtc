@@ -8,10 +8,13 @@ const testing = std.testing;
 const io = testing.io;
 const allocator = testing.allocator;
 const PCEnum = @typeInfo(PeerConnection.Event).@"union".tag_type.?;
+const DataChannelEventTag = @typeInfo(webrtc.DataChannel.Event).@"union".tag_type.?;
 
 const Connection = struct {
     pc: PeerConnection,
     media_engine: *webrtc.MediaEngine,
+    events: std.ArrayList(PeerConnection.Event),
+    messages_received: usize = 0,
 
     const Config = struct {
         enable_rtx: bool = false,
@@ -30,23 +33,51 @@ const Connection = struct {
             .random = prng.random(),
         });
 
-        return .{ .pc = pc, .media_engine = media_engine };
+        return .{ .pc = pc, .media_engine = media_engine, .events = .empty };
     }
 
     fn deinit(conn: *Connection) void {
         conn.pc.deinit();
         conn.media_engine.deinit(allocator);
+        conn.events.deinit(allocator);
         allocator.destroy(conn.media_engine);
     }
 
     fn popEvent(conn: *Connection, event_type: PCEnum) ?webrtc.PeerConnection.Event {
-        return blk: {
-            while (conn.pc.pollEvent()) |event| if (std.meta.activeTag(event) == event_type) {
-                break :blk event;
-            };
+        while (conn.pc.pollEvent()) |event| conn.events.append(testing.allocator, event) catch @panic("OOM");
 
-            break :blk null;
+        for (conn.events.items, 0..) |event, idx| if (std.meta.activeTag(event) == event_type) {
+            _ = conn.events.orderedRemove(idx);
+            return event;
         };
+
+        return null;
+    }
+
+    fn popDataChannelEvent(conn: *Connection, kind: DataChannelEventTag, label: []const u8) !bool {
+        while (conn.pc.pollEvent()) |event| try conn.events.append(testing.allocator, event);
+
+        for (conn.events.items, 0..) |event, idx| switch (event) {
+            .data_channel => |dc_event| {
+                const channel_id = switch (dc_event) {
+                    inline else => |id| id,
+                };
+                if (dc_event != kind or !std.mem.eql(u8, label, conn.pc.getDataChannel(channel_id).label())) continue;
+                _ = conn.events.orderedRemove(idx);
+                return true;
+            },
+            else => {},
+        };
+
+        return false;
+    }
+
+    fn findDataChannel(conn: *Connection, label: []const u8) ?webrtc.DataChannel {
+        for (0..conn.pc.data_channels.items.len) |idx| {
+            const dc = conn.pc.getDataChannel(@intCast(idx));
+            if (std.mem.eql(u8, label, dc.label())) return dc;
+        }
+        return null;
     }
 
     fn expectEvent(conn: *Connection, comptime event_type: PCEnum, expected: @FieldType(PeerConnection.Event, @tagName(event_type))) !void {
@@ -59,6 +90,81 @@ const Connection = struct {
     fn expectNoEvent(conn: *Connection, event_type: PCEnum) !void {
         const event = conn.popEvent(event_type);
         try std.testing.expect(event == null);
+    }
+};
+
+const ConnectionPair = struct {
+    conn1: Connection,
+    conn2: Connection,
+    clock: i64 = 0,
+    iteration: u32 = 0,
+
+    const max_iterations: u32 = 1000;
+
+    fn init(config: Connection.Config) !ConnectionPair {
+        var conn1 = try Connection.init(config);
+        errdefer conn1.deinit();
+        var conn2 = try Connection.init(config);
+        errdefer conn2.deinit();
+
+        try conn1.pc.addLocalCandidates(&.{std.Io.net.IpAddress{ .ip4 = .loopback(6000) }}, 0);
+        try conn2.pc.addLocalCandidates(&.{std.Io.net.IpAddress{ .ip4 = .loopback(6001) }}, 0);
+        try conn1.pc.addLocalCandidates(&.{}, 0);
+        try conn2.pc.addLocalCandidates(&.{}, 0);
+
+        return .{ .conn1 = conn1, .conn2 = conn2 };
+    }
+
+    fn deinit(pair: *ConnectionPair) void {
+        pair.conn1.deinit();
+        pair.conn2.deinit();
+    }
+
+    fn connect(pair: *ConnectionPair) !void {
+        try negotiate(&pair.conn1.pc, &pair.conn2.pc);
+        while (pair.conn1.pc.connection_state != .connected or pair.conn2.pc.connection_state != .connected) {
+            try pair.nextIteration();
+        }
+    }
+
+    fn nextIteration(self: *ConnectionPair) !void {
+        if (self.iteration >= max_iterations) return error.TestFailed;
+
+        var buffer: [1500]u8 = undefined;
+        while (self.conn1.pc.pollEvent()) |event| try self.conn1.events.append(testing.allocator, event);
+
+        while (try self.conn1.pc.pollTransmit(&buffer, self.clock)) |msg| {
+            switch (try self.conn2.pc.handleRead(msg, self.clock)) {
+                .app_data => |tmp_it| {
+                    var it = tmp_it;
+                    while (try it.next()) |_| self.conn2.messages_received += 1;
+                },
+                else => {},
+            }
+        }
+
+        while (self.conn2.pc.pollEvent()) |event| try self.conn2.events.append(testing.allocator, event);
+
+        while (try self.conn2.pc.pollTransmit(&buffer, self.clock)) |msg| {
+            switch (try self.conn1.pc.handleRead(msg, self.clock)) {
+                .app_data => |tmp_it| {
+                    var it = tmp_it;
+                    while (try it.next()) |_| self.conn1.messages_received += 1;
+                },
+                else => {},
+            }
+        }
+
+        if (self.clock >= self.conn1.pc.pollTimeout() orelse std.math.maxInt(i64)) {
+            try self.conn1.pc.handleTimeout(self.clock, 0);
+        }
+
+        if (self.clock >= self.conn2.pc.pollTimeout() orelse std.math.maxInt(i64)) {
+            try self.conn2.pc.handleTimeout(self.clock, 0);
+        }
+
+        self.clock += 100;
+        self.iteration += 1;
     }
 };
 
@@ -79,6 +185,17 @@ test "PeerConnection.init" {
         .random = prng.random(),
     });
     defer pc.deinit();
+}
+
+test "PeerConnection: connect two peers" {
+    var pair = try ConnectionPair.init(.{});
+    defer pair.deinit();
+
+    _ = try pair.conn1.pc.addTrack(.initWithId("video", .video), null);
+
+    try pair.connect();
+    try std.testing.expectEqual(.connected, pair.conn1.pc.connection_state);
+    try std.testing.expectEqual(.connected, pair.conn2.pc.connection_state);
 }
 
 test "PeerConnection.addTransceiverFromKind: no leak on allocation failure" {
@@ -782,6 +899,148 @@ test "PeerConnection.negotiation between peers: add/remove tracks" {
     try testing.expect(event == null);
 }
 
+test "PeerConnection.createDataChannel" {
+    var pair = try ConnectionPair.init(.{});
+    defer pair.deinit();
+
+    const dc1 = try pair.conn1.pc.createDataChannel("chat1", .{});
+    const dc2 = try pair.conn2.pc.createDataChannel("chat2", .{
+        .max_packet_lifetime = 1000,
+    });
+
+    const dc3 = try pair.conn1.pc.createDataChannel("chat3", .{ .id = 42 });
+    const dc4 = try pair.conn2.pc.createDataChannel("chat4", .{ .id = 42 });
+
+    try pair.connect();
+
+    const Expected = struct { conn: *Connection, kind: DataChannelEventTag, label: []const u8 };
+    const expected = [_]Expected{
+        .{ .conn = &pair.conn1, .kind = .open, .label = dc1.label() },
+        .{ .conn = &pair.conn1, .kind = .new, .label = dc2.label() },
+        .{ .conn = &pair.conn1, .kind = .open, .label = dc2.label() },
+        .{ .conn = &pair.conn1, .kind = .open, .label = dc3.label() },
+        .{ .conn = &pair.conn2, .kind = .open, .label = dc2.label() },
+        .{ .conn = &pair.conn2, .kind = .new, .label = dc1.label() },
+        .{ .conn = &pair.conn2, .kind = .open, .label = dc1.label() },
+        .{ .conn = &pair.conn2, .kind = .open, .label = dc4.label() },
+    };
+
+    for (expected) |e| {
+        while (!try e.conn.popDataChannelEvent(e.kind, e.label)) try pair.nextIteration();
+    }
+
+    for ([_]*Connection{ &pair.conn1, &pair.conn2 }) |conn| {
+        try testing.expectEqual(3, conn.pc.data_channels.items.len);
+        for (0..3) |idx| try testing.expectEqual(.open, conn.pc.getDataChannel(@intCast(idx)).readyState());
+    }
+    try testing.expectEqual(42, dc3.streamId());
+    try testing.expectEqual(42, dc4.streamId());
+
+    try testing.expectError(error.NoAvailableStreamId, pair.conn1.pc.createDataChannel("chat5", .{ .id = 42 }));
+
+    const dc5 = try pair.conn1.pc.createDataChannel("chat5", .{});
+    while (!try pair.conn2.popDataChannelEvent(.new, dc5.label())) try pair.nextIteration();
+}
+
+test "PeerConnection.createDataChannel: negotiated after sctp connected" {
+    var pair = try ConnectionPair.init(.{});
+    defer pair.deinit();
+
+    const dc = try pair.conn1.pc.createDataChannel("dc", .{});
+    try pair.connect();
+    while (!try pair.conn2.popDataChannelEvent(.open, dc.label())) try pair.nextIteration();
+
+    const dc1 = try pair.conn1.pc.createDataChannel("negotiated1", .{ .id = 10 });
+    const dc2 = try pair.conn2.pc.createDataChannel("negotiated2", .{ .id = 10 });
+
+    try testing.expect(try pair.conn1.popDataChannelEvent(.open, dc1.label()));
+    try testing.expect(try pair.conn2.popDataChannelEvent(.open, dc2.label()));
+    try testing.expectEqual(.open, dc1.readyState());
+    try testing.expectEqual(.open, dc2.readyState());
+
+    try dc1.sendText("ping", pair.clock);
+    try dc2.sendText("pong", pair.clock);
+    while (pair.conn1.messages_received == 0 or pair.conn2.messages_received == 0) try pair.nextIteration();
+
+    try testing.expect(!try pair.conn1.popDataChannelEvent(.open, dc1.label()));
+    try testing.expect(!try pair.conn2.popDataChannelEvent(.open, dc2.label()));
+}
+
+test "PeerConnection.createDataChannel: negotiated stream id out of range" {
+    var pair = try ConnectionPair.init(.{});
+    defer pair.deinit();
+
+    const dc = try pair.conn1.pc.createDataChannel("dc", .{});
+    try pair.connect();
+    while (!try pair.conn1.popDataChannelEvent(.open, dc.label())) try pair.nextIteration();
+
+    const outbound_streams = pair.conn1.pc.sctp_transport.assoc.outbound_streams;
+    try testing.expectError(error.NoAvailableStreamId, pair.conn1.pc.createDataChannel("dc", .{ .id = outbound_streams }));
+    try testing.expectError(error.NoAvailableStreamId, pair.conn1.pc.createDataChannel("dc", .{ .id = 65535 }));
+    try testing.expectEqual(1, pair.conn1.pc.data_channels.items.len);
+}
+
+test "PeerConnection.createDataChannel: duplicate negotiated stream id before sctp connected" {
+    var pair = try ConnectionPair.init(.{});
+    defer pair.deinit();
+
+    const dc1 = try pair.conn1.pc.createDataChannel("dc1", .{ .id = 42 });
+    const dc2 = try pair.conn1.pc.createDataChannel("dc2", .{ .id = 42 });
+    try pair.connect();
+
+    while (!try pair.conn1.popDataChannelEvent(.open, dc1.label())) try pair.nextIteration();
+    try testing.expect(try pair.conn1.popDataChannelEvent(.close, dc2.label()));
+    try testing.expectEqual(.open, dc1.readyState());
+    try testing.expectEqual(.closed, dc2.readyState());
+    try testing.expect(!try pair.conn1.popDataChannelEvent(.open, dc2.label()));
+}
+
+test "PeerConnection.createDataChannel: negotiated stream ids are assigned before automatic ones" {
+    var pair = try ConnectionPair.init(.{});
+    defer pair.deinit();
+
+    const auto = try pair.conn1.pc.createDataChannel("auto", .{});
+    const even = try pair.conn1.pc.createDataChannel("even", .{ .id = 0 });
+    const odd = try pair.conn1.pc.createDataChannel("odd", .{ .id = 1 });
+    try pair.connect();
+
+    while (!try pair.conn1.popDataChannelEvent(.open, auto.label())) try pair.nextIteration();
+    try testing.expect(try pair.conn1.popDataChannelEvent(.open, even.label()));
+    try testing.expect(try pair.conn1.popDataChannelEvent(.open, odd.label()));
+    while (!try pair.conn2.popDataChannelEvent(.new, auto.label())) try pair.nextIteration();
+
+    try testing.expectEqual(0, even.streamId());
+    try testing.expectEqual(1, odd.streamId());
+    try testing.expect(auto.streamId().? > 1);
+    for ([_]webrtc.DataChannel{ auto, even, odd }) |dc| try testing.expectEqual(.open, dc.readyState());
+}
+
+test "PeerConnection.createDataChannel: parameters are sent to the remote peer" {
+    var pair = try ConnectionPair.init(.{});
+    defer pair.deinit();
+
+    const rexmit = try pair.conn1.pc.createDataChannel("rexmit", .{ .ordered = false, .max_retransmits = 3, .protocol = "proto" });
+    const timed = try pair.conn1.pc.createDataChannel("timed", .{ .max_packet_lifetime = 1000 });
+    try pair.connect();
+
+    while (!try pair.conn2.popDataChannelEvent(.new, rexmit.label())) try pair.nextIteration();
+    while (!try pair.conn2.popDataChannelEvent(.new, timed.label())) try pair.nextIteration();
+
+    const remote_rexmit = pair.conn2.findDataChannel(rexmit.label()).?;
+    try testing.expectEqual(false, remote_rexmit.ordered());
+    try testing.expectEqual(3, remote_rexmit.maxRetransmits());
+    try testing.expectEqual(null, remote_rexmit.maxPacketLifetime());
+    try testing.expectEqualStrings("proto", remote_rexmit.protocol());
+    try testing.expectEqual(rexmit.streamId(), remote_rexmit.streamId());
+
+    const remote_timed = pair.conn2.findDataChannel(timed.label()).?;
+    try testing.expectEqual(true, remote_timed.ordered());
+    try testing.expectEqual(null, remote_timed.maxRetransmits());
+    try testing.expectEqual(1000, remote_timed.maxPacketLifetime());
+    try testing.expectEqualStrings("", remote_timed.protocol());
+    try testing.expectEqual(timed.streamId(), remote_timed.streamId());
+}
+
 test "PeerConnection.createDataChannel: invalid parameters" {
     var conn = try Connection.init(.{});
     defer conn.deinit();
@@ -789,12 +1048,46 @@ test "PeerConnection.createDataChannel: invalid parameters" {
     const long_label: [257]u8 = @splat('a');
     try testing.expectError(error.LabelTooLong, conn.pc.createDataChannel(&long_label, .{}));
     try testing.expectError(error.ProtocolTooLong, conn.pc.createDataChannel("dc", .{ .protocol = &long_label }));
-    try testing.expectError(error.InvalidParameters, conn.pc.createDataChannel("dc", .{ .id = 1 }));
     try testing.expectError(
         error.InvalidParameters,
         conn.pc.createDataChannel("dc", .{ .max_retransmits = 1, .max_packet_lifetime = 1 }),
     );
     try testing.expectEqual(0, conn.pc.data_channels.items.len);
+}
+
+test "PeerConnection.DataChannel.close" {
+    var pair = try ConnectionPair.init(.{});
+    defer pair.deinit();
+
+    {
+        const dc = try pair.conn1.pc.createDataChannel("dc", .{});
+        try pair.connect();
+
+        while (!try pair.conn2.popDataChannelEvent(.new, dc.label())) try pair.nextIteration();
+        while (!try pair.conn2.popDataChannelEvent(.open, dc.label())) try pair.nextIteration();
+        try dc.close();
+
+        while (!try pair.conn1.popDataChannelEvent(.close, dc.label())) try pair.nextIteration();
+        while (!try pair.conn2.popDataChannelEvent(.close, dc.label())) try pair.nextIteration();
+    }
+
+    // Reuse the same stream id after closing a data channel
+    {
+        const dc = try pair.conn1.pc.createDataChannel("dc", .{ .id = 100 });
+        const dc2 = try pair.conn2.pc.createDataChannel("dc2", .{ .id = 100 });
+
+        while (!try pair.conn1.popDataChannelEvent(.open, dc.label())) try pair.nextIteration();
+        while (!try pair.conn2.popDataChannelEvent(.open, dc2.label())) try pair.nextIteration();
+        try dc.close();
+
+        while (!try pair.conn1.popDataChannelEvent(.close, dc.label())) try pair.nextIteration();
+        while (!try pair.conn2.popDataChannelEvent(.close, dc2.label())) try pair.nextIteration();
+
+        const dc3 = try pair.conn1.pc.createDataChannel("dc3", .{ .id = 100 });
+        const dc4 = try pair.conn2.pc.createDataChannel("dc4", .{ .id = 100 });
+        while (!try pair.conn1.popDataChannelEvent(.open, dc3.label())) try pair.nextIteration();
+        while (!try pair.conn2.popDataChannelEvent(.open, dc4.label())) try pair.nextIteration();
+    }
 }
 
 test "PeerConnection.DataChannel.close: before sctp connected" {
@@ -817,7 +1110,7 @@ test "PeerConnection.close: closes data channels" {
     const dc = try conn.pc.createDataChannel("dc", .{});
     conn.pc.close();
 
-    try testing.expectEqual(.closed, conn.pc.data_channels.items[dc.id].ready_state);
+    try testing.expectEqual(.closed, dc.readyState());
     try testing.expectError(error.ConnectionClosed, dc.sendText("hello", 0));
 
     var buffer: [1500]u8 = undefined;
@@ -834,7 +1127,7 @@ test "PeerConnection: dtls closing closes the connection when the transport even
 
     try testing.expectEqual(.closed, conn.pc.connection_state);
     try testing.expectEqual(.closed, conn.pc.signaling_state);
-    try testing.expectEqual(.closed, conn.pc.data_channels.items[dc.id].ready_state);
+    try testing.expectEqual(.closed, dc.readyState());
     try conn.expectEvent(.connection_state, .closed);
 
     var buffer: [1500]u8 = undefined;

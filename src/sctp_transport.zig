@@ -106,16 +106,22 @@ pub fn deinit(sctp_transport: *SctpTranport) void {
 
 pub const OpenStreamError = error{NoAvailableStreamId} || std.mem.Allocator.Error;
 
-pub fn openStream(sctp_transport: *SctpTranport, channel_id: DataChannel.ChannelId, buffer_threshold: u32) OpenStreamError!u16 {
+pub fn openStream(sctp_transport: *SctpTranport, channel_id: DataChannel.ChannelId, stream_id: ?u16, buffer_threshold: u32) OpenStreamError!u16 {
     try sctp_transport.streams.ensureUnusedCapacity(sctp_transport.assoc.allocator, 1);
-    const sid = try sctp_transport.nextStreamId();
+    const sid = if (stream_id) |sid| blk: {
+        if (sctp_transport.streams.contains(sid) or sid >= sctp_transport.assoc.outbound_streams) return error.NoAvailableStreamId;
+        break :blk sid;
+    } else try sctp_transport.nextStreamId();
     try sctp_transport.setDataChannelBufferedAmountLowThreshold(sid, buffer_threshold);
     sctp_transport.streams.putAssumeCapacity(sid, .{ .channel_id = channel_id });
     return sid;
 }
 
-pub fn acceptStream(sctp_transport: *SctpTranport, dc: *const DataChannel, channel_id: DataChannel.ChannelId) WriteError!void {
+pub const AcceptStreamError = OpenStreamError || error{AssocNotConnected};
+
+pub fn acceptStream(sctp_transport: *SctpTranport, dc: *const DataChannel, channel_id: DataChannel.ChannelId) AcceptStreamError!void {
     try sctp_transport.streams.ensureUnusedCapacity(sctp_transport.assoc.allocator, 1);
+    if (sctp_transport.streams.contains(dc.id.?)) return error.NoAvailableStreamId;
     try sctp_transport.handleWrite(dc.writeAckMessage(), .reliable);
     sctp_transport.streams.putAssumeCapacity(dc.id.?, .{ .channel_id = channel_id });
 }

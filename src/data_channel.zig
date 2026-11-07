@@ -37,12 +37,32 @@ pub fn close(dc: DataChannel) std.mem.Allocator.Error!void {
     return dc.pc.closeDataChannel(dc.id);
 }
 
-pub fn getLabel(dc: DataChannel) []const u8 {
+pub fn label(dc: DataChannel) []const u8 {
     return dc.internal().getLabel();
 }
 
-pub fn getProtocol(dc: DataChannel) []const u8 {
+pub fn protocol(dc: DataChannel) []const u8 {
     return dc.internal().getProtocol();
+}
+
+pub fn streamId(dc: DataChannel) ?u16 {
+    return dc.internal().id;
+}
+
+pub fn readyState(dc: DataChannel) State {
+    return dc.internal().ready_state;
+}
+
+pub fn ordered(dc: DataChannel) bool {
+    return dc.internal().ordered;
+}
+
+pub fn maxPacketLifetime(dc: DataChannel) ?u32 {
+    return dc.internal().max_packet_lifetime;
+}
+
+pub fn maxRetransmits(dc: DataChannel) ?u15 {
+    return dc.internal().max_retransmits;
 }
 
 pub fn connect(dc: DataChannel, buffer: []u8) std.mem.Allocator.Error!void {
