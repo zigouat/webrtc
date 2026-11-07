@@ -145,7 +145,7 @@ pub fn addIceServer(transport: *DtlsTransport, addr: Io.net.IpAddress, server: i
     try transport.ice_agent.addServer(addr, server, now);
 }
 
-pub const WriteMediaError = std.mem.Allocator.Error || error{WriteFailed};
+pub const WriteMediaError = std.mem.Allocator.Error || error{ WriteFailed, ConnectionNotConnected };
 
 /// Returns the part of `buffer` packets must be written to, after the TURN header when the
 /// nominated pair is relayed.
@@ -155,13 +155,15 @@ pub fn payloadBuffer(transport: *const DtlsTransport, buffer: []u8) error{WriteF
 }
 
 /// Same as `payloadBuffer`, with room left at the end for the SRTP overhead and TURN padding.
-pub fn rtpPayloadBuffer(transport: *const DtlsTransport, buffer: []u8) error{WriteFailed}![]u8 {
-    return transport.reservedPayloadBuffer(buffer, transport.out_srtp_session.?.rtpOverhead());
+pub fn rtpPayloadBuffer(transport: *const DtlsTransport, buffer: []u8) error{ WriteFailed, ConnectionNotConnected }![]u8 {
+    const srtp_session = if (transport.out_srtp_session) |*session| session else return error.ConnectionNotConnected;
+    return transport.reservedPayloadBuffer(buffer, srtp_session.rtpOverhead());
 }
 
 /// Same as `payloadBuffer`, with room left at the end for the SRTCP overhead and TURN padding.
-pub fn rtcpPayloadBuffer(transport: *const DtlsTransport, buffer: []u8) error{WriteFailed}![]u8 {
-    return transport.reservedPayloadBuffer(buffer, transport.out_srtp_session.?.rtcpOverhead());
+pub fn rtcpPayloadBuffer(transport: *const DtlsTransport, buffer: []u8) error{ WriteFailed, ConnectionNotConnected }![]u8 {
+    const srtp_session = if (transport.out_srtp_session) |*session| session else return error.ConnectionNotConnected;
+    return transport.reservedPayloadBuffer(buffer, srtp_session.rtcpOverhead());
 }
 
 /// Same as `payloadBuffer`, with room left at the end for the DTLS record overhead and TURN padding.
@@ -170,8 +172,9 @@ pub fn appDataPayloadBuffer(transport: *const DtlsTransport, buffer: []u8) error
 }
 
 pub fn writeRtp(transport: *DtlsTransport, buffer: []u8, len: usize) WriteMediaError!webrtc.TransportMessage {
+    const srtp_session = if (transport.out_srtp_session) |*session| session else return error.ConnectionNotConnected;
     const payload = try transport.payloadBuffer(buffer);
-    const data = transport.out_srtp_session.?.encryptRtp(
+    const data = srtp_session.encryptRtp(
         transport.allocator,
         payload[0..len],
         payload,
@@ -183,8 +186,9 @@ pub fn writeRtp(transport: *DtlsTransport, buffer: []u8, len: usize) WriteMediaE
 }
 
 pub fn writeRtcp(transport: *DtlsTransport, buffer: []u8, len: usize) WriteMediaError!webrtc.TransportMessage {
+    const srtp_session = if (transport.out_srtp_session) |*session| session else return error.ConnectionNotConnected;
     const payload = try transport.payloadBuffer(buffer);
-    const data = transport.out_srtp_session.?.encryptRtcp(
+    const data = srtp_session.encryptRtcp(
         transport.allocator,
         payload[0..len],
         payload,

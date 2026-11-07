@@ -230,7 +230,7 @@ const SenderReportIterator = struct {
             if (data.len == 0) continue;
 
             const msg = pc.dtls_transport.writeRtcp(buffer, data.len) catch |err| switch (err) {
-                error.WriteFailed => unreachable,
+                error.WriteFailed, error.ConnectionNotConnected => unreachable,
                 else => |e| return e,
             };
             it.index += 1;
@@ -739,35 +739,17 @@ pub fn pollEvent(pc: *PeerConnection) ?Event {
     return pc.events.popFront();
 }
 
-pub const PollTransmitError = DtlsTransport.WriteMediaError;
+pub const PollTransmitError = std.mem.Allocator.Error || error{WriteFailed};
 
 pub fn pollTransmit(pc: *PeerConnection, buffer: []u8, now: i64) PollTransmitError!?webrtc.TransportMessage {
     if (pc.connection_state == .closed) return pc.pollCloseTransmit(buffer, now);
     if (try pc.dtls_transport.pollTransmit(buffer)) |msg| return msg;
 
-    if (pc.sender_report_it) |*it| {
-        if (try it.next(pc, buffer)) |msg| return msg;
-        pc.sender_report_it = null;
-    }
-
-    if (pc.nack_generator) |*ng| if (ng.hasPendingNacks()) {
-        const payload = try pc.dtls_transport.rtcpPayloadBuffer(buffer);
-        if (try ng.pollTransmit(payload[0..@min(payload.len, constants.max_rtp_payload_size)])) |data| {
-            return try pc.dtls_transport.writeRtcp(buffer, data.len);
-        }
+    const media_msg = pc.pollMediaTransmit(buffer) catch |err| switch (err) {
+        error.ConnectionNotConnected => unreachable,
+        else => |e| return e,
     };
-
-    while (pc.transmits.front()) |entry| switch (entry) {
-        .nack => |sender_id| {
-            const payload = try pc.dtls_transport.rtpPayloadBuffer(buffer);
-            const sender = &pc.transceivers.items[sender_id].sender;
-            const data = try sender.nextNack(payload) orelse {
-                _ = pc.transmits.popFront();
-                continue;
-            };
-            return try pc.dtls_transport.writeRtp(buffer, data.len);
-        },
-    };
+    if (media_msg) |msg| return msg;
 
     return pc.pollSctpTransportTransmit(buffer, now);
 }
@@ -1442,6 +1424,34 @@ fn hasDataChannels(pc: *PeerConnection) bool {
         if (data_channel.ready_state != .closed) return true;
     }
     return false;
+}
+
+fn pollMediaTransmit(pc: *PeerConnection, buffer: []u8) DtlsTransport.WriteMediaError!?webrtc.TransportMessage {
+    if (pc.sender_report_it) |*it| {
+        if (try it.next(pc, buffer)) |msg| return msg;
+        pc.sender_report_it = null;
+    }
+
+    if (pc.nack_generator) |*ng| if (ng.hasPendingNacks()) {
+        const payload = try pc.dtls_transport.rtcpPayloadBuffer(buffer);
+        if (try ng.pollTransmit(payload[0..@min(payload.len, constants.max_rtp_payload_size)])) |data| {
+            return try pc.dtls_transport.writeRtcp(buffer, data.len);
+        }
+    };
+
+    while (pc.transmits.front()) |entry| switch (entry) {
+        .nack => |sender_id| {
+            const payload = try pc.dtls_transport.rtpPayloadBuffer(buffer);
+            const sender = &pc.transceivers.items[sender_id].sender;
+            const data = try sender.nextNack(payload) orelse {
+                _ = pc.transmits.popFront();
+                continue;
+            };
+            return try pc.dtls_transport.writeRtp(buffer, data.len);
+        },
+    };
+
+    return null;
 }
 
 fn openPendingDataChannel(pc: *PeerConnection, channel_id: DataChannel.ChannelId) std.mem.Allocator.Error!void {
