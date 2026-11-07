@@ -73,7 +73,7 @@ const ConnectionContext = struct {
 
             switch (result) {
                 .app_data => |*it| while (it.next() catch return) |msg| {
-                    std.debug.print("[{s}]: {s}\n", .{ conn.pc.getDataChannel(msg.channel_id).getLabel(), msg.data });
+                    std.debug.print("[{s}]: {s}\n", .{ conn.pc.getDataChannel(msg.channel_id).label(), msg.data });
                 },
                 else => {},
             }
@@ -129,11 +129,11 @@ const ConnectionContext = struct {
             .data_channel => |dc_event| switch (dc_event) {
                 .new => |id| {
                     const dc = conn.pc.getDataChannel(id);
-                    std.log.info("New data channel: {s}", .{dc.getLabel()});
+                    std.log.info("New data channel: {s}", .{dc.label()});
                 },
                 .open => |id| {
                     const dc = conn.pc.getDataChannel(id);
-                    std.log.info("Data channel open: {s}", .{dc.getLabel()});
+                    std.log.info("Data channel open: {s}", .{dc.label()});
                     try grp.concurrent(conn.io, sendMessage, .{ conn, id });
                 },
                 .close => |id| std.log.info("Data channel closed: {}", .{id}),
