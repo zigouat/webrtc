@@ -555,23 +555,26 @@ pub fn createDataChannel(pc: *PeerConnection, label: []const u8, params: DataCha
     if (label.len > constants.max_data_channel_label_length) return error.LabelTooLong;
     if (params.protocol.len > constants.max_data_channel_label_length) return error.ProtocolTooLong;
     if (params.max_packet_lifetime != null and params.max_retransmits != null) return error.InvalidParameters;
-    if (params.id != null) return error.InvalidParameters;
 
     try pc.data_channels.ensureUnusedCapacity(pc.allocator, 1);
+    try pc.events.ensureUnusedCapacity(pc.allocator, 1);
     var dc = try InternalDataChannel.init(pc.allocator, label, params);
     errdefer dc.deinit(pc.allocator);
 
     const channel_id: DataChannel.ChannelId = @intCast(pc.data_channels.items.len);
 
     if (pc.sctp_transport.connection_state == .connected) {
-        dc.id = try pc.sctp_transport.openStream(channel_id, dc.buffered_amount_low_threshold);
+        dc.id = try pc.sctp_transport.openStream(channel_id, params.id, dc.buffered_amount_low_threshold);
     }
 
     pc.data_channels.appendAssumeCapacity(dc);
     errdefer _ = pc.data_channels.pop();
 
     const data_channel = pc.getDataChannel(channel_id);
-    if (dc.id != null) try data_channel.connect(pc.int_buffers[packet_size..]);
+    if (params.id != null and pc.sctp_transport.connection_state == .connected) {
+        pc.data_channels.items[channel_id].ready_state = .open;
+        pc.events.pushBackAssumeCapacity(.{ .data_channel = .{ .open = channel_id } });
+    } else if (dc.id != null and params.id == null) try data_channel.connect(pc.int_buffers[packet_size..]);
     return data_channel;
 }
 
@@ -659,36 +662,38 @@ pub const SctpMessageIterator = struct {
     pub fn next(it: *SctpMessageIterator) std.mem.Allocator.Error!?DataChannel.UserMessage {
         const pc = it.pc;
 
-        while (try it.sctp_it.next()) |msg| {
-            switch (msg) {
-                .open => |new_dc| {
-                    var dc = new_dc;
-                    errdefer dc.deinit(pc.allocator);
+        while (try it.sctp_it.next()) |msg| switch (msg) {
+            .open => |new_dc| {
+                var dc = new_dc;
+                errdefer dc.deinit(pc.allocator);
 
-                    try pc.events.ensureUnusedCapacity(pc.allocator, 2);
-                    try pc.data_channels.ensureUnusedCapacity(pc.allocator, 1);
+                try pc.events.ensureUnusedCapacity(pc.allocator, 2);
+                try pc.data_channels.ensureUnusedCapacity(pc.allocator, 1);
 
-                    const id: DataChannel.ChannelId = @intCast(pc.data_channels.items.len);
-                    pc.sctp_transport.acceptStream(&dc, id) catch |err| switch (err) {
-                        error.AssocNotConnected => {
-                            dc.deinit(pc.allocator);
-                            break;
-                        },
-                        else => |e| return e,
-                    };
+                const id: DataChannel.ChannelId = @intCast(pc.data_channels.items.len);
+                pc.sctp_transport.acceptStream(&dc, id) catch |err| switch (err) {
+                    error.AssocNotConnected => {
+                        dc.deinit(pc.allocator);
+                        break;
+                    },
+                    error.NoAvailableStreamId => {
+                        dc.deinit(pc.allocator);
+                        continue;
+                    },
+                    else => |e| return e,
+                };
 
-                    dc.ready_state = .open;
-                    pc.data_channels.appendAssumeCapacity(dc);
-                    pc.events.pushBackAssumeCapacity(.{ .data_channel = .{ .new = id } });
-                    pc.events.pushBackAssumeCapacity(.{ .data_channel = .{ .open = id } });
-                },
-                .ack => |channel_id| _ = try pc.openDataChannel(channel_id),
-                .message => |m| {
-                    if (!try pc.openDataChannel(m.channel_id)) continue;
-                    return .{ .channel_id = m.channel_id, .binary = m.binary, .data = m.data };
-                },
-            }
-        }
+                dc.ready_state = .open;
+                pc.data_channels.appendAssumeCapacity(dc);
+                pc.events.pushBackAssumeCapacity(.{ .data_channel = .{ .new = id } });
+                pc.events.pushBackAssumeCapacity(.{ .data_channel = .{ .open = id } });
+            },
+            .ack => |channel_id| _ = try pc.openDataChannel(channel_id),
+            .message => |m| {
+                if (!try pc.openDataChannel(m.channel_id)) continue;
+                return .{ .channel_id = m.channel_id, .binary = m.binary, .data = m.data };
+            },
+        };
 
         try pc.handleSctpTransportEvents();
         return null;
@@ -1315,20 +1320,13 @@ fn findTransceiverByMid(pc: *PeerConnection, mid: Mid.Int) ?*InternalRtpTranscei
 fn handleSctpTransportEvents(pc: *PeerConnection) std.mem.Allocator.Error!void {
     while (pc.sctp_transport.pollEvent()) |event| switch (event) {
         .connection_state => |state| switch (state) {
-            .connected => for (pc.data_channels.items, 0..) |*dc, idx| {
-                if (dc.id != null or dc.ready_state != .connecting) continue;
-                dc.id = pc.sctp_transport.openStream(
-                    @intCast(idx),
-                    dc.buffered_amount_low_threshold,
-                ) catch |err| switch (err) {
-                    error.NoAvailableStreamId => {
-                        try pc.events.pushBack(pc.allocator, .{ .data_channel = .{ .close = @intCast(idx) } });
-                        dc.ready_state = .closed;
-                        continue;
-                    },
-                    else => |e| return e,
-                };
-                try pc.getDataChannel(@intCast(idx)).connect(pc.int_buffers[packet_size..]);
+            .connected => {
+                for (pc.data_channels.items, 0..) |*dc, idx| {
+                    if (dc.ready_state == .connecting and dc.id != null) try pc.openPendingDataChannel(@intCast(idx));
+                }
+                for (pc.data_channels.items, 0..) |*dc, idx| {
+                    if (dc.ready_state == .connecting and dc.id == null) try pc.openPendingDataChannel(@intCast(idx));
+                }
             },
             .closed => for (pc.data_channels.items, 0..) |*dc, idx| {
                 if (dc.ready_state == .closed) continue;
@@ -1444,6 +1442,26 @@ fn hasDataChannels(pc: *PeerConnection) bool {
         if (data_channel.ready_state != .closed) return true;
     }
     return false;
+}
+
+fn openPendingDataChannel(pc: *PeerConnection, channel_id: DataChannel.ChannelId) std.mem.Allocator.Error!void {
+    try pc.events.ensureUnusedCapacity(pc.allocator, 1);
+    const dc = pc.getInternalDataChannel(channel_id);
+    const negotiated = dc.id != null;
+
+    dc.id = pc.sctp_transport.openStream(channel_id, dc.id, dc.buffered_amount_low_threshold) catch |err| switch (err) {
+        error.NoAvailableStreamId => {
+            dc.ready_state = .closed;
+            pc.events.pushBackAssumeCapacity(.{ .data_channel = .{ .close = channel_id } });
+            return;
+        },
+        else => |e| return e,
+    };
+
+    if (negotiated) {
+        dc.ready_state = .open;
+        pc.events.pushBackAssumeCapacity(.{ .data_channel = .{ .open = channel_id } });
+    } else try pc.getDataChannel(channel_id).connect(pc.int_buffers[packet_size..]);
 }
 
 test {

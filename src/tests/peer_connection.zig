@@ -782,6 +782,15 @@ test "PeerConnection.negotiation between peers: add/remove tracks" {
     try testing.expect(event == null);
 }
 
+test "PeerConnection.createDataChannel: negotiated stream id" {
+    var conn = try Connection.init(.{});
+    defer conn.deinit();
+
+    const dc = try conn.pc.createDataChannel("chat", .{ .id = 42 });
+    try testing.expectEqual(0, dc.id);
+    try testing.expectEqual(42, conn.pc.data_channels.items[dc.id].id);
+}
+
 test "PeerConnection.createDataChannel: invalid parameters" {
     var conn = try Connection.init(.{});
     defer conn.deinit();
@@ -789,7 +798,6 @@ test "PeerConnection.createDataChannel: invalid parameters" {
     const long_label: [257]u8 = @splat('a');
     try testing.expectError(error.LabelTooLong, conn.pc.createDataChannel(&long_label, .{}));
     try testing.expectError(error.ProtocolTooLong, conn.pc.createDataChannel("dc", .{ .protocol = &long_label }));
-    try testing.expectError(error.InvalidParameters, conn.pc.createDataChannel("dc", .{ .id = 1 }));
     try testing.expectError(
         error.InvalidParameters,
         conn.pc.createDataChannel("dc", .{ .max_retransmits = 1, .max_packet_lifetime = 1 }),
