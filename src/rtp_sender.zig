@@ -16,8 +16,8 @@ const InternalRtpSender = @import("pc/internal_rtp_sender.zig");
 const RtpSender = @This();
 
 pub const SenderID = u32;
-pub const StateError = InternalRtpSender.StateError;
-pub const SendRtpError = InternalRtpSender.WriteError || std.mem.Allocator.Error;
+pub const SendRtpError = error{ConnectionNotConnected} || InternalRtpSender.WriteError || std.mem.Allocator.Error;
+pub const SendSampleError = error{ConnectionNotConnected} || InternalRtpSender.StateError;
 
 /// Packetizes and encrypts a media sample.
 ///
@@ -30,7 +30,8 @@ pub const MediaPacketWriterIterator = struct {
     pc: *PeerConnection,
     writer: InternalRtpSender.SamplePacketizerIterator,
 
-    pub fn init(sender: RtpSender, media_packet: *const media.Packet) StateError!MediaPacketWriterIterator {
+    pub fn init(sender: RtpSender, media_packet: *const media.Packet) SendSampleError!MediaPacketWriterIterator {
+        if (sender.pc.dtls_transport.out_srtp_session == null) return error.ConnectionNotConnected;
         return .{
             .pc = sender.pc,
             .writer = try sender.internal().handleMediaPacketWrite(media_packet),
@@ -38,11 +39,14 @@ pub const MediaPacketWriterIterator = struct {
     }
 
     pub fn next(it: *MediaPacketWriterIterator, buffer: []u8, now_us: i64) NextError!?webrtc.TransportMessage {
-        const writable_buffer = try it.pc.dtls_transport.rtpPayloadBuffer(buffer);
+        const writable_buffer = it.pc.dtls_transport.rtpPayloadBuffer(buffer) catch |err| switch (err) {
+            error.ConnectionNotConnected => unreachable,
+            else => |e| return e,
+        };
         const packet = try it.writer.next(writable_buffer, now_us) orelse return null;
         return it.pc.dtls_transport.writeRtp(buffer, packet.len) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.WriteFailed => unreachable,
+            error.WriteFailed, error.ConnectionNotConnected => unreachable,
+            else => |e| return e,
         };
     }
 };
@@ -59,12 +63,12 @@ pub fn sendRtp(rtp_sender: RtpSender, packet: *const rtp.Packet, buffer: []u8, n
     const writable_buffer = try rtp_sender.pc.dtls_transport.rtpPayloadBuffer(buffer);
     const data = try rtp_sender.internal().handleWrite(packet, writable_buffer, now_micro);
     return rtp_sender.pc.dtls_transport.writeRtp(buffer, data.len) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
         error.WriteFailed => unreachable,
+        else => |e| return e,
     };
 }
 
-pub fn sendSample(rtp_sender: RtpSender, sample: *const media.Packet) StateError!MediaPacketWriterIterator {
+pub fn sendSample(rtp_sender: RtpSender, sample: *const media.Packet) SendSampleError!MediaPacketWriterIterator {
     return try MediaPacketWriterIterator.init(rtp_sender, sample);
 }
 
