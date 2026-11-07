@@ -45,6 +45,10 @@ pub fn build(b: *std.Build) void {
             .name = "data_channels_flow_control",
             .root_source_file = b.path("data-channels-flow-control/main.zig"),
         },
+        .{
+            .name = "data_channels_flow_control_multi",
+            .root_source_file = b.path("data-channels-flow-control-multi/main.zig"),
+        },
     };
 
     const build_step = b.step("all", "Build all apps");
