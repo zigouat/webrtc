@@ -12,9 +12,9 @@ const ConnectionContext = struct {
     pc: webrtc.PeerConnection,
     socket: std.Io.net.Socket,
     done: std.Io.Event,
+    gathered: std.Io.Event,
     send_buffer: [1500]u8,
     recv_buffer: [1500]u8,
-    mutex: Io.Mutex,
     prng: std.Random.DefaultCsprng,
     audio_sender: webrtc.RtpSender,
     video_sender: webrtc.RtpSender,
@@ -47,7 +47,7 @@ const ConnectionContext = struct {
         conn.io = io;
         conn.socket = socket;
         conn.done = .unset;
-        conn.mutex = .init;
+        conn.gathered = .unset;
         conn.send_buffer = undefined;
         conn.recv_buffer = undefined;
     }
@@ -58,74 +58,73 @@ const ConnectionContext = struct {
     }
 
     fn onReceive(conn: *ConnectionContext) !void {
+        var now = Io.Timestamp.now(conn.io, .awake).toMilliseconds();
         while (true) {
-            const inc = conn.socket.receive(conn.io, &conn.recv_buffer) catch |err| switch (err) {
-                error.Canceled => return error.Canceled,
-                else => return,
-            };
-
-            const now = Io.Timestamp.now(conn.io, .awake).toMilliseconds();
-            try conn.mutex.lock(conn.io);
-            defer conn.mutex.unlock(conn.io);
-
-            const read_result = conn.pc.handleRead(.{
-                .data = inc.data,
-                .from = &inc.from,
-                .to = &conn.socket.address,
-            }, now) catch continue;
-
-            switch (read_result) {
-                .rtp => |received| {
-                    const receiver = received.@"0";
-                    const sender = if (receiver.getTrack().kind == .video) conn.video_sender else conn.audio_sender;
-
-                    const now_us = Io.Timestamp.now(conn.io, .awake).toMicroseconds();
-                    const msg = sender.sendRtp(
-                        &received.@"1",
-                        &conn.send_buffer,
-                        now_us,
-                    ) catch continue;
-                    conn.socket.send(conn.io, msg.to, msg.data) catch |err| switch (err) {
-                        error.Canceled => return error.Canceled,
-                        else => {},
-                    };
-                },
-                else => {},
-            }
-
             conn.handle(now) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 else => {},
             };
-        }
-    }
 
-    fn onTimeout(conn: *ConnectionContext) !void {
-        while (true) {
-            const now = Io.Timestamp.now(conn.io, .awake).toMilliseconds();
+            const deadline = conn.pc.pollTimeout();
+            const timeout = if (deadline) |d|
+                Io.Timeout{ .deadline = .{ .raw = .fromNanoseconds((d + 1) * std.time.ns_per_ms), .clock = .awake } }
+            else
+                .none;
 
-            const deadline = blk: {
-                try conn.mutex.lock(conn.io);
-                defer conn.mutex.unlock(conn.io);
-
-                _ = conn.pc.handleTimeout(now, 0) catch {};
-                conn.handle(now) catch |err| switch (err) {
-                    error.Canceled => return error.Canceled,
-                    else => {},
-                };
-                break :blk conn.pc.pollTimeout() orelse now + 50;
+            const inc = conn.socket.receiveTimeout(conn.io, &conn.recv_buffer, timeout) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                error.Timeout => null,
+                else => return,
             };
 
-            try conn.io.sleep(.fromMilliseconds(deadline - now), .awake);
+            now = Io.Timestamp.now(conn.io, .awake).toMilliseconds();
+            if (inc) |in| {
+                const read_result = conn.pc.handleRead(.{
+                    .data = in.data,
+                    .from = &in.from,
+                    .to = &conn.socket.address,
+                }, now) catch continue;
+
+                switch (read_result) {
+                    .rtp => |received| {
+                        const receiver = received.@"0";
+                        const sender = if (receiver.getTrack().kind == .video) conn.video_sender else conn.audio_sender;
+
+                        const now_us = Io.Timestamp.now(conn.io, .awake).toMicroseconds();
+                        const msg = sender.sendRtp(
+                            &received.@"1",
+                            &conn.send_buffer,
+                            now_us,
+                        ) catch continue;
+                        conn.socket.send(conn.io, msg.to, msg.data) catch |err| switch (err) {
+                            error.Canceled => return error.Canceled,
+                            else => {},
+                        };
+                    },
+                    else => {},
+                }
+            }
+
+            if (inc == null or (deadline != null and now >= deadline.?)) {
+                conn.pc.handleTimeout(now, Io.Timestamp.now(conn.io, .awake).toMicroseconds()) catch |err| {
+                    std.log.err("Error handling timeout: {}", .{err});
+                    return;
+                };
+            }
         }
     }
 
     fn handle(conn: *ConnectionContext, now: i64) !void {
         while (conn.pc.pollEvent()) |event| switch (event) {
-            .connection_state => |state| switch (state) {
-                .disconnected, .closed, .failed => conn.done.set(conn.io),
-                else => {},
+            .connection_state => |state| {
+                std.log.info("Peer Connection State has changed: {t}", .{state});
+                switch (state) {
+                    .disconnected, .closed, .failed => conn.done.set(conn.io),
+                    else => {},
+                }
             },
+            .track => |ev| std.log.info("Track has started, of type {t}", .{ev.track.kind}),
+            .gathering_state => |state| if (state == .complete) conn.gathered.set(conn.io),
             else => {},
         };
 
@@ -152,14 +151,15 @@ pub fn main(init: std.process.Init) !void {
 
     const offer = try common.utils.readSdpFromStdin(io, init.gpa);
     defer offer.deinit();
-    try conn.pc.setRemoteDescription(offer.value, Io.Timestamp.now(io, .awake).toMilliseconds());
 
+    const now = Io.Timestamp.now(io, .awake).toMilliseconds();
+    try conn.pc.setRemoteDescription(offer.value, now);
     const answer = try conn.pc.createAnswer();
+    defer conn.pc.allocator.free(answer.sdp);
     try conn.pc.setLocalDescription(answer);
-    try common.utils.writeSdpToStdout(io, init.gpa, &conn.pc);
 
     try grp.concurrent(io, ConnectionContext.onReceive, .{&conn});
-    try grp.concurrent(io, ConnectionContext.onTimeout, .{&conn});
-
+    try conn.gathered.wait(io);
+    try common.utils.writeSdpToStdout(io, init.gpa, &conn.pc);
     try conn.done.wait(io);
 }

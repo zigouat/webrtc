@@ -15,6 +15,8 @@ Tested platforms:
 * macOS x86_64/aarch64
 * Windows x86_64 (with zio)
 
+Other platforms may work but are not tested yet.
+
 ## Architecture
 The implementation is a sans-io, the library will not do any I/O, it will only provide the WebRTC API and the user will have to implement the I/O themselves (e.g. sockets, timers, ...etc.).
 
@@ -29,7 +31,7 @@ The end goal is to implement the whole WebRTC API in pure Zig, the current imple
 * Sending and receiving Opus audio streams.
 * Bundling of the above features into a `PeerConnection` API. (Note: only bundling is supported for now, no unbundling yet)
 * RTCP sender report, PLI feedback and NACK/RTX support.
-* Data channels (support for reliable (un)ordered delivery).
+* Data channels.
 
 ## Installation
 Add `webrtc` as a dependency in your `build.zig.zon` file:
@@ -54,7 +56,7 @@ the examples by depending on third party package like [zio](https://github.com/l
 
 ## Other related projects
 
-The following projects are related to WebRTC and some of them used as a dependency in this project:
+The following projects are related to WebRTC and some of them used as dependencies in this project:
 * [media](https://github.com/zigouat/media) - A zig library for media common structures and codecs.
 * [media-protocols](https://github.com/zigouat/media-protocols) - A zig library for media protocols (RTP, RTCP, SDP, etc.).
 * [media-formats](https://github.com/zigouat/media-formats) - A zig library for muxers/demuxers (MP4, IVF, etc.).
