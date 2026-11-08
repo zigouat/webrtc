@@ -35,7 +35,7 @@ The end goal is to implement the whole WebRTC API in pure Zig, the current imple
 Add `webrtc` as a dependency in your `build.zig.zon` file:
 
 ```bash
-zig fetch --save git+https://github.com/zigouat/webrtc.git#v0.1.0
+zig fetch --save git+https://github.com/zigouat/webrtc.git#v0.3.0
 ```
 
 Then, in your `build.zig` file, add the following:
