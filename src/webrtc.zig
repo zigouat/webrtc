@@ -6,7 +6,6 @@ pub const RtpTransceiver = @import("rtp_transceiver.zig");
 pub const RtpSender = @import("rtp_sender.zig");
 pub const RtpReceiver = @import("rtp_receiver.zig");
 pub const SDPSession = @import("sdp_session.zig");
-pub const TimerManager = @import("io/timer_manager.zig");
 
 const std = @import("std");
 const sdp = @import("sdp");

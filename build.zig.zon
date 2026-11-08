@@ -1,6 +1,6 @@
 .{
     .name = .webrtc,
-    .version = "0.2.0",
+    .version = "0.3.0",
     .fingerprint = 0xaf856b418fb19f23,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
@@ -9,12 +9,12 @@
             .hash = "media-0.3.0-qc-dCC4pAQAHSEtFNAIXgeVcf4TAMx5Dgs6skuw5HmRw",
         },
         .media_protocols = .{
-            .url = "git+https://github.com/zigouat/media-protocols.git#3ed592e35aeaa79b4ce21f7a5ac8e9251017d3a2",
-            .hash = "media_protocols-0.2.0-WF_ij-gACABEExFsi7RGi1FtdhOKe6elnDOuSzhewMdW",
+            .url = "git+https://github.com/zigouat/media-protocols.git?ref=v0.3.0#09904b88a7ad89a68fc082b27e8e04f95bfff125",
+            .hash = "media_protocols-0.3.0-WF_ij-gACACEKWmBO0iUwDLEEwxglFkFi7kwnt2RSm-q",
         },
         .sctp = .{
-            .url = "git+https://github.com/zigouat/sctp.git#009c7a524bdf443137d2c729344f21a4ef9d98f9",
-            .hash = "sctp-0.0.0-jRqUYPpPBQBoEm5f19rEgpY7hr-iGvcr58WMllUa5nDW",
+            .url = "git+https://github.com/zigouat/sctp.git?ref=v0.1.0#02c7b49f77ca47c74de0ddc340f4fa988ed1e244",
+            .hash = "sctp-0.1.0-jRqUYAVQBQAqZtQgMp5WSeCksyGi0pfGnXr0_HZnxYEO",
         },
         .mbedtls = .{
             .url = "git+https://github.com/allyourcodebase/mbedtls.git#55f2af148634945e9508a3a50de2ccfe65eb971f",
