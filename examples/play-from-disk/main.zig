@@ -222,7 +222,7 @@ fn doHandleClientConnection(allocator: std.mem.Allocator, conn: *ConnectionConte
         try body_writer.flush();
     } else if (std.mem.eql(u8, req.head.target, "/answer") and req.head.method == .POST) {
         std.log.info("Set remote description", .{});
-        const answer = allocator.alloc(u8, req.head.content_length.?) catch return;
+        const answer = allocator.alloc(u8, @intCast(req.head.content_length.?)) catch return;
         defer allocator.free(answer);
 
         var reader = req.readerExpectNone(&.{});
