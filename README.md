@@ -8,7 +8,7 @@ The project is under active development. The API and even the whole architecture
 The current implementation is not yet production-ready.
 
 ## Supported Zig/Platforms
-Supported Zig version: `0.16.0`.
+Supported Zig version: `0.17.1`.
 
 Tested platforms:
 * Linux x86_64/aarch64

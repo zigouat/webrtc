@@ -156,9 +156,9 @@ pub fn getProtocol(data_channel: *const InternalDataChannel) []const u8 {
 pub fn writeOpenMessage(data_channel: *const InternalDataChannel, buffer: []u8) std.Io.Writer.Error!sctp.message.UserMessage {
     var w = std.Io.Writer.fixed(buffer);
 
-    try w.writeInt(u8, @intFromEnum(MessageType.open), .big);
+    try w.writeInt(u8, @backingInt(MessageType.open), .big);
     const channel_type = data_channel.getChannelType();
-    try w.writeInt(u8, @intFromEnum(channel_type), .big);
+    try w.writeInt(u8, @backingInt(channel_type), .big);
     try w.writeInt(u16, 0, .big); // priority
     try w.writeInt(u32, switch (channel_type) {
         .reliable, .reliable_unordered => 0,
@@ -180,7 +180,7 @@ pub fn writeOpenMessage(data_channel: *const InternalDataChannel, buffer: []u8) 
 
 pub fn writeAckMessage(data_channel: *const InternalDataChannel) sctp.message.UserMessage {
     return sctp.message.UserMessage{
-        .data = &[_]u8{@intFromEnum(MessageType.ack)},
+        .data = &[_]u8{@backingInt(MessageType.ack)},
         .ppid = DCEP_PPID,
         .stream_id = data_channel.id.?,
         .unordered = false,

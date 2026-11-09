@@ -305,7 +305,7 @@ pub const Media = struct {
                 const codecs = sdp_media.rtp_codec_parameters;
                 switch (fb.payload_type) {
                     .all => for (codecs) |*codec| codec.rtp_codec.rtcp_feedbacks.fromSdpRtcpFb(fb),
-                    else => |pt| if (findRtpCodecParameters(codecs, @intFromEnum(pt))) |codec| {
+                    else => |pt| if (findRtpCodecParameters(codecs, @backingInt(pt))) |codec| {
                         codec.rtp_codec.rtcp_feedbacks.fromSdpRtcpFb(fb);
                     },
                 }
