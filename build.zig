@@ -31,6 +31,17 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const tc = b.addTranslateC(.{
+        .optimize = optimize,
+        .target = target,
+        .root_source_file = b.path("src/dtls/c.h"),
+    });
+    tc.addIncludePath(mbedtls_artifact.getEmittedIncludeTree());
+    tc.addConfigHeader(config_header);
+    tc.defineCMacro("MBEDTLS_CONFIG_FILE", "<config.h>");
+    const mbedtls_c = tc.createModule();
+
+    mod.addImport("mbedtls", mbedtls_c);
     mod.linkLibrary(mbedtls_artifact);
     mod.addIncludePath(config_header.getOutputDir());
 
