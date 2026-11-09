@@ -5,16 +5,16 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .media = .{
-            .url = "git+https://github.com/zigouat/media.git?ref=v0.3.0#9dc3065fae941e2c6a33bae02c3407f6fa800762",
-            .hash = "media-0.3.0-qc-dCC4pAQAHSEtFNAIXgeVcf4TAMx5Dgs6skuw5HmRw",
+            .url = "git+https://github.com/zigouat/media.git#c8f2ae19ebac082c8477d0fff4b922e4929bc4d4",
+            .hash = "media-0.3.0-qc-dCH4pAQB-RYfNrbILOp6rsEvIL9m0v2OFAQIgAy1_",
         },
         .media_protocols = .{
-            .url = "git+https://github.com/zigouat/media-protocols.git?ref=v0.3.0#09904b88a7ad89a68fc082b27e8e04f95bfff125",
-            .hash = "media_protocols-0.3.0-WF_ij-gACACEKWmBO0iUwDLEEwxglFkFi7kwnt2RSm-q",
+            .url = "git+https://github.com/zigouat/media-protocols.git#8f7b8baf9d2a1f484301d81b92c9cae0c4b9f106",
+            .hash = "media_protocols-0.3.0-WF_ij6IBCABKtfN_gJUw-I3Mo-TFSr6p2T7kAs7YM7p9",
         },
         .sctp = .{
-            .url = "git+https://github.com/zigouat/sctp.git?ref=v0.1.0#02c7b49f77ca47c74de0ddc340f4fa988ed1e244",
-            .hash = "sctp-0.1.0-jRqUYAVQBQAqZtQgMp5WSeCksyGi0pfGnXr0_HZnxYEO",
+            .url = "git+https://github.com/zigouat/sctp.git#ff4d6f960c8c52d5985b6db236400ea2d58b8cc0",
+            .hash = "sctp-0.1.0-jRqUYCkpBQCZZjIiL2_rF9EXx7IUyL-hloOPuO4SiES0",
         },
         .mbedtls = .{
             .url = "git+https://github.com/allyourcodebase/mbedtls.git#55f2af148634945e9508a3a50de2ccfe65eb971f",

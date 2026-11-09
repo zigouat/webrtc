@@ -2,22 +2,22 @@
     .name = .play_from_disk,
     .version = "0.0.0",
     .fingerprint = 0x4ef12cbc87ee0f79,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .webrtc = .{
             .path = "..",
         },
         .media = .{
-            .url = "git+https://github.com/zigouat/media.git?ref=v0.3.0#9dc3065fae941e2c6a33bae02c3407f6fa800762",
-            .hash = "media-0.3.0-qc-dCC4pAQAHSEtFNAIXgeVcf4TAMx5Dgs6skuw5HmRw",
+            .url = "git+https://github.com/zigouat/media.git#c8f2ae19ebac082c8477d0fff4b922e4929bc4d4",
+            .hash = "media-0.3.0-qc-dCH4pAQB-RYfNrbILOp6rsEvIL9m0v2OFAQIgAy1_",
         },
         .media_protocols = .{
-            .url = "git+https://github.com/zigouat/media-protocols.git?ref=v0.3.0#09904b88a7ad89a68fc082b27e8e04f95bfff125",
-            .hash = "media_protocols-0.3.0-WF_ij-gACACEKWmBO0iUwDLEEwxglFkFi7kwnt2RSm-q",
+            .url = "git+https://github.com/zigouat/media-protocols.git#8f7b8baf9d2a1f484301d81b92c9cae0c4b9f106",
+            .hash = "media_protocols-0.3.0-WF_ij6IBCABKtfN_gJUw-I3Mo-TFSr6p2T7kAs7YM7p9",
         },
         .media_formats = .{
-            .url = "git+https://github.com/zigouat/media-formats.git?ref=v0.2.0#b52a8a283eeb68044fbedb2fa2090ca82cbd0323",
-            .hash = "media_formats-0.2.0-7eZgYcTtDwDQneI_555zK36oB4qH-BM6ia_y4T6PyUku",
+            .url = "git+https://github.com/zigouat/media-formats.git#84fb845b0b811b903ece8e6e253f6f58315c0091",
+            .hash = "media_formats-0.2.0-7eZgYe7tDwDr1vVMyR75DCBJ2FmOqxaE2vuD_4qRtZLf",
         },
     },
     .paths = .{

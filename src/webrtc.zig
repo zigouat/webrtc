@@ -265,45 +265,45 @@ pub const RtcpFeedbacks = packed struct(u8) {
 
     test "fromSdpRtcpFb: nack" {
         var fb: RtcpFeedbacks = .empty;
-        fb.fromSdpRtcpFb(.{ .payload_type = @enumFromInt(96), .value = "nack", .param = "" });
+        fb.fromSdpRtcpFb(.{ .payload_type = @fromBackingInt(@intCast(96)), .value = "nack", .param = "" });
         try testing.expect(fb.nack);
         try testing.expect(!fb.nack_pli);
     }
 
     test "fromSdpRtcpFb: nack pli is case insensitive" {
         var fb: RtcpFeedbacks = .empty;
-        fb.fromSdpRtcpFb(.{ .payload_type = @enumFromInt(96), .value = "NACK", .param = "PLI" });
+        fb.fromSdpRtcpFb(.{ .payload_type = @fromBackingInt(@intCast(96)), .value = "NACK", .param = "PLI" });
         try testing.expect(!fb.nack);
         try testing.expect(fb.nack_pli);
     }
 
     test "fromSdpRtcpFb: transport-cc" {
         var fb: RtcpFeedbacks = .empty;
-        fb.fromSdpRtcpFb(.{ .payload_type = @enumFromInt(96), .value = "transport-cc", .param = "" });
+        fb.fromSdpRtcpFb(.{ .payload_type = @fromBackingInt(@intCast(96)), .value = "transport-cc", .param = "" });
         try testing.expect(fb.transport_cc);
     }
 
     test "fromSdpRtcpFb: ccm fir" {
         var fb: RtcpFeedbacks = .empty;
-        fb.fromSdpRtcpFb(.{ .payload_type = @enumFromInt(96), .value = "ccm", .param = "fir" });
+        fb.fromSdpRtcpFb(.{ .payload_type = @fromBackingInt(@intCast(96)), .value = "ccm", .param = "fir" });
         try testing.expect(fb.ccm_fir);
     }
 
     test "fromSdpRtcpFb: ccm without fir param is ignored" {
         var fb: RtcpFeedbacks = .empty;
-        fb.fromSdpRtcpFb(.{ .payload_type = @enumFromInt(96), .value = "ccm", .param = "" });
+        fb.fromSdpRtcpFb(.{ .payload_type = @fromBackingInt(@intCast(96)), .value = "ccm", .param = "" });
         try testing.expectEqual(RtcpFeedbacks.empty, fb);
     }
 
     test "fromSdpRtcpFb: goog-remb" {
         var fb: RtcpFeedbacks = .empty;
-        fb.fromSdpRtcpFb(.{ .payload_type = @enumFromInt(96), .value = "goog-remb", .param = "" });
+        fb.fromSdpRtcpFb(.{ .payload_type = @fromBackingInt(@intCast(96)), .value = "goog-remb", .param = "" });
         try testing.expect(fb.goog_remb);
     }
 
     test "fromSdpRtcpFb: unknown value is ignored" {
         var fb: RtcpFeedbacks = .empty;
-        fb.fromSdpRtcpFb(.{ .payload_type = @enumFromInt(96), .value = "unknown-fb", .param = "" });
+        fb.fromSdpRtcpFb(.{ .payload_type = @fromBackingInt(@intCast(96)), .value = "unknown-fb", .param = "" });
         try testing.expectEqual(RtcpFeedbacks.empty, fb);
     }
 

@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const stun = @import("stun");
 const utils = @import("../utils.zig");
-const m = @import("c.zig").mtls;
+const m = @import("mbedtls");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
