@@ -150,7 +150,6 @@ const ConnectionContext = struct {
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    defer grp.cancel(io);
 
     var media_engine = webrtc.MediaEngine.init(.{});
     defer media_engine.deinit(init.gpa);
@@ -158,6 +157,7 @@ pub fn main(init: std.process.Init) !void {
     var conn: ConnectionContext = undefined;
     try conn.init(io, init.gpa, &media_engine);
     defer conn.deinit();
+    defer grp.cancel(io);
 
     const offer = try common.utils.readSdpFromStdin(io, init.gpa);
     defer offer.deinit();

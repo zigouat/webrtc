@@ -175,7 +175,6 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     grp = .init;
-    defer grp.cancel(io);
 
     const file_path = blk: {
         var arg_iterator = try init.minimal.args.iterateAllocator(init.gpa);
@@ -195,6 +194,7 @@ pub fn main(init: std.process.Init) !void {
 
     try conn_ctx.init(io, allocator, &media_engine, file_path);
     defer conn_ctx.deinit();
+    defer grp.cancel(io);
 
     try grp.concurrent(io, ConnectionContext.receive, .{&conn_ctx});
     try grp.concurrent(io, ConnectionContext.onTimeout, .{&conn_ctx});

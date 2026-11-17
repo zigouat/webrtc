@@ -20,6 +20,7 @@ pub const SendError = srtp.EncryptError || std.Io.net.Socket.SendError || error{
 pub const Event = union(enum) {
     ice_connection_state: ice.ConnectionState,
     ice_candidate: u8,
+    ice_restarted: void,
     end_of_candidates: void,
     ice_gathering_state: ice.GatheringState,
     dtls_connection_state: dtls.ConnectionState,
@@ -88,34 +89,35 @@ pub fn deinit(transport: *DtlsTransport) void {
 
 pub const ApplyIceAttributesError = std.mem.Allocator.Error || error{InvalidSDP};
 
-pub fn applyIceAttributes(transport: *DtlsTransport, media: *SDPSession.Media, fingerprint: *const [32]u8, now: i64) ApplyIceAttributesError!void {
+pub fn applyIceAttributes(
+    transport: *DtlsTransport,
+    media: *SDPSession.Media,
+    desc_type: webrtc.SessionDescriptionType,
+    now: i64,
+) ApplyIceAttributesError!void {
     Logger.debug("Apply remote credentials and candidates...", .{});
-    const remote_credens = transport.ice_agent.getRemoteCredentials();
-    if (remote_credens) |credens| {
-        if (!std.mem.eql(u8, media.ice_ufrag, credens.username) or !std.mem.eql(u8, media.ice_pwd, credens.password))
-            return error.InvalidSDP;
-    } else {
-        transport.ice_agent.setRemoteCredentials(
-            .{ .username = media.ice_ufrag, .password = media.ice_pwd },
-            now,
-        ) catch |err| switch (err) {
-            error.CredentialsTooLong => return error.InvalidSDP,
-            error.OutOfMemory => |e| return e,
-        };
+    const credentials = ice.Credentials{ .username = media.ice_ufrag, .password = media.ice_pwd };
+    const r = transport.session.random;
 
-        for (media.candidates) |candidate| {
-            if (candidate.component != 1 or candidate.transport == .tcp) continue;
-            try transport.ice_agent.addRemoteCandidate(candidate, now);
-        }
+    transport.ice_agent.setRemoteCredentials(credentials, now) catch |err| switch (err) {
+        error.CredentialsTooLong, error.InvalidCredentials => return error.InvalidSDP,
+        error.RestartRequired => switch (desc_type) {
+            .offer => try transport.restartIceAgent(r, credentials, now),
+            else => return error.InvalidSDP,
+        },
+        error.OutOfMemory => |e| return e,
+    };
 
-        transport.session.setRole(media.setup == .active) catch |err| {
-            Logger.err("Failed to setup dtls session: {}", .{err});
-            transport.session.fail();
-        };
-        try transport.drainEvents(now);
+    for (media.candidates) |candidate| {
+        if (candidate.component != 1 or candidate.transport == .tcp) continue;
+        try transport.ice_agent.addRemoteCandidate(candidate, now);
     }
 
-    transport.session.setPeerFingerprint(fingerprint);
+    transport.session.setRole(media.setup == .active) catch |err| {
+        Logger.err("Failed to setup dtls session: {}", .{err});
+        transport.session.fail();
+    };
+    try transport.drainEvents(now);
 }
 
 pub fn getConnectionState(transport: *const DtlsTransport) struct { ice.ConnectionState, dtls.ConnectionState } {
@@ -270,6 +272,27 @@ fn reservedPayloadBuffer(transport: *const DtlsTransport, buffer: []u8, overhead
     return payload[0 .. payload.len - tail];
 }
 
+fn restartIceAgent(transport: *DtlsTransport, r: std.Random, credentials: ice.Credentials, now: i64) !void {
+    var ice_user: [8]u8 = undefined;
+    var ice_pwd: [24]u8 = undefined;
+    utils.randString(r, &ice_user);
+    utils.randPassword(r, &ice_pwd);
+    transport.ice_agent.restart(
+        .{ .username = ice_user[0..], .password = ice_pwd[0..] },
+        now,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.RestartInProgress, error.Closed => return error.InvalidSDP,
+        else => unreachable,
+    };
+
+    transport.ice_agent.setRemoteCredentials(credentials, now) catch |err| switch (err) {
+        error.CredentialsTooLong, error.InvalidCredentials => return error.InvalidSDP,
+        error.RestartRequired => unreachable,
+        else => |e| return e,
+    };
+}
+
 fn drainEvents(transport: *DtlsTransport, now: i64) std.mem.Allocator.Error!void {
     while (transport.ice_agent.pollEvent()) |event| switch (event) {
         .connection_state => |state| {
@@ -286,6 +309,7 @@ fn drainEvents(transport: *DtlsTransport, now: i64) std.mem.Allocator.Error!void
         .nominated => {
             transport.frame_offset, _ = transport.ice_agent.getDataFrameSize(0);
         },
+        .ice_restarted => try transport.events.pushBack(transport.allocator, .ice_restarted),
     };
 
     while (transport.session.pollEvent()) |event| switch (event) {

@@ -144,6 +144,7 @@ pub const Session = struct {
     }
 
     pub fn setRole(session: *Self, server: bool) !void {
+        if (session.setup) return;
         m.mbedtls_ssl_conf_rng(&session.ssl_conf, mbedtlsRandom, &session.random);
 
         if (m.mbedtls_ssl_config_defaults(
