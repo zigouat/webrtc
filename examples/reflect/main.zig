@@ -139,7 +139,6 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
     var grp: Io.Group = .init;
-    defer grp.cancel(io);
 
     var media_engine = webrtc.MediaEngine.init(.{});
     try media_engine.registerDefaultCodecs(allocator);
@@ -148,6 +147,7 @@ pub fn main(init: std.process.Init) !void {
     var conn: ConnectionContext = undefined;
     try conn.init(io, allocator, &media_engine);
     defer conn.deinit();
+    defer grp.cancel(io);
 
     const offer = try common.utils.readSdpFromStdin(io, init.gpa);
     defer offer.deinit();

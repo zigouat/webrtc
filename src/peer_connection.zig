@@ -127,11 +127,12 @@ pub const TrackEventInit = struct {
 pub const Event = union(enum) {
     negotiation_needed,
     signaling_state: SignalingState,
-    candidate: ?ice.Candidate,
     connection_state: ConnectionState,
-    gathering_state: GatheringState,
     track: TrackEventInit,
     data_channel: DataChannel.Event,
+    candidate: ?ice.Candidate,
+    gathering_state: GatheringState,
+    ice_restarted,
 };
 
 const Transmit = union(enum) {
@@ -844,6 +845,7 @@ fn handleTransportEvents(pc: *PeerConnection) std.mem.Allocator.Error!void {
                 pc.events.pushBackAssumeCapacity(.{ .connection_state = new_state });
             },
             .ice_gathering_state => |state| pc.events.pushBackAssumeCapacity(.{ .gathering_state = state }),
+            .ice_restarted => pc.events.pushBackAssumeCapacity(.ice_restarted),
         }
     }
 }
@@ -1232,7 +1234,8 @@ fn applyRemoteDescription(pc: *PeerConnection, session_desc: *const webrtc.Sessi
             ice_agent.role = if (remote_sdp.ice_lite) .controlling else .controlled;
         }
 
-        try pc.dtls_transport.applyIceAttributes(media, &remote_sdp.fingerprint, now);
+        try pc.dtls_transport.applyIceAttributes(media, session_desc.type, now);
+        pc.dtls_transport.session.setPeerFingerprint(&remote_sdp.fingerprint);
         try pc.handleTransportEvents();
     }
 
