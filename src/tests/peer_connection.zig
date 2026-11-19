@@ -697,6 +697,84 @@ test "PeerConnection.createOffer: multiple offers" {
     try testing.expect(old_mid != sdp_session.getMedias()[1].mid);
 }
 
+test "PeerConnection.createOffer: ice restart" {
+    var conn = try Connection.init(.{});
+    var pc = &conn.pc;
+    defer conn.deinit();
+
+    var peer = try Connection.init(.{});
+    defer peer.deinit();
+
+    _ = try pc.addTrack(.initWithId("video", .video), null);
+    _ = try pc.addTrack(.initWithId("audio", .audio), null);
+    _ = try pc.createDataChannel("dc", .{});
+
+    var old_ufrag_buf: [32]u8 = undefined;
+    var old_pwd_buf: [32]u8 = undefined;
+    const creds = pc.dtls_transport.ice_agent.getLocalCredentials();
+    const old_ufrag = old_ufrag_buf[0..creds.username.len];
+    const old_pwd = old_pwd_buf[0..creds.password.len];
+    @memcpy(old_ufrag, creds.username);
+    @memcpy(old_pwd, creds.password);
+
+    // Ice restart ignored on first offer
+    {
+        const offer = try pc.createOffer(.{ .ice_restart = true });
+        var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
+        defer sdp_session.deinit(testing.allocator);
+
+        try testing.expectEqual(3, sdp_session.getMedias().len);
+        for (sdp_session.getMedias()) |*media| {
+            try testing.expectEqualStrings(old_ufrag, media.ice_ufrag);
+            try testing.expectEqualStrings(old_pwd, media.ice_pwd);
+        }
+
+        try negotiate(pc, &peer.pc);
+    }
+
+    // Ice restart applied on second offer
+    {
+        const offer = try pc.createOffer(.{ .ice_restart = true });
+        var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
+        defer sdp_session.deinit(testing.allocator);
+
+        try testing.expectEqual(3, sdp_session.getMedias().len);
+        for (sdp_session.getMedias()) |*media| {
+            try testing.expect(!std.mem.eql(u8, old_ufrag, media.ice_ufrag));
+            try testing.expect(!std.mem.eql(u8, old_pwd, media.ice_pwd));
+        }
+
+        try pc.setLocalDescription(offer, 0);
+
+        const credentials = pc.dtls_transport.ice_agent.getLocalCredentials();
+        for (pc.pending_local_description.?.session.getMedias()) |*media| {
+            try testing.expectEqual(credentials.username.ptr, media.ice_ufrag.ptr);
+            try testing.expectEqual(credentials.password.ptr, media.ice_pwd.ptr);
+            try testing.expectEqualStrings(sdp_session.getMedias()[0].ice_ufrag, media.ice_ufrag);
+            try testing.expectEqualStrings(sdp_session.getMedias()[0].ice_pwd, media.ice_pwd);
+        }
+    }
+
+    // New ice restart refreshes credentials
+    {
+        const current = pc.dtls_transport.ice_agent.getLocalCredentials();
+        const prev_ufrag = old_ufrag_buf[0..current.username.len];
+        const prev_pwd = old_pwd_buf[0..current.password.len];
+        @memcpy(prev_ufrag, current.username);
+        @memcpy(prev_pwd, current.password);
+
+        const offer = try pc.createOffer(.{ .ice_restart = true });
+        var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
+        defer sdp_session.deinit(testing.allocator);
+
+        try testing.expectEqual(3, sdp_session.getMedias().len);
+        for (sdp_session.getMedias()) |*media| {
+            try testing.expect(!std.mem.eql(u8, prev_ufrag, media.ice_ufrag));
+            try testing.expect(!std.mem.eql(u8, prev_pwd, media.ice_pwd));
+        }
+    }
+}
+
 test "PeerConnection.createAnswer: answer to offer" {
     var conn = try Connection.init(.{});
     var pc = &conn.pc;

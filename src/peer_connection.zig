@@ -407,6 +407,17 @@ pub fn createOffer(pc: *PeerConnection, config: CreateOfferConfig) CreateOfferEr
     return if (first_offer) pc.createFirstOffer() else pc.createSubsequentOffer(config);
 }
 
+pub const RestartIceError = ClosedError || error{RestartInProgress} || std.mem.Allocator.Error;
+
+/// Stages new ICE credentials for the next offer and raises `negotiation_needed`.
+///
+/// See [MDN RTCPeerConnection: restartIce](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/restartIce)
+pub fn restartIce(pc: *PeerConnection) RestartIceError!void {
+    try pc.checkNotClosed();
+    try pc.dtls_transport.stageIceRestart();
+    try pc.checkNegotiationNeeded();
+}
+
 pub const CreateAnswerError = SignalingError || std.mem.Allocator.Error;
 
 /// Creates an answer to a remote offer.
@@ -970,19 +981,24 @@ fn createSubsequentOffer(pc: *PeerConnection, config: CreateOfferConfig) !webrtc
     if (config.ice_restart) try pc.dtls_transport.stageIceRestart();
     errdefer if (config.ice_restart) pc.dtls_transport.discardIceRestart();
 
+    const credentials = pc.dtls_transport.ice_agent.getLocalCredentials();
+    for (sdp_session.getMedias()) |*media| media.setIceCredentials(credentials);
+
     const app_media: ?*SDPSession.Media = blk: {
         for (sdp_session.getMedias()) |*media| if (media.isDataChannel()) break :blk media;
         break :blk null;
     };
 
     const transceivers = pc.transceivers.items;
-    for (transceivers) |*tr| if (tr.sdp_mline_index == null) {
-        if (tr.isStopped()) continue;
-        const media = try pc.recycleOrCreateMedia(&sdp_session, tr);
-        media.* = try tr.toSdpMedia(pc.allocator, pc.media_engine, pc.dtls_transport.ice_agent.getLocalCredentials());
-        media.mid = try Mid.fromInt(pc.mid);
-        pc.mid +%= 1;
-    };
+    for (transceivers) |*tr| {
+        if (tr.sdp_mline_index == null) {
+            if (tr.isStopped()) continue;
+            const media = try pc.recycleOrCreateMedia(&sdp_session, tr);
+            media.* = try tr.toSdpMedia(pc.allocator, pc.media_engine, pc.dtls_transport.ice_agent.getLocalCredentials());
+            media.mid = try Mid.fromInt(pc.mid);
+            pc.mid +%= 1;
+        }
+    }
 
     for (transceivers) |tr| if (tr.sdp_mline_index) |idx| {
         const media = &sdp_session.getMedias()[idx];
@@ -1001,8 +1017,13 @@ fn createSubsequentOffer(pc: *PeerConnection, config: CreateOfferConfig) !webrtc
         error.WriteFailed => return error.OutOfMemory,
     };
 
+    const sdp = try w.toOwnedSlice();
+    errdefer pc.allocator.free(sdp);
+
+    if (config.ice_restart) try pc.checkNegotiationNeeded();
+
     pc.last_offer.deinit(pc.allocator);
-    pc.last_offer = .init(.offer, try w.toOwnedSlice(), sdp_session);
+    pc.last_offer = .init(.offer, sdp, sdp_session);
 
     return pc.last_offer.toSessionDescription();
 }
@@ -1045,7 +1066,7 @@ fn initDataChannelMedia(pc: *PeerConnection, media: *SDPSession.Media) !void {
 }
 
 fn isNegotiationNeeded(pc: *const PeerConnection) bool {
-    // TODO: Check ice restart
+    if (pc.dtls_transport.isIceRestartStaged()) return true;
     const local_desc = pc.local_description orelse return false;
     const remote_desc = pc.remote_description orelse return false;
     for (pc.transceivers.items) |tr| {
@@ -1103,8 +1124,21 @@ fn applyLocalOffer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescript
     if (!std.mem.eql(u8, pc.last_offer.sdp, sess_desc.sdp)) return error.TamperedOffer;
     try pc.events.ensureUnusedCapacity(pc.allocator, 1);
 
-    const offer = pc.last_offer.session;
-    for (offer.getMedias(), 0..) |*media, idx| {
+    const offer = &pc.last_offer.session;
+    var session: SDPSession = .{
+        .fingerprint = offer.fingerprint,
+        .bundle = &.{},
+        .ice_lite = offer.ice_lite,
+        .medias = try .initCapacity(pc.allocator, offer.getMedias().len),
+    };
+    errdefer session.deinit(pc.allocator);
+    for (offer.getMedias()) |*media| session.medias.appendAssumeCapacity(try media.clone(pc.allocator));
+
+    try pc.dtls_transport.applyIceRestart(now);
+
+    const credentials = pc.dtls_transport.ice_agent.getLocalCredentials();
+    for (session.getMedias(), 0..) |*media, idx| {
+        media.setIceCredentials(credentials);
         if (media.isDataChannel()) continue;
         const transceiver = pc.findTransceiverByMediaIndex(idx).?;
         transceiver.mid = media.mid;
@@ -1115,16 +1149,14 @@ fn applyLocalOffer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescript
     }
 
     if (pc.pending_local_description) |*desc| desc.deinit(pc.allocator);
-
     pc.last_answer.deinit(pc.allocator);
-    pc.pending_local_description = pc.last_offer;
+
+    pc.mid +%= @intCast(session.getMedias().len);
+    pc.pending_local_description = .init(.offer, pc.last_offer.sdp, session);
+    pc.last_offer.session.deinit(pc.allocator);
     pc.last_offer = .empty(.offer);
 
-    pc.mid +%= @intCast(offer.getMedias().len);
-    try pc.setSignalingState(.have_local_offer);
-    try pc.dtls_transport.applyIceRestart(now);
-    try pc.events.pushBack(pc.allocator, .negotiation_needed);
-    pc.negotiation_needed = true;
+    pc.setSignalingState(.have_local_offer) catch unreachable;
 }
 
 fn applyLocalAnswer(pc: *PeerConnection, sess_desc: *const webrtc.SessionDescription) !void {

@@ -158,8 +158,12 @@ pub fn discardIceRestart(transport: *DtlsTransport) void {
     transport.ice_agent.discardRestart();
 }
 
+pub fn isIceRestartStaged(transport: *const DtlsTransport) bool {
+    return transport.ice_agent.pending_credentials != null;
+}
+
 pub fn applyIceRestart(transport: *DtlsTransport, now: i64) !void {
-    if (transport.ice_agent.pending_credentials == null) return;
+    if (!transport.isIceRestartStaged()) return;
     try transport.ice_agent.applyRestart(now);
     try transport.drainEvents(now);
 }
