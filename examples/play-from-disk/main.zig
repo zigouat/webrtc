@@ -212,8 +212,8 @@ fn doHandleClientConnection(allocator: std.mem.Allocator, conn: *ConnectionConte
         try req.respond(html_file, .{ .transfer_encoding = .none });
     } else if (std.mem.eql(u8, req.head.target, "/offer") and req.head.method == .GET) {
         std.log.info("Create offer", .{});
-        const offer = try conn.pc.createOffer();
-        try conn.pc.setLocalDescription(offer);
+        const offer = try conn.pc.createOffer(.{});
+        try conn.pc.setLocalDescription(offer, Io.Timestamp.now(conn.io, .awake).toMilliseconds());
 
         var body_writer = try req.respondStreaming(&.{}, .{
             .respond_options = .{ .transfer_encoding = .none },

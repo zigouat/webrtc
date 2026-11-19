@@ -342,7 +342,7 @@ pub fn main(init: std.process.Init) !void {
         try publisher.pc.setRemoteDescription(offer.value, Io.Timestamp.now(io, .awake).toMilliseconds());
 
         const answer = try publisher.pc.createAnswer();
-        try publisher.pc.setLocalDescription(answer);
+        try publisher.pc.setLocalDescription(answer, Io.Timestamp.now(io, .awake).toMilliseconds());
     }
 
     try common.utils.writeSdpToStdout(io, allocator, &publisher.pc);
@@ -371,7 +371,7 @@ pub fn main(init: std.process.Init) !void {
 
         try viewer.pc.setRemoteDescription(offer.value, Io.Timestamp.now(io, .awake).toMilliseconds());
         const answer = try viewer.pc.createAnswer();
-        try viewer.pc.setLocalDescription(answer);
+        try viewer.pc.setLocalDescription(answer, Io.Timestamp.now(io, .awake).toMilliseconds());
 
         try grp.concurrent(io, ViewerConnection.receive, .{viewer});
         try grp.concurrent(io, ViewerConnection.onTimeout, .{viewer});

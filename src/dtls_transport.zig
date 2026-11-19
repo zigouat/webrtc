@@ -138,6 +138,32 @@ pub fn getRole(transport: *const DtlsTransport) dtls.Role {
     return transport.session.getRole();
 }
 
+pub fn stageIceRestart(transport: *DtlsTransport) error{RestartInProgress}!void {
+    var ice_user: [8]u8 = undefined;
+    var ice_pwd: [24]u8 = undefined;
+
+    utils.randString(transport.session.random, &ice_user);
+    utils.randPassword(transport.session.random, &ice_pwd);
+
+    transport.ice_agent.stageRestart(.{
+        .username = ice_user[0..],
+        .password = ice_pwd[0..],
+    }) catch |err| switch (err) {
+        error.RestartInProgress => return error.RestartInProgress,
+        error.Closed, error.CredentialsTooLong => unreachable,
+    };
+}
+
+pub fn discardIceRestart(transport: *DtlsTransport) void {
+    transport.ice_agent.discardRestart();
+}
+
+pub fn applyIceRestart(transport: *DtlsTransport, now: i64) !void {
+    if (transport.ice_agent.pending_credentials == null) return;
+    try transport.ice_agent.applyRestart(now);
+    try transport.drainEvents(now);
+}
+
 pub fn addIceLocalAddrs(transport: *DtlsTransport, addrs: []const Io.net.IpAddress, now: i64) !void {
     try transport.ice_agent.addLocalAddrs(addrs, now);
     try transport.drainEvents(now);

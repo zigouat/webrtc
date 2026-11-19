@@ -156,7 +156,7 @@ pub fn main(init: std.process.Init) !void {
     try conn.pc.setRemoteDescription(offer.value, now);
     const answer = try conn.pc.createAnswer();
     defer conn.pc.allocator.free(answer.sdp);
-    try conn.pc.setLocalDescription(answer);
+    try conn.pc.setLocalDescription(answer, now);
 
     try grp.concurrent(io, ConnectionContext.onReceive, .{&conn});
     try conn.gathered.wait(io);

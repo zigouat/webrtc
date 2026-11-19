@@ -394,12 +394,12 @@ fn innerRunPair(io: Io, allocator: std.mem.Allocator, media_engine: *webrtc.Medi
     defer grp.cancel(io);
 
     const now = Io.Timestamp.now(io, .awake).toMilliseconds();
-    const offer = try offerer.pc.createOffer();
-    try offerer.pc.setLocalDescription(offer);
+    const offer = try offerer.pc.createOffer(.{});
+    try offerer.pc.setLocalDescription(offer, now);
     try answerer.pc.setRemoteDescription(offer, now);
 
     const answer = try answerer.pc.createAnswer();
-    try answerer.pc.setLocalDescription(answer);
+    try answerer.pc.setLocalDescription(answer, now);
     try offerer.pc.setRemoteDescription(answer, now);
 
     try grp.concurrent(io, SenderContext.start, .{&offerer});
