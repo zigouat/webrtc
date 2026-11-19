@@ -164,7 +164,7 @@ pub fn main(init: std.process.Init) !void {
 
     try conn.pc.setRemoteDescription(offer.value, Io.Timestamp.now(io, .awake).toMilliseconds());
     const answer = try conn.pc.createAnswer();
-    try conn.pc.setLocalDescription(answer);
+    try conn.pc.setLocalDescription(answer, Io.Timestamp.now(io, .awake).toMilliseconds());
 
     try common.utils.writeSdpToStdout(io, init.gpa, &conn.pc);
 

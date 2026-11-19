@@ -219,8 +219,8 @@ test "PeerConnection.setLocalDescription: set offer" {
     var pc = &conn.pc;
     defer conn.deinit();
 
-    const offer = try pc.createOffer();
-    try pc.setLocalDescription(offer);
+    const offer = try pc.createOffer(.{});
+    try pc.setLocalDescription(offer, 0);
 
     try conn.expectEvent(.signaling_state, .have_local_offer);
 }
@@ -230,14 +230,14 @@ test "PeerConnection.setLocalDescription: set offer multiple times" {
     var pc = &conn.pc;
     defer conn.deinit();
 
-    var offer = try pc.createOffer();
-    try pc.setLocalDescription(offer);
+    var offer = try pc.createOffer(.{});
+    try pc.setLocalDescription(offer, 0);
 
     _ = try pc.addTrack(.initWithId("video-track", .video), null);
     _ = try pc.addTrack(.initWithId("audio-track", .audio), null);
 
-    offer = try pc.createOffer();
-    try pc.setLocalDescription(offer);
+    offer = try pc.createOffer(.{});
+    try pc.setLocalDescription(offer, 0);
 }
 
 test "PeerConnection.setLocalDescription: invalid state" {
@@ -245,17 +245,17 @@ test "PeerConnection.setLocalDescription: invalid state" {
     var pc = &conn.pc;
     defer conn.deinit();
 
-    try testing.expectError(error.NotImplemented, pc.setLocalDescription(.{ .type = .pranswer, .sdp = "" }));
-    try testing.expectError(error.NotImplemented, pc.setLocalDescription(.{ .type = .rollback, .sdp = "" }));
-    try testing.expectError(error.InvalidState, pc.setLocalDescription(.{ .type = .answer, .sdp = "" }));
+    try testing.expectError(error.NotImplemented, pc.setLocalDescription(.{ .type = .pranswer, .sdp = "" }, 0));
+    try testing.expectError(error.NotImplemented, pc.setLocalDescription(.{ .type = .rollback, .sdp = "" }, 0));
+    try testing.expectError(error.InvalidState, pc.setLocalDescription(.{ .type = .answer, .sdp = "" }, 0));
 
-    const sdp = (try pc.createOffer()).sdp;
-    try pc.setLocalDescription(.{ .type = .offer, .sdp = sdp });
-    try testing.expectError(error.InvalidState, pc.setLocalDescription(.{ .type = .answer, .sdp = sdp }));
+    const sdp = (try pc.createOffer(.{})).sdp;
+    try pc.setLocalDescription(.{ .type = .offer, .sdp = sdp }, 0);
+    try testing.expectError(error.InvalidState, pc.setLocalDescription(.{ .type = .answer, .sdp = sdp }, 0));
 
     try pc.setRemoteDescription(.{ .type = .answer, .sdp = sdp }, 0);
     try pc.setRemoteDescription(.{ .type = .offer, .sdp = sdp }, 0);
-    try testing.expectError(error.InvalidState, pc.setLocalDescription(.{ .type = .offer, .sdp = sdp }));
+    try testing.expectError(error.InvalidState, pc.setLocalDescription(.{ .type = .offer, .sdp = sdp }, 0));
 }
 
 test "PeerConnection.setRemoteDescription: set offer" {
@@ -426,15 +426,15 @@ test "PeerConnection.setRemoteDescription: invalid state" {
     try testing.expectError(error.NotImplemented, pc.setRemoteDescription(.{ .type = .rollback, .sdp = "" }, 0));
     try testing.expectError(error.InvalidState, pc.setRemoteDescription(.{ .type = .answer, .sdp = "" }, 0));
 
-    var sdp = (try pc.createOffer()).sdp;
+    var sdp = (try pc.createOffer(.{})).sdp;
     try pc.setRemoteDescription(.{ .type = .offer, .sdp = sdp }, 0);
     try testing.expectError(error.InvalidState, pc.setRemoteDescription(.{ .type = .answer, .sdp = sdp }, 0));
 
     const answer = try pc.createAnswer();
-    try pc.setLocalDescription(answer);
+    try pc.setLocalDescription(answer, 0);
 
-    sdp = (try pc.createOffer()).sdp;
-    try pc.setLocalDescription(.{ .type = .offer, .sdp = sdp });
+    sdp = (try pc.createOffer(.{})).sdp;
+    try pc.setLocalDescription(.{ .type = .offer, .sdp = sdp }, 0);
     try testing.expectError(error.InvalidState, pc.setRemoteDescription(.{ .type = .offer, .sdp = sdp }, 0));
 }
 
@@ -536,7 +536,7 @@ test "PeerConnection.createOffer: empty offer" {
     var pc = &conn.pc;
     defer conn.deinit();
 
-    const offer = try pc.createOffer();
+    const offer = try pc.createOffer(.{});
     try testing.expectEqual(.offer, offer.type);
 
     const sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
@@ -555,7 +555,7 @@ test "PeerConnection.createOffer: m-lines created for each transceiver" {
     _ = try pc.addTrack(.initWithId("audio", .audio), null);
     _ = try pc.addTrack(.initWithId("video", .video), null);
 
-    const offer = try pc.createOffer();
+    const offer = try pc.createOffer(.{});
     try testing.expectEqual(.offer, offer.type);
 
     var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
@@ -589,10 +589,10 @@ test "PeerConnection.createOffer: candidates skip rejected m-lines" {
     _ = try pc.addTrack(.initWithId("video", .video), null);
     _ = try pc.addTrack(.initWithId("audio", .audio), null);
 
-    try pc.setLocalDescription(try pc.createOffer());
+    try pc.setLocalDescription(try pc.createOffer(.{}), 0);
     try pc.getRtpTransceiver(0).stop();
 
-    const offer = try pc.createOffer();
+    const offer = try pc.createOffer(.{});
     var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
     defer sdp_session.deinit(testing.allocator);
 
@@ -612,7 +612,7 @@ test "PeerConnection.createOffer: enable_rtx synthesizes rtx codecs for video on
     _ = try pc.addTrack(.initWithId("video", .video), null);
     _ = try pc.addTrack(.initWithId("audio", .audio), null);
 
-    const offer = try pc.createOffer();
+    const offer = try pc.createOffer(.{});
     var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
     defer sdp_session.deinit(testing.allocator);
 
@@ -637,7 +637,7 @@ test "PeerConnection.createOffer: enable_rtx defaults to false, never emits rtx 
 
     _ = try pc.addTrack(.initWithId("video", .video), null);
 
-    const offer = try pc.createOffer();
+    const offer = try pc.createOffer(.{});
     var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
     defer sdp_session.deinit(testing.allocator);
 
@@ -656,7 +656,7 @@ test "PeerConnection.createOffer: stopped non-associted transceiver is ignored" 
 
     _ = try pc.addTrack(.initWithId("video", .video), null);
 
-    const offer = try pc.createOffer();
+    const offer = try pc.createOffer(.{});
     try testing.expectEqual(.offer, offer.type);
 
     var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
@@ -673,20 +673,20 @@ test "PeerConnection.createOffer: multiple offers" {
     _ = try pc.addTrack(.initWithId("video", .video), null);
     _ = try pc.addTrack(.initWithId("audio", .audio), null);
 
-    var offer = try pc.createOffer();
-    try pc.setLocalDescription(offer);
+    var offer = try pc.createOffer(.{});
+    try pc.setLocalDescription(offer, 0);
     try pc.getRtpTransceiver(1).stop();
 
-    offer = try pc.createOffer();
+    offer = try pc.createOffer(.{});
     var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
     try testing.expectEqual(2, sdp_session.getMedias().len);
     try testing.expect(sdp_session.getMedias()[1].port == 0);
     const old_mid = sdp_session.getMedias()[1].mid;
 
-    try pc.setLocalDescription(offer);
+    try pc.setLocalDescription(offer, 0);
     _ = try pc.addTrack(.initWithId("video2", .video), null);
 
-    offer = try pc.createOffer();
+    offer = try pc.createOffer(.{});
     sdp_session.deinit(testing.allocator);
     sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
     defer sdp_session.deinit(testing.allocator);
@@ -695,6 +695,84 @@ test "PeerConnection.createOffer: multiple offers" {
     try testing.expectEqual(2, sdp_session.getMedias().len);
     try testing.expect(sdp_session.getMedias()[1].port != 0);
     try testing.expect(old_mid != sdp_session.getMedias()[1].mid);
+}
+
+test "PeerConnection.createOffer: ice restart" {
+    var conn = try Connection.init(.{});
+    var pc = &conn.pc;
+    defer conn.deinit();
+
+    var peer = try Connection.init(.{});
+    defer peer.deinit();
+
+    _ = try pc.addTrack(.initWithId("video", .video), null);
+    _ = try pc.addTrack(.initWithId("audio", .audio), null);
+    _ = try pc.createDataChannel("dc", .{});
+
+    var old_ufrag_buf: [32]u8 = undefined;
+    var old_pwd_buf: [32]u8 = undefined;
+    const creds = pc.dtls_transport.ice_agent.getLocalCredentials();
+    const old_ufrag = old_ufrag_buf[0..creds.username.len];
+    const old_pwd = old_pwd_buf[0..creds.password.len];
+    @memcpy(old_ufrag, creds.username);
+    @memcpy(old_pwd, creds.password);
+
+    // Ice restart ignored on first offer
+    {
+        const offer = try pc.createOffer(.{ .ice_restart = true });
+        var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
+        defer sdp_session.deinit(testing.allocator);
+
+        try testing.expectEqual(3, sdp_session.getMedias().len);
+        for (sdp_session.getMedias()) |*media| {
+            try testing.expectEqualStrings(old_ufrag, media.ice_ufrag);
+            try testing.expectEqualStrings(old_pwd, media.ice_pwd);
+        }
+
+        try negotiate(pc, &peer.pc);
+    }
+
+    // Ice restart applied on second offer
+    {
+        const offer = try pc.createOffer(.{ .ice_restart = true });
+        var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
+        defer sdp_session.deinit(testing.allocator);
+
+        try testing.expectEqual(3, sdp_session.getMedias().len);
+        for (sdp_session.getMedias()) |*media| {
+            try testing.expect(!std.mem.eql(u8, old_ufrag, media.ice_ufrag));
+            try testing.expect(!std.mem.eql(u8, old_pwd, media.ice_pwd));
+        }
+
+        try pc.setLocalDescription(offer, 0);
+
+        const credentials = pc.dtls_transport.ice_agent.getLocalCredentials();
+        for (pc.pending_local_description.?.session.getMedias()) |*media| {
+            try testing.expectEqual(credentials.username.ptr, media.ice_ufrag.ptr);
+            try testing.expectEqual(credentials.password.ptr, media.ice_pwd.ptr);
+            try testing.expectEqualStrings(sdp_session.getMedias()[0].ice_ufrag, media.ice_ufrag);
+            try testing.expectEqualStrings(sdp_session.getMedias()[0].ice_pwd, media.ice_pwd);
+        }
+    }
+
+    // New ice restart refreshes credentials
+    {
+        const current = pc.dtls_transport.ice_agent.getLocalCredentials();
+        const prev_ufrag = old_ufrag_buf[0..current.username.len];
+        const prev_pwd = old_pwd_buf[0..current.password.len];
+        @memcpy(prev_ufrag, current.username);
+        @memcpy(prev_pwd, current.password);
+
+        const offer = try pc.createOffer(.{ .ice_restart = true });
+        var sdp_session = try SDPSession.parse(testing.allocator, offer.sdp);
+        defer sdp_session.deinit(testing.allocator);
+
+        try testing.expectEqual(3, sdp_session.getMedias().len);
+        for (sdp_session.getMedias()) |*media| {
+            try testing.expect(!std.mem.eql(u8, prev_ufrag, media.ice_ufrag));
+            try testing.expect(!std.mem.eql(u8, prev_pwd, media.ice_pwd));
+        }
+    }
 }
 
 test "PeerConnection.createAnswer: answer to offer" {
@@ -709,8 +787,8 @@ test "PeerConnection.createAnswer: answer to offer" {
     _ = try pc.addTrack(.initWithId("video", .video), null);
     _ = try pc.addTrack(.initWithId("audio", .audio), null);
 
-    const offer = try pc.createOffer();
-    try pc.setLocalDescription(offer);
+    const offer = try pc.createOffer(.{});
+    try pc.setLocalDescription(offer, 0);
     try pc2.setRemoteDescription(offer, 0);
 
     const local_addr = std.Io.net.IpAddress{ .ip4 = .loopback(6000) };
@@ -745,8 +823,8 @@ test "PeerConnection.createAnswer: candidates skip rejected m-lines" {
     _ = try pc.addTrack(.initWithId("video", .video), null);
     _ = try pc.addTrack(.initWithId("audio", .audio), null);
 
-    const offer = try pc.createOffer();
-    try pc.setLocalDescription(offer);
+    const offer = try pc.createOffer(.{});
+    try pc.setLocalDescription(offer, 0);
     try pc2.setRemoteDescription(offer, 0);
 
     const local_addr = std.Io.net.IpAddress{ .ip4 = .loopback(6000) };
@@ -777,8 +855,8 @@ test "PeerConnection.createAnswer: reject media in offer" {
     _ = try pc.addTrack(.initWithId("video", .video), null);
     _ = try pc.addTrack(.initWithId("audio", .audio), null);
 
-    const offer = try pc.createOffer();
-    try pc.setLocalDescription(offer);
+    const offer = try pc.createOffer(.{});
+    try pc.setLocalDescription(offer, 0);
     try pc2.setRemoteDescription(offer, 0);
 
     try pc2.getRtpTransceiver(1).stop();
@@ -1142,14 +1220,14 @@ test "PeerConnection.setRemoteDescription: answerer is controlled before its ans
 
     _ = try conn1.pc.addTrack(.init(.video, prng.random()), "stream");
 
-    const offer = try conn1.pc.createOffer();
-    try conn1.pc.setLocalDescription(offer);
+    const offer = try conn1.pc.createOffer(.{});
+    try conn1.pc.setLocalDescription(offer, 0);
     try conn2.pc.setRemoteDescription(offer, 0);
     // Connectivity checks start here, they must not be sent as controlling.
     try testing.expectEqual(.controlled, conn2.pc.dtls_transport.ice_agent.role);
 
     const answer = try conn2.pc.createAnswer();
-    try conn2.pc.setLocalDescription(answer);
+    try conn2.pc.setLocalDescription(answer, 0);
     try conn1.pc.setRemoteDescription(answer, 0);
 
     try testing.expectEqual(.controlled, conn2.pc.dtls_transport.ice_agent.role);
@@ -1176,7 +1254,7 @@ test "PeerConnection.setRemoteDescription: answerer of an ice-lite offer is cont
     defer conn2.deinit();
 
     _ = try conn1.pc.addTrack(.init(.video, prng.random()), "stream");
-    const offer = try conn1.pc.createOffer();
+    const offer = try conn1.pc.createOffer(.{});
 
     const lite_sdp = try std.mem.replaceOwned(u8, allocator, offer.sdp, "t=0 0\n", "t=0 0\na=ice-lite\n");
     defer allocator.free(lite_sdp);
@@ -1186,7 +1264,7 @@ test "PeerConnection.setRemoteDescription: answerer of an ice-lite offer is cont
     try testing.expectEqual(.controlling, conn2.pc.dtls_transport.ice_agent.role);
 
     const answer = try conn2.pc.createAnswer();
-    try conn2.pc.setLocalDescription(answer);
+    try conn2.pc.setLocalDescription(answer, 0);
     try testing.expectEqual(.controlling, conn2.pc.dtls_transport.ice_agent.role);
 }
 
@@ -1211,11 +1289,11 @@ test "PeerConnection.pollTransmit: no media before the dtls handshake" {
 }
 
 fn negotiate(pc1: *PeerConnection, pc2: *PeerConnection) !void {
-    const offer = try pc1.createOffer();
-    try pc1.setLocalDescription(offer);
+    const offer = try pc1.createOffer(.{});
+    try pc1.setLocalDescription(offer, 0);
     try pc2.setRemoteDescription(offer, 0);
 
     const answer = try pc2.createAnswer();
-    try pc2.setLocalDescription(answer);
+    try pc2.setLocalDescription(answer, 0);
     try pc1.setRemoteDescription(answer, 0);
 }

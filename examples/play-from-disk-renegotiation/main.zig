@@ -81,7 +81,7 @@ const ConnectionContext = struct {
 
         try conn.pc.setRemoteDescription(offer, Io.Timestamp.now(conn.io, .awake).toMilliseconds());
         const answer = try conn.pc.createAnswer();
-        try conn.pc.setLocalDescription(answer);
+        try conn.pc.setLocalDescription(answer, Io.Timestamp.now(conn.io, .awake).toMilliseconds());
 
         try grp.concurrent(conn.io, sendMediaData, .{ conn.pc.allocator, conn.file_path, conn, sender });
     }
@@ -93,7 +93,7 @@ const ConnectionContext = struct {
 
             try conn.pc.setRemoteDescription(offer, Io.Timestamp.now(conn.io, .awake).toMilliseconds());
             const answer = try conn.pc.createAnswer();
-            try conn.pc.setLocalDescription(answer);
+            try conn.pc.setLocalDescription(answer, Io.Timestamp.now(conn.io, .awake).toMilliseconds());
         }
     }
 

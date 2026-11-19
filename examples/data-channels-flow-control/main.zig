@@ -170,12 +170,12 @@ pub fn main(init: std.process.Init) !void {
 
     const now = Io.Timestamp.now(io, .awake).toMilliseconds();
 
-    const offer = try offerer.pc.createOffer();
-    try offerer.pc.setLocalDescription(offer);
+    const offer = try offerer.pc.createOffer(.{});
+    try offerer.pc.setLocalDescription(offer, now);
     try answerer.pc.setRemoteDescription(offer, now);
 
     const answer = try answerer.pc.createAnswer();
-    try answerer.pc.setLocalDescription(answer);
+    try answerer.pc.setLocalDescription(answer, now);
     try offerer.pc.setRemoteDescription(answer, now);
 
     try grp.concurrent(io, ConnectionContext.start, .{&offerer});
